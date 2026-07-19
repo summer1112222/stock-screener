@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
     ak.stock_financial_abstract = None  # type: ignore[attr-defined]
     _AK_OK = False
 
-from data import db
+from data import db, fundamentals
 
 
 _CACHE_TTL_DAYS = 7
@@ -128,13 +128,43 @@ def _row_pairs(df: pd.DataFrame, keyword: str) -> list[tuple[str, float]]:
 
 
 def _annual(pairs, latest_only=False):
-    """取年报(报告期以1231结尾)序列。"""
-    ann = [v for p, v in pairs if p.endswith("1231")]
+    """取年报(报告期以1231结尾,容忍带破折号格式)序列。"""
+    ann = [v for p, v in pairs if str(p).replace("-", "").endswith("1231")]
     return ann[0] if (latest_only and ann) else ann
 
 
 def _latest(pairs):
     return pairs[0][1] if pairs else None
+
+
+def _pick_col_sum(df: pd.DataFrame, candidates: list[str]) -> float | None:
+    """从完整财报表(行=报告期,列=科目)取最近年报(报告期 endswith 1231)行的命中科目值。
+    列名模糊匹配(contains),NaN→None。"""
+    if df is None or df.empty:
+        return None
+    date_col = None
+    for c in list(df.columns):
+        if str(c) in ("报告期", "报告日期", "REPORT_DATE", "统计截止日期"):
+            date_col = c
+            break
+    row = None
+    if date_col is not None:
+        for _, r in df.iterrows():
+            if str(r.get(date_col) or "").endswith("1231"):
+                row = r
+                break
+    if row is None:
+        row = df.iloc[0]
+    for col in df.columns:
+        if col == date_col:
+            continue
+        cs = str(col)
+        if any(k in cs for k in candidates):
+            v = pd.to_numeric(pd.Series([row[col]]), errors="coerce").iloc[0]
+            if pd.notna(v):
+                return float(v)
+            return None
+    return None
 
 
 def _spot(code: str) -> dict:
@@ -151,6 +181,22 @@ def analyze(code: str) -> dict:
     res = {"code": code, "name": spot.get("name"), "applies_to": "个股(企业)",
            "note": "护城河来源(品牌/网络/切换成本)需读年报人工判断；PE用年报EPS年化；相对估值为扫描集内横截分位。"}
     res["stale_data"] = bool(stale)
+
+    # best-effort 完整现金流表,取真实 FCF(经营-资本开支)
+    cf_df, cf_stale = fundamentals.fetch(code, "cashflow")
+    real_fcf = None
+    fcf_source = "摘要代理(经营现金流量净额)"
+    if cf_df is not None and not cf_df.empty:
+        ocf = _pick_col_sum(cf_df, ["经营活动产生的现金流量净额",
+                                    "经营活动现金流量净额"])
+        capex = _pick_col_sum(cf_df,
+                              ["购建固定资产、无形资产及其他长期资产支付的现金",
+                               "购建固定资产无形资产和其他长期资产支付的现金"])
+        if ocf is not None:
+            real_fcf = (ocf - capex) if capex is not None else ocf
+            fcf_source = "完整现金流表(经营-资本开支)"
+            if cf_stale:
+                res["stale_data"] = True
 
     roe_p = _row_pairs(df, "净资产收益率")
     gross_p = _row_pairs(df, "毛利率")
@@ -194,9 +240,15 @@ def analyze(code: str) -> dict:
         ratios["eps_annual"] = round(float(eps_ann), 4)
     if bps_latest:
         ratios["bps_latest"] = round(float(bps_latest), 4)
-    if ocf_ann and ni_ann and ni_ann:
+    if real_fcf is not None:
+        ratios["fcf_proxy"] = round(float(real_fcf), 2)
+        ratios["fcf_source"] = fcf_source
+        if ni_ann:
+            ratios["fcf_to_netincome"] = round(float(real_fcf / ni_ann), 2)
+    elif ocf_ann and ni_ann:
         ratios["fcf_proxy"] = round(float(ocf_ann), 2)
-        ratios["fcf_to_netincome"] = round(float(ocf_ann / ni_ann), 2)  # 盈利质量
+        ratios["fcf_source"] = fcf_source
+        ratios["fcf_to_netincome"] = round(float(ocf_ann / ni_ann), 2)
     if gw_latest is not None and eq_latest:
         ratios["goodwill_to_equity_pct"] = round(float(gw_latest / eq_latest * 100), 2)
     res["ratios"] = ratios
