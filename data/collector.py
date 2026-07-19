@@ -27,7 +27,7 @@ except Exception as e:  # pragma: no cover - 装依赖失败时的兜底
 
 from . import db
 from .models import (BOARD_ALIASES, FUND_FLOW_ALIASES, ETF_ALIASES,
-                     STOCK_SPOT_ALIASES)
+                     STOCK_SPOT_ALIASES, ST_LIST_ALIASES)
 
 
 # ------------------------------------------------------------------
@@ -106,8 +106,13 @@ def _normalize(df: pd.DataFrame, aliases: dict) -> pd.DataFrame:
         if key and key not in rename_map.values():
             rename_map[col] = key
     df = df.rename(columns=rename_map)
-    # 只保留规范字段集
-    keep = [v for v in aliases.values() if v in df.columns]
+    # 只保留规范字段集(去重:aliases 同一规范键常含中英两键,致 keep 重复)
+    keep = []
+    seen = set()
+    for v in aliases.values():
+        if v in df.columns and v not in seen:
+            seen.add(v)
+            keep.append(v)
     return df[keep].copy()
 
 
@@ -312,6 +317,25 @@ def fetch_stock_spot() -> tuple[pd.DataFrame, bool, str]:
         return pd.DataFrame(), False, f"stock_spot: 新浪={err_sina}; 东财={e}"
 
 
+def fetch_st_list() -> tuple[pd.DataFrame, bool, str]:
+    """ST/*ST 全名单(东财 stock_zh_a_st_em)。无 THS 备援,被封标不可用不崩。
+    st_type 由 name 前缀解析。"""
+    if not _AK_OK:
+        return pd.DataFrame(), False, _AK_ERR
+    try:
+        df = ak.stock_zh_a_st_em()
+        norm = _normalize(df, ST_LIST_ALIASES)
+        if not norm.empty:
+            def _t(n):
+                s = str(n or "")
+                return "*ST" if s.startswith("*ST") else "ST" if s.startswith("ST") else "其他"
+            norm["st_type"] = norm["name"].map(_t)
+            return norm, True, ""
+        return pd.DataFrame(), False, "st_list: 空结果"
+    except Exception as e:
+        return pd.DataFrame(), False, f"st_list: {e}"
+
+
 # ------------------------------------------------------------------
 # 全量刷新入口
 # ------------------------------------------------------------------
@@ -370,6 +394,16 @@ def refresh_all() -> dict:
     else:
         report["errors"].append(err)
         report["counts"]["stock_spot"] = 0
+
+    # ST 全名单(东财 stock_zh_a_st_em)
+    df, ok, err = fetch_st_list()
+    if ok:
+        n = db.upsert_rows("st_list", _to_records(df))
+        report["counts"]["st_list"] = n
+        n_ok += 1
+    else:
+        report["errors"].append(err)
+        report["counts"]["st_list"] = 0
 
     # 至少有一类成功才算本次刷新有效，更新时间
     if n_ok > 0 or flow_count > 0:
