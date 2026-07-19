@@ -80,3 +80,25 @@ def top_by_amount(days: int = 5, market: str | None = None,
         cur["count"] += 1
     pool = sorted(agg.values(), key=lambda x: x["amount"], reverse=True)[:limit]
     return {"rows": pool, "total": len(pool)}
+
+
+def unlock_by_month(month: str | None = None, code: str | None = None) -> dict:
+    """限售解禁按 as_of 月份查(channel=限售解禁)。
+    month 形如 2026-07;不传取当月。code 非空则再按 code 过滤。as_of 升序。
+
+    合规:主力动向观察清单,机械归类,非荐股非买卖信号。"""
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
+    where, params = ["channel = ?", "as_of LIKE ?"], ["限售解禁", f"{month}%"]
+    if code:
+        where.append("code = ?")
+        params.append(code)
+    rows = db.query_rows("smart_money_action", where=" AND ".join(where),
+                         params=tuple(params), order_by="as_of ASC", limit=0)
+    total_amt = 0.0
+    for r in rows:
+        a = r.get("amount")
+        if a is not None:
+            total_amt += a
+    return {"rows": rows, "total": len(rows),
+            "month": month, "total_amount": total_amt}
