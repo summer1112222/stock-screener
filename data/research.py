@@ -60,8 +60,9 @@ def _normalize_report(df: pd.DataFrame) -> pd.DataFrame:
         if key and key not in rename.values():
             rename[col] = key
     df = df.rename(columns=rename)
-    keep = [v for v in RESEARCH_REPORT_ALIASES.values() if v in df.columns
-            and v != "ts"]
+    keep = list(dict.fromkeys(
+        v for v in RESEARCH_REPORT_ALIASES.values()
+        if v in df.columns and v != "ts"))
     return df[keep].copy() if keep else pd.DataFrame()
 
 
