@@ -1,0 +1,131 @@
+# A股板块/ETF 筛选器 本地配置
+
+# 采集：本地原型用手动触发 /api/refresh；如需自动，可挂定时任务调用 collector.refresh_all()
+collect:
+  # 行业/概念板块
+  boards: [industry, concept]
+  # 板块资金流周期全量抓
+  fund_flow_indicators: [今日, 5日, 10日]   # akshare stock_sector_fund_flow_rank 不支持 20日
+  fund_flow_sectors: [行业, 概念]
+  # ETF 实时行情
+  etf_spot: true
+
+# 预置筛选条件模板 (多因子 AND 组合；因子=筛选条件，不评级不打分不承诺收益)
+# 字段取值见 screener/conditions.py 的 BOARD_FIELDS_CAT / ETF_FIELDS_CAT
+presets:
+  # ---------- 行业板块 ----------
+  - name: 行业·主力净流入为正
+    category: 行业
+    indicator: 今日
+    conditions:
+      - {field: main_net_inflow, op: gt, value: 0}
+    sort: main_net_inflow
+    asc: false
+    limit: 30
+
+  - name: 行业·放量上涨(涨幅>2 且 换手>2)
+    category: 行业
+    indicator: 今日
+    conditions:
+      - {field: change_pct, op: gt, value: 2}
+      - {field: turnover_rate, op: gt, value: 2}
+    sort: change_pct
+    asc: false
+    limit: 20
+
+  - name: 行业·资金与涨幅共振(涨幅>3 且 主力流入>0)
+    category: 行业
+    indicator: 今日
+    conditions:
+      - {field: change_pct, op: gt, value: 3}
+      - {field: main_net_inflow, op: gt, value: 0}
+    sort: main_net_inflow
+    asc: false
+    limit: 20
+
+  - name: 行业·5日强势(5日主力流入>0 且 涨幅>0)
+    category: 行业
+    indicator: 5日
+    conditions:
+      - {field: main_net_inflow, op: gt, value: 0}
+      - {field: change_pct, op: gt, value: 0}
+    sort: main_net_inflow
+    asc: false
+    limit: 30
+
+  - name: 行业·低换手抗跌(涨幅>-1 且 换手<1)
+    category: 行业
+    indicator: 今日
+    conditions:
+      - {field: change_pct, op: gt, value: -1}
+      - {field: turnover_rate, op: lt, value: 1}
+    sort: change_pct
+    asc: false
+    limit: 20
+
+  # ---------- 概念板块 ----------
+  - name: 概念·今日资金流入前20
+    category: 概念
+    indicator: 今日
+    conditions:
+      - {field: main_net_inflow, op: topn, value: 20}
+    sort: main_net_inflow
+    asc: false
+    limit: 20
+
+  - name: 概念·强势题材(涨幅>3 且 超大单流入>0)
+    category: 概念
+    indicator: 今日
+    conditions:
+      - {field: change_pct, op: gt, value: 3}
+      - {field: super_large_net, op: gt, value: 0}
+    sort: super_large_net
+    asc: false
+    limit: 20
+
+  # ---------- ETF ----------
+  - name: ETF·成交额过亿
+    category: ETF
+    conditions:
+      - {field: turnover_amount, op: gt, value: 100000000}
+    sort: turnover_amount
+    asc: false
+    limit: 30
+
+  - name: ETF·放量上涨(涨幅>1 且 成交额>5亿)
+    category: ETF
+    conditions:
+      - {field: change_pct, op: gt, value: 1}
+      - {field: turnover_amount, op: gt, value: 500000000}
+    sort: turnover_amount
+    asc: false
+    limit: 20
+
+  - name: ETF·高换手活跃(换手>5 且 涨幅>0)
+    category: ETF
+    conditions:
+      - {field: turnover_rate, op: gt, value: 5}
+      - {field: change_pct, op: gt, value: 0}
+    sort: turnover_rate
+    asc: false
+    limit: 20
+
+  # ---------- 新因子演示(仍是多因子 AND，不打分不荐股) ----------
+  - name: 行业·上涨家数占优(上涨>50 且 下跌<50)
+    category: 行业
+    indicator: 今日
+    conditions:
+      - {field: up_count, op: gt, value: 50}
+      - {field: down_count, op: lt, value: 50}
+    sort: up_count
+    asc: false
+    limit: 20
+
+  - name: ETF·高活跃(活跃度>10 且 成交额>2亿)
+    category: ETF
+    conditions:
+      - {field: activity, op: gt, value: 10}
+      - {field: turnover_amount, op: gt, value: 200000000}
+    sort: activity
+    asc: false
+    limit: 20

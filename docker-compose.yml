@@ -1,0 +1,19 @@
+# Docker Desktop 用：一键构建并启动筛选器
+services:
+  screener:
+    build: .
+    image: a-screener:local
+    container_name: a-screener
+    ports:
+      - "8000:8000"
+    volumes:
+      - screener-db:/app/var      # 持久化 SQLite，避免容器重启丢数据
+    environment:
+      # 东财 push2 在直连被封时，填你的代理地址即可恢复板块/个股 spot 采集；
+      # 不填则自动降级到 THS/新浪备援(ETF/个股历史仍可用，个股全市场 spot 不可)。
+      # 示例: SCREENER_HTTPS_PROXY=http://host.docker.internal:7890
+      - SCREENER_HTTPS_PROXY=${SCREENER_HTTPS_PROXY:-}
+    restart: unless-stopped
+
+volumes:
+  screener-db:

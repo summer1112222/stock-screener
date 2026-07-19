@@ -1,0 +1,12 @@
+# Docker 构建排除项
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.log
+.venv/
+venv/
+env/
+tests/
+.git/
+.github/
