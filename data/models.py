@@ -94,6 +94,40 @@ STOCK_SPOT_ALIASES = {
     "量比": "volume_ratio", "volume_ratio": "volume_ratio",
 }
 
+# ST 全名单规范字段
+ST_LIST_FIELDS = {
+    "code", "name", "st_type", "latest_price", "change_pct",
+}
+
+# 研报评级规范字段(不含 id,靠 UNIQUE 去 REPLACE)
+RESEARCH_REPORT_FIELDS = {
+    "code", "name", "rating", "title", "org",
+    "analyst", "pub_date", "target_price", "ts",
+}
+
+# 完整财报+千股千评缓存字段(多 source,7 天 TTL)
+FUNDAMENTALS_CACHE_FIELDS = {"code", "source", "payload_json", "ts"}
+
+# ST 全名单 AKShare 列名别名
+ST_LIST_ALIASES = {
+    "代码": "code", "code": "code",
+    "名称": "name", "name": "name",
+    "涨跌幅": "change_pct", "change_pct": "change_pct",
+    "最新价": "latest_price", "latest_price": "latest_price",
+}
+
+# 研报评级 AKShare 列名别名
+RESEARCH_REPORT_ALIASES = {
+    "代码": "code", "股票代码": "code", "code": "code",
+    "名称": "name", "股票简称": "name", "name": "name",
+    "评级": "rating", "投资评级": "rating", "rating": "rating",
+    "研报标题": "title", "标题": "title", "title": "title",
+    "机构": "org", "研究机构": "org", "org": "org",
+    "研究员": "analyst", "分析师": "analyst", "analyst": "analyst",
+    "日期": "pub_date", "研报日期": "pub_date", "pub_date": "pub_date",
+    "目标价": "target_price", "目标价（元）": "target_price",
+}
+
 # ------------------------------------------------------------------
 # SQLite schema
 # ------------------------------------------------------------------
@@ -228,6 +262,37 @@ CREATE TABLE IF NOT EXISTS financial_abstract_cache (
     payload_json TEXT,
     ts TEXT
 );
+
+-- ST 全名单快照(同 spot 模式,code 主键覆盖)
+CREATE TABLE IF NOT EXISTS st_list (
+    code TEXT PRIMARY KEY,
+    name TEXT,
+    st_type TEXT,
+    latest_price REAL,
+    change_pct REAL
+);
+
+-- 研报评级(列表型,多机构同日;靠 UNIQUE 去 REPLACE)
+CREATE TABLE IF NOT EXISTS research_report (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT, name TEXT,
+    rating TEXT,
+    title TEXT,
+    org TEXT,
+    analyst TEXT,
+    pub_date TEXT,
+    target_price REAL,
+    ts TEXT,
+    UNIQUE(code, pub_date, org, title)
+);
+
+-- 完整三大财报+千股千评按需缓存(多 source,7 天 TTL)
+CREATE TABLE IF NOT EXISTS fundamentals_cache (
+    code TEXT, source TEXT,
+    payload_json TEXT,
+    ts TEXT,
+    PRIMARY KEY (code, source)
+);
 """
 
 # 历史日线规范字段集(按表区分主键列名)
@@ -262,4 +327,7 @@ TABLE_FIELDS = {
     "board_daily": BOARD_DAILY_FIELDS,
     "smart_money_action": SMART_MONEY_FIELDS,
     "financial_abstract_cache": FINANCIAL_CACHE_FIELDS,
+    "st_list": ST_LIST_FIELDS,
+    "research_report": RESEARCH_REPORT_FIELDS,
+    "fundamentals_cache": FUNDAMENTALS_CACHE_FIELDS,
 }
