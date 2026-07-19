@@ -81,6 +81,7 @@
   @media (prefers-reduced-motion:reduce){
     *{transition:none!important;animation:none!important}
   }
+  .fcf-tag{display:inline-block;font-size:11px;color:var(--muted);background:rgba(148,163,184,.18);border:1px solid var(--border);border-radius:6px;padding:1px 7px;margin-left:4px}
 </style>
 </head>
 <body>
@@ -297,7 +298,8 @@ const LABEL = {name:'名称',code:'代码',change_pct:'涨跌幅',total_market_c
   activity:'活跃度',momentum:'动量',
   reversal_5:'5日反转',reversal_20:'20日反转',amihud_20:'Amihud非流动性(20日,越小越好)',
   factor:'因子',factor_value:'因子值',close:'现价',pe:'市盈率',pb:'市净率',
-  circulating_market_cap:'流通市值',amplitude:'振幅',volume_ratio:'量比'};
+  circulating_market_cap:'流通市值',amplitude:'振幅',volume_ratio:'量比',
+  fcf_source:'FCF来源'};
 const labelOf = k => LABEL[k] || k;
 
 const fmtNum = v => {
@@ -568,6 +570,7 @@ async function bfRun(){
       ${tag('资产负债率',rt.debt_ratio_latest!=null?rt.debt_ratio_latest+'%':null,rt.debt_ratio_latest<60?'up':'')}
       ${tag('营收增长(区间)',rt.rev_period_growth_pct!=null?rt.rev_period_growth_pct+'%':null)}
       ${tag('盈利收益率',d.earnings_yield_pct!=null?d.earnings_yield_pct+'%':null)}
+      ${rt.fcf_source?`<tr><td>FCF来源</td><td class="num"><span class="fcf-tag">${rt.fcf_source}</span></td></tr>`:''}
       </tbody>
     </table>
     <div class="disc">${d.note||''} ${d.decision||''}</div>`;
@@ -585,7 +588,7 @@ async function bfTop(order='priority'){
   const ths=['代码','名称','护城河','估值','PE','PB','现价','ROE均','毛利率均','净利率均','负债率','FCF/净利','相对分位','优先级','选择理由'].map(h=>`<th class="num">${h}</th>`).join('');
   const trs=d.map(x=>{
     const rs=(x.reasons||[]).map(r=>`<div style="font-size:11px;line-height:1.5;color:var(--muted)">· ${r}</div>`).join('');
-    return `<tr class="clk" data-code="${x.code}"><td>${x.code}</td><td>${x.name||''}</td><td>${x.moat_tag||''}</td><td>${x.valuation_tag||''}</td><td class="num">${x.pe}</td><td class="num">${x.pb}</td><td class="num">${x.latest_price}</td><td class="num">${(x.ratios||{}).roe_avg}</td><td class="num">${(x.ratios||{}).gross_margin_avg}</td><td class="num">${(x.ratios||{}).net_margin_avg}</td><td class="num">${(x.ratios||{}).debt_ratio_latest}</td><td class="num">${(x.ratios||{}).fcf_to_netincome}</td><td class="num">${x.valuation_rel_pct!=null?(x.valuation_rel_pct*100).toFixed(0)+'%':''}</td><td>${x.priority||''}</td><td style="max-width:340px">${rs}</td></tr>`;
+    return `<tr class="clk" data-code="${x.code}"><td>${x.code}</td><td>${x.name||''}</td><td>${x.moat_tag||''}</td><td>${x.valuation_tag||''}</td><td class="num">${x.pe}</td><td class="num">${x.pb}</td><td class="num">${x.latest_price}</td><td class="num">${(x.ratios||{}).roe_avg}</td><td class="num">${(x.ratios||{}).gross_margin_avg}</td><td class="num">${(x.ratios||{}).net_margin_avg}</td><td class="num">${(x.ratios||{}).debt_ratio_latest}</td><td class="num" title="${(x.ratios||{}).fcf_source||'FCF来源未知'}">${(x.ratios||{}).fcf_to_netincome}${(x.ratios||{}).fcf_source?`<span class="fcf-tag">${(x.ratios||{}).fcf_source.includes('摘要')?'摘要':'完整'}</span>`:''}</td><td class="num">${x.valuation_rel_pct!=null?(x.valuation_rel_pct*100).toFixed(0)+'%':''}</td><td>${x.priority||''}</td><td style="max-width:340px">${rs}</td></tr>`;
   }).join('');
   document.getElementById('bfOut').innerHTML=`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
