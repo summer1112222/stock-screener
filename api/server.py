@@ -23,6 +23,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from data import collector, db, history, portfolio, smart_money
+from data import research as research_data
 from screener import engine, smart_money as sm_query
 from screener.conditions import BOARD_FIELDS_CAT, ETF_FIELDS_CAT, STOCK_FIELDS_CAT, OPS
 from backtest import (eval as bt_eval, engine as bt_engine, risk as bt_risk,
@@ -361,6 +362,50 @@ def sm_refresh():
 def sm_channels():
     # channel_status() 叠加 DB 实况，防容器重启后内存态全「未采集」误显灰
     return _wrap(smart_money.channel_status())
+
+
+# ------------------------------------------------------------------
+# ST名单 / 高管增减持 / 限售解禁 / 研报评级 / 千股千评（观察清单口径）
+# ------------------------------------------------------------------
+@app.get("/api/st-list")
+def st_list():
+    rows = db.query_rows("st_list", order_by="st_type, change_pct DESC")
+    return _wrap({"rows": rows}, {"total": len(rows)})
+
+
+@app.get("/api/management")
+def management(days: int = 30):
+    """高管增减持(主力动向观察清单口径)。"""
+    res = sm_query.top_by_amount(days=days, channel="高管增减持", limit=100)
+    return _wrap(res, {"cand_disclaimer": SM_CAND_DISCLAIMER})
+
+
+@app.get("/api/share-unlock")
+def share_unlock(month: str | None = None, code: str | None = None):
+    """限售解禁按 as_of 月份查(主力动向观察清单口径)。"""
+    res = sm_query.unlock_by_month(month=month, code=code)
+    extra = {"cand_disclaimer": SM_CAND_DISCLAIMER}
+    if isinstance(res, dict):
+        for k in ("month", "total_amount", "total"):
+            if k in res:
+                extra[k] = res[k]
+    return _wrap(res, extra)
+
+
+@app.get("/api/research")
+def research(code: str | None = None, days: int = 30, limit: int = 200):
+    """研报评级(机构视角机械汇总,非荐股)。"""
+    res = research_data.query_reports(code=code, days=days, limit=limit)
+    return _wrap(res, {"cand_disclaimer":
+        "机构研报评级机械汇总，非荐股非买卖信号，盈亏自负。"})
+
+
+@app.get("/api/comments")
+def comments(code: str):
+    """千股千评(机构视角机械汇总,非荐股)。"""
+    res = research_data.fetch_comments(code)
+    return _wrap(res, {"cand_disclaimer":
+        "千股千评机构视角机械汇总，非荐股非买卖信号，盈亏自负。"})
 
 
 # ------------------------------------------------------------------
