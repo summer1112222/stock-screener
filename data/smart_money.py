@@ -36,6 +36,8 @@ CHANNEL_STATUS = {
     "十大股东": {"ok": False, "source": "", "err": "未采集", "at": ""},
     "北向": {"ok": False, "source": "", "err": "未采集", "at": ""},
     "资金流": {"ok": False, "source": "", "err": "未采集", "at": ""},
+    "高管增减持": {"ok": False, "source": "", "err": "未采集", "at": ""},
+    "限售解禁": {"ok": False, "source": "", "err": "未采集", "at": ""},
 }
 
 
@@ -314,6 +316,71 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
 
 
 # ------------------------------------------------------------------
+# 高管增减持(按日期全市场)
+# ------------------------------------------------------------------
+def collect_management_hold(date: str) -> tuple[list[dict], bool, str]:
+    """高管增减持(东财 stock_hold_management_em,按日期全市场)。
+    actor=高管名, action=增持/减持, amount=变动金额, raw 存明细。"""
+    if not _AK_OK:
+        return [], False, _AK_ERR
+    try:
+        df = ak.stock_hold_management_em()
+    except Exception as e:
+        _set_status("高管增减持", False, "", _friendly_err("高管增减持", e))
+        return [], False, _friendly_err("高管增减持", e)
+    if df is None or df.empty:
+        _set_status("高管增减持", True, "", "当日无增减持")
+        return [], True, ""
+    col_code = _first_col(df, ["代码", "股票代码", "code"])
+    col_name = _first_col(df, ["名称", "股票简称", "name"])
+    col_actor = _first_col(df, ["变动人", "高管名称", "姓名"])
+    col_action = _first_col(df, ["变动方向", "增减"])
+    col_amt = _first_col(df, ["变动金额", "成交金额", "变动数额"])
+    recs = []
+    for _, r in df.iterrows():
+        act = str(r.get(col_action) or "")
+        action = "增持" if "增持" in act else "减持" if "减持" in act else act
+        recs.append(_rec(date, r.get(col_code), r.get(col_name), "股票",
+                        "高管增减持", r.get(col_actor), action,
+                        r.get(col_amt),
+                        raw={k: _clean(v) for k, v in r.items()}))
+    _set_status("高管增减持", True, "东财", "")
+    return recs, True, ""
+
+
+# ------------------------------------------------------------------
+# 限售解禁(按月份)
+# ------------------------------------------------------------------
+def collect_share_unlock(date: str) -> tuple[list[dict], bool, str]:
+    """限售解禁(东财 stock_share_change_em,按月份)。date 取所在月,
+    拉当月解禁清单;actor=股东, action=解禁, amount=解禁数量, as_of=解禁日期。"""
+    if not _AK_OK:
+        return [], False, _AK_ERR
+    month = date[:7]
+    try:
+        df = ak.stock_share_change_em(symbol=month)
+    except Exception as e:
+        _set_status("限售解禁", False, "", _friendly_err("限售解禁", e))
+        return [], False, _friendly_err("限售解禁", e)
+    if df is None or df.empty:
+        _set_status("限售解禁", True, "", f"{month} 无解禁")
+        return [], True, ""
+    col_code = _first_col(df, ["代码", "股票代码", "code"])
+    col_name = _first_col(df, ["名称", "股票简称", "name"])
+    col_actor = _first_col(df, ["解禁股东", "股东名称"])
+    col_amt = _first_col(df, ["解禁数量", "解禁股数", "实际解禁数量"])
+    col_date = _first_col(df, ["解禁日期", "解禁时间", "公告日期"])
+    recs = []
+    for _, r in df.iterrows():
+        recs.append(_rec(date, r.get(col_code), r.get(col_name), "股票",
+                        "限售解禁", r.get(col_actor), "解禁",
+                        r.get(col_amt), as_of=str(r.get(col_date) or ""),
+                        raw={k: _clean(v) for k, v in r.items()}))
+    _set_status("限售解禁", True, "东财", "")
+    return recs, True, ""
+
+
+# ------------------------------------------------------------------
 # 编排
 # ------------------------------------------------------------------
 def refresh_today(date: str | None = None) -> dict:
@@ -324,7 +391,9 @@ def refresh_today(date: str | None = None) -> dict:
         date = datetime.now().strftime("%Y-%m-%d")
     report = {"date": date, "counts": {}, "channels": {}}
     plan = [("资金流", collect_fund_flow), ("北向", collect_northbound),
-            ("龙虎榜", collect_dragon_tiger), ("十大股东", collect_holders)]
+            ("龙虎榜", collect_dragon_tiger), ("十大股东", collect_holders),
+            ("高管增减持", collect_management_hold),
+            ("限售解禁", collect_share_unlock)]
     for ch, fn in plan:
         try:
             recs, ok, err = fn(date)
