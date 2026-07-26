@@ -28,6 +28,14 @@ from . import db, collector  # noqa: F401  (import collector 触发 _install_htt
 NATIONAL_TEAM = ["中国证券金融", "中央汇金", "全国社保基金",
                  "中证金融", "梧桐树", "国家外汇管理局"]
 
+# 国家队历史重仓股种子（硬编兜底，覆盖小盘/低成交额国家队重仓股——成交额 shortlist 会漏）。
+# 学习式扩充：成功拉取后命中 NATIONAL_TEAM 的 code 并入 meta nt_holdings_seed。
+NATIONAL_TEAM_HOLDINGS_SEED = [
+    "600519", "601318", "600036", "601398", "601288", "601628",
+    "600028", "601857", "600030", "601166", "600276", "000858",
+    "600000", "601988", "601328", "600436", "600009", "601088",
+]
+
 # 各通道最近一次状态，前端据此灰掉不可用通道。
 # 注意：这是内存态，容器重启即归零「未采集」；channel_status() 会叠加 DB 实况
 # （最新日期有行即标 ok），避免重启后明明有数据却全显灰。
@@ -165,6 +173,27 @@ def _prefix_code(code) -> str:
     """6/9 开头→sh，其余→sz（akshare 股东接口要带交易所前缀）。"""
     c = str(code).strip()
     return ("sh" if c.startswith(("6", "9")) else "sz") + c
+
+
+def _load_seed() -> set[str]:
+    """加载国家队种子：硬编常量 ∪ meta nt_holdings_seed（学习扩充）。"""
+    codes = set(NATIONAL_TEAM_HOLDINGS_SEED)
+    try:
+        meta = db.get_meta("nt_holdings_seed", "")
+        if meta:
+            codes |= {c for c in meta.split(",") if c}
+    except Exception:
+        pass
+    return codes
+
+
+def _save_seed(codes: set[str]) -> None:
+    """把新命中国家队重仓的 code 并入种子 meta。"""
+    try:
+        all_codes = _load_seed() | codes
+        db.set_meta("nt_holdings_seed", ",".join(sorted(all_codes)))
+    except Exception:
+        pass
 
 
 def _latest_report_period() -> str:
@@ -500,7 +529,13 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
         spot_df["turnover_amount"] = pd.to_numeric(spot_df["turnover_amount"],
                                                    errors="coerce").fillna(0)
         spot_df = spot_df.sort_values("turnover_amount", ascending=False).head(200)
+    # 候选 = 成交额前200 ∪ 国家队种子（去重，覆盖小盘国家队重仓股）
     candidates = spot_df.to_dict("records")
+    seed_codes = _load_seed()
+    spot_codes = {str(sp.get("code")) for sp in candidates}
+    for sc in seed_codes:
+        if sc not in spot_codes:
+            candidates.append({"code": sc, "name": "种子标的", "turnover_amount": 0})
     as_of = date
     period = _latest_report_period()
     recs = []
@@ -534,6 +569,11 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
         _set_status("十大股东", True, "", "无候选股")
         return [], True, "十大股东: 无候选股"
     db.set_meta("holders_last_as_of", as_of)
+    # 学习式扩充：命中国家队关键字的 code 并入种子
+    hit_codes = {str(rec["code"]) for rec in recs
+                 if rec.get("actor") and any(k in rec["actor"] for k in NATIONAL_TEAM)}
+    if hit_codes:
+        _save_seed(hit_codes)
     _set_status("十大股东", True, "东财", "")
     return recs, True, ""
 

@@ -374,3 +374,47 @@ def test_three_state_channel_light(monkeypatch, tmp_path):
     sm.refresh_today("2026-07-25")
     st_nb = sm.channel_status()["北向"]
     assert st_nb["ok"] is False and not st_nb.get("stale")       # 灰
+
+
+def test_holders_seed_union(monkeypatch, tmp_path):
+    """候选 = 成交额前200 ∪ 种子；覆盖仅种子命中、shortlist 外的国家队小盘股。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    db.upsert_rows("stock_spot", [
+        {"code": "600519", "name": "贵州茅台", "turnover_amount": 1e9},
+        {"code": "601318", "name": "中国平安", "turnover_amount": 8e8}])
+    monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", ["600999"])
+    monkeypatch.setattr(sm, "_load_seed", lambda: set(["600999"]))
+    monkeypatch.setattr(sm, "_save_seed", lambda codes: None)
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    pulled = []
+    def _gdfx(symbol, date):
+        pulled.append(symbol)
+        return pd.DataFrame({"股东名称": ["中央汇金"]})
+    _patch_ak(monkeypatch, stock_gdfx_free_top_10_em=_gdfx)
+    recs, ok, err = sm.collect_holders("2026-07-25")
+    assert ok, err
+    assert any("600999" in p for p in pulled)
+    assert any(r["actor"] == "中央汇金" for r in recs)
+
+
+def test_holders_seed_learning(monkeypatch, tmp_path):
+    """成功拉取后新命中 code 并入种子、落 meta。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    saved = {}
+    monkeypatch.setattr(db, "set_meta", lambda k, v: saved.update({k: v}))
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", ["600999"])
+    monkeypatch.setattr(sm, "_load_seed", lambda: set(["600999"]))
+    monkeypatch.setattr(db, "query_rows", lambda table, **kw:
+        [{"code": "600519", "name": "茅台", "turnover_amount": 1e9}] if table=="stock_spot" else [])
+    def _gdfx(symbol, date):
+        return pd.DataFrame({"股东名称": ["中国证券金融"]})
+    _patch_ak(monkeypatch, stock_gdfx_free_top_10_em=_gdfx)
+    recs, ok, err = sm.collect_holders("2026-07-25")
+    assert ok
+    assert "nt_holdings_seed" in saved
+    assert "600519" in saved["nt_holdings_seed"]
