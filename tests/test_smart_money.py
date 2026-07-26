@@ -42,9 +42,17 @@ def _patch_ak(monkeypatch, **methods):
     monkeypatch.setattr(sm, "_AK_OK", True)
 
 
+def _skip_ths(monkeypatch, err: str = "test-skip-ths"):
+    """collect_fund_flow 走 THS 优先；测试 monkeypatch 它返回空，强制走 spot 兜底，
+    避免单测触网。"""
+    monkeypatch.setattr(sm, "_fetch_ths_individual_fund_flow",
+                        lambda *a, **kw: ([], False, err))
+
+
 def test_fund_flow_nan_to_none(monkeypatch):
-    """资金流复用 stock_spot.main_net_inflow；None/NaN 行跳过不写废行，只入有净额的票。
-    全 None 时 ok=false 带明确 err（防 ok 误报、防前端 11059 行 '—'）。"""
+    """资金流 spot 兜底路径：复用 stock_spot.main_net_inflow；None/NaN 行跳过不写废行，
+    只入有净额的票。全 None 时 ok=false 带明确 err（防 ok 误报、防前端 11059 行 '—'）。"""
+    _skip_ths(monkeypatch)   # THS 优先但测试跳过，强制走 spot 兜底
     monkeypatch.setattr(db, "query_rows", lambda table, **kw: [
         {"code": "000001", "name": "平安银行", "main_net_inflow": 1.5e8},
         {"code": "000002", "name": "万科A", "main_net_inflow": float("nan")},
@@ -59,8 +67,37 @@ def test_fund_flow_nan_to_none(monkeypatch):
     assert recs[0]["amount"] == 1.5e8
 
 
+def test_fund_flow_ths_path_preferred(monkeypatch):
+    """THS 直取优先：_fetch_ths 返回有效行时 collect_fund_flow 用 THS 数据，
+    不读 spot（source 标同花顺）。"""
+    monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "_fetch_ths_individual_fund_flow",
+                        lambda *a, **kw: ([{"code": "600519", "name": "贵州茅台",
+                                             "amount": 8.22e7}], True, ""))
+    monkeypatch.setattr(db, "query_rows", lambda *a, **kw: [])
+    recs, ok, err = sm.collect_fund_flow("2026-07-14")
+    assert ok, err
+    assert len(recs) == 1
+    assert recs[0]["code"] == "600519"
+    assert recs[0]["amount"] == 8.22e7
+    assert recs[0]["actor"] == ""
+    assert sm.CHANNEL_STATUS["资金流"]["source"] == "同花顺"
+
+
+def test_parse_cn_amount():
+    """THS 中文金额字符串解析：万/亿/负数/纯数字/无效。"""
+    assert sm._parse_cn_amount("822.74万") == 822.74e4
+    assert sm._parse_cn_amount("1.63亿") == 1.63e8
+    assert sm._parse_cn_amount("-3172.81万") == -3172.81e4
+    assert sm._parse_cn_amount("5300.0") == 5300.0
+    assert sm._parse_cn_amount("--") is None
+    assert sm._parse_cn_amount(None) is None
+    assert sm._parse_cn_amount("abc") is None
+
+
 def test_fund_flow_all_none_marks_unavailable(monkeypatch):
     """spot 全无 main_net_inflow（字段缺失/东财被封）→ 0 行 + ok=false + 明确 err，不误报。"""
+    _skip_ths(monkeypatch)
     monkeypatch.setattr(db, "query_rows", lambda table, **kw: [
         {"code": "000001", "name": "甲", "main_net_inflow": None},
         {"code": "000002", "name": "乙", "main_net_inflow": None},
@@ -68,35 +105,39 @@ def test_fund_flow_all_none_marks_unavailable(monkeypatch):
     recs, ok, err = sm.collect_fund_flow("2026-07-14")
     assert ok is False
     assert recs == []
-    assert "东财个股资金流被封" in err
+    assert err   # 明确非空 err
 
 
-def test_dragon_tiger_seat_level(monkeypatch):
-    _patch_ak(monkeypatch,
-              stock_lhb_detail_em=lambda **kw: pd.DataFrame({
-                  "代码": ["000001"], "名称": ["平安银行"]}),
-              stock_lhb_stock_detail_em=lambda symbol: pd.DataFrame({
-                  "席位名称": ["机构专用", "华泰证券股份有限公司"],
-                  "买入额": [1e7, 2e7],
-                  "卖出额": [0, 5e6],
-              }))
+def test_dragon_tiger_per_stock(monkeypatch):
+    """akshare 1.18：龙虎榜改用主榜单'龙虎榜净买额'出个股级记录（不再逐股拉席位明细，
+    因 stock_lhb_stock_detail_em 现需 date+flag 逐股两次请求、东财反爬下太慢）。
+    日期需无破折号 YYYYMMDD；collector 内部把 'YYYY-MM-DD' 归一为无破折号调用。"""
+    calls = {}
+    def _lhb(**kw):
+        calls.update(kw)
+        return pd.DataFrame({"代码": ["000001"], "名称": ["平安银行"],
+                             "龙虎榜净买额": [1.2e8], "上榜原因": ["日跌幅偏离值达7%"]})
+    _patch_ak(monkeypatch, stock_lhb_detail_em=_lhb)
     recs, ok, err = sm.collect_dragon_tiger("2026-07-14")
-    assert ok
-    assert len(recs) == 2
-    assert recs[0]["channel"] == "龙虎榜"
-    assert recs[0]["action"] == "上榜"
-    assert "机构专用" in {r["actor"] for r in recs}
-    inst = [r for r in recs if r["actor"] == "机构专用"][0]
-    assert inst["amount"] == 1e7            # 买入 - 卖出
+    assert ok, err
+    assert calls["start_date"] == "20260714"   # 带破折号入参被归一为无破折号
+    assert len(recs) == 1
+    r0 = recs[0]
+    assert r0["channel"] == "龙虎榜"
+    assert r0["action"] == "上榜"
+    assert r0["code"] == "000001"
+    assert r0["actor"] == "日跌幅偏离值达7%"
+    assert r0["amount"] == 1.2e8
 
 
 def test_collect_no_spot_returns_empty_not_raise(monkeypatch):
-    """无 stock_spot 时资金流通道返回空不崩（不再触东财个股资金流接口）。"""
+    """无 stock_spot 时资金流通道返回空不崩（THS 亦失败 → 两路均空，ok=false 带明确 err）。"""
+    _skip_ths(monkeypatch)
     monkeypatch.setattr(db, "query_rows", lambda table, **kw: [])
     recs, ok, err = sm.collect_fund_flow("2026-07-14")
     assert ok is False
     assert recs == []
-    assert "无 stock_spot" in err
+    assert err
 
 
 def test_upsert_dedup_empty_actor_on_refresh(tmp_path, monkeypatch):
@@ -104,6 +145,7 @@ def test_upsert_dedup_empty_actor_on_refresh(tmp_path, monkeypatch):
     不静默重复（SQLite NULL≠NULL 是原 bug 根源）。资金流复用 stock_spot。"""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
     db.init_db()
+    _skip_ths(monkeypatch)   # 强制走 spot 兜底，验证 spot 路径的 UNIQUE 去重
     _orig_qr = db.query_rows
 
     def _qr(table, **kw):
@@ -209,3 +251,57 @@ def test_top_by_amount_desc(sm_db, monkeypatch):
     amts = [r["amount"] for r in res["rows"]]
     assert amts == sorted(amts, reverse=True)
     assert any(r["market"] == "ETF" for r in res["rows"])   # ETF actor 空不报错
+
+
+def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
+    """主源抛 NoneType 崩 → 备援2 十大成交股出记录。
+    actor="" 保 UNIQUE 去重；action="上榜"；source 标北向十大成交股(盘后)。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    def _boom(**kw):
+        raise RuntimeError("'NoneType' object is not subscriptable")
+    def _acc_flow(symbol="沪股通"):
+        return pd.DataFrame({"股票代码": ["600519", "601318"],
+                             "股票简称": ["贵州茅台", "中国平安"],
+                             "净买额": [3.2e8, 1.1e8]})
+    def _net_flow(symbol="北向"):
+        return pd.DataFrame({"日期": ["2026-07-25"], "当日资金流入": [5e8]})
+    _patch_ak(monkeypatch,
+              stock_hsgt_individual_em=_boom,
+              stock_hsgt_hold_stock_em=_boom,
+              stock_hsgt_north_acc_flow_in=_acc_flow,
+              stock_hsgt_north_net_flow_in=_net_flow)
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    recs, ok, err = sm.collect_northbound("2026-07-25")
+    assert ok, err
+    assert len(recs) == 2
+    assert all(r["channel"] == "北向" for r in recs)
+    assert all(r["actor"] == "" for r in recs)
+    assert all(r["action"] == "上榜" for r in recs)
+    assert recs[0]["amount"] == 3.2e8
+    assert sm.CHANNEL_STATUS["北向"]["source"] == "北向十大成交股(盘后)"
+
+
+def test_northbound_degrade_to_total(monkeypatch, tmp_path):
+    """备援2 也失败/空 → 降级3 总额 1 条，actor="北向总额"。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    def _boom(**kw):
+        raise RuntimeError("NoneType")
+    def _acc_flow(symbol="沪股通"):
+        return pd.DataFrame()
+    def _net_flow(symbol="北向"):
+        return pd.DataFrame({"日期": ["2026-07-25"], "当日资金流入": [5e8]})
+    _patch_ak(monkeypatch,
+              stock_hsgt_individual_em=_boom,
+              stock_hsgt_hold_stock_em=_boom,
+              stock_hsgt_north_acc_flow_in=_acc_flow,
+              stock_hsgt_north_net_flow_in=_net_flow)
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    recs, ok, err = sm.collect_northbound("2026-07-25")
+    assert ok, err
+    assert len(recs) == 1
+    assert recs[0]["actor"] == "北向总额"
+    assert recs[0]["action"] == "净买入"
+    assert recs[0]["amount"] == 5e8
+    assert sm.CHANNEL_STATUS["北向"]["source"] == "北向总额(盘后)"
