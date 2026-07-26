@@ -17,6 +17,9 @@ from data import db
 _SPOT_TABLE = {"stock": "stock_spot", "etf": "etf_spot"}
 _CAND_DISCLAIMER = ("多口径共振机械排序观察清单，非荐股非买卖信号，"
                     "不构成投资建议、不承诺收益。市场有风险，盈亏自负。")
+# 结果级缓存(5min TTL)：quality_rank 计算重(历史+buffett+signals)，避免短时重复重算
+_RESULT_CACHE: dict = {}
+_RESULT_TTL = 300.0  # 秒
 
 ETF_BENCHMARK_MAP = {
     "510300": "sh000300", "510310": "sh000300", "510160": "sh000300",
@@ -70,9 +73,10 @@ def _tradable(df: pd.DataFrame, min_turnover: float, limit_pct: float) -> pd.Dat
     return df[mask]
 
 
-def _dim_scores(df, universe, days, min_signals):
+def _dim_scores(df, universe, days, min_signals, close=None):
     """四口径分位。返回 (code->{dim:pct}, dims_available, dim_status)。
-    任一因子源失败→该口径 err、分位 None、不崩。"""
+    任一因子源失败→该口径 err、分位 None、不崩。
+    close=预加载的历史收盘(quality_rank 传，避免口径1/相关性/最小方差各重载一次)。"""
     codes = df["code"].astype(str).tolist() if "code" in df.columns else []
     scores = {c: {} for c in codes}
     dims_avail, status = [], {}
@@ -80,7 +84,8 @@ def _dim_scores(df, universe, days, min_signals):
     # 口径1 风险调整(历史)：波动率(负)/动量/夏普/最大回撤(负)
     try:
         import backtest.eval as bt_eval
-        close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
+        if close is None:
+            close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
         if close is None or close.empty:
             status["1"] = "err:无历史数据，先 /api/backtest/fetch"
         else:
@@ -285,12 +290,15 @@ def _resonance(dim_scores, dim_thresh, weights=None):
     return hits * 10 + avg, hits
 
 
-def _board_of(code, universe, df_spot):
-    """best-effort 取行业/板块：spot 的 board 列 → industry_board 成分兜底。"""
+def _board_of(code, universe, df_spot, board_map=None):
+    """best-effort 取行业/板块：spot 的 board 列 → board_map(预加载) → industry_board 成分兜底。
+    board_map=预加载的 {code:board} 映射，避免每候选查一次 industry_board 全表。"""
     if "board" in df_spot.columns:
         row = df_spot[df_spot["code"].astype(str) == str(code)]
         if not row.empty and pd.notna(row["board"].iloc[0]):
             return str(row["board"].iloc[0])
+    if board_map and str(code) in board_map:
+        return board_map[str(code)]
     if universe == "stock":
         try:
             for b in db.query_rows("industry_board"):
@@ -302,11 +310,15 @@ def _board_of(code, universe, df_spot):
     return "未知"
 
 
-def _corr_matrix(universe, codes):
-    """候选集收益率相关矩阵。无历史返回 None。"""
+def _corr_matrix(universe, codes, close=None):
+    """候选集收益率相关矩阵。无历史返回 None。
+    close=预加载(quality_rank 传，避免重载)。"""
     try:
         import backtest.eval as bt_eval
-        close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
+        if close is None:
+            close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
+        else:
+            close = close.reindex(columns=codes)
         if close is None or close.empty:
             return None
         return close.pct_change().corr()
@@ -314,16 +326,17 @@ def _corr_matrix(universe, codes):
         return None
 
 
-def _min_var_weights(codes: list[str], universe: str) -> list[float]:
+def _min_var_weights(codes: list[str], universe: str, close=None) -> list[float]:
     """最小方差权重解析解 w = Σ⁻¹·1 / (1ᵀ·Σ⁻¹·1)。Σ 奇异降级 1/方差。long-only 归零归一。
-
+    close=预加载(quality_rank 传，避免重载)。
     合规：风险预算机械分配，非推荐仓位。
     额外防护：numpy 对奇异矩阵可能不抛 LinAlgError 而返回含 inf/极大值，
     此时一并降级 1/方差。
     """
     try:
         import backtest.eval as bt_eval
-        close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
+        if close is None:
+            close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
         if close is None or close.empty:
             return [1.0 / len(codes)] * len(codes)
         # load_panel 用 pivot_table(sort=True)→列按字典序非输入 codes 顺序。
@@ -368,13 +381,15 @@ def _min_var_weights(codes: list[str], universe: str) -> list[float]:
 
 
 def _apply_combo(main, universe, df_spot, max_per_board, max_corr, limit,
-                 combo_method="greedy"):
+                 combo_method="greedy", close=None, board_map=None):
     """贪心：按 resonance 降序，行业≤max_per_board + 相关性≤max_corr。
-    combo_method: "greedy" 等权（默认）；"min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。"""
-    corr = _corr_matrix(universe, [r["code"] for r in main]) if max_corr > 0 else None
+    combo_method: "greedy" 等权（默认）；"min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。
+    close/board_map=预加载(quality_rank 传，避免 _corr_matrix/_min_var_weights 重载历史、
+    _board_of 每候选查 industry_board 全表)。"""
+    corr = _corr_matrix(universe, [r["code"] for r in main], close=close) if max_corr > 0 else None
     kept, board_cnt = [], {}
     for it in main:
-        b = _board_of(it["code"], universe, df_spot)
+        b = _board_of(it["code"], universe, df_spot, board_map)
         if board_cnt.get(b, 0) >= max_per_board:
             continue
         if corr is not None and kept:
@@ -394,7 +409,7 @@ def _apply_combo(main, universe, df_spot, max_per_board, max_corr, limit,
         if len(kept) >= limit:
             break
     if combo_method == "min_var" and len(kept) >= 2:
-        ws = _min_var_weights([it["code"] for it in kept], universe)
+        ws = _min_var_weights([it["code"] for it in kept], universe, close=close)
     else:
         ws = [1.0 / len(kept)] * len(kept) if kept else []
     for it, w in zip(kept, ws):
@@ -435,8 +450,33 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
                 "min_dims": min_dims, "cand_disclaimer": _CAND_DISCLAIMER,
                 "error": "tradable 预筛后为空"}
+    # 结果缓存(5min TTL)：计算重(历史+buffett+signals)，避免短时重复重算
+    import time as _time
+    _key = (universe, days, min_dims, dim_thresh, min_turnover, max_per_board,
+            max_corr, limit, min_signals, limit_pct, combo_method)
+    _now = _time.time()
+    _hit = _RESULT_CACHE.get(_key)
+    if _hit and _now - _hit[0] < _RESULT_TTL:
+        return _hit[1]
     codes = df["code"].astype(str).tolist() if "code" in df.columns else []
-    scores, dims_avail, dim_status = _dim_scores(df, universe, days, min_signals)
+    # 性能：历史收盘只加载一次，供口径1/相关性/最小方差共用(原3次→1次)
+    try:
+        import backtest.eval as bt_eval
+        close = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "close")
+    except Exception:
+        close = None
+    # 性能：预加载 industry_board 映射，避免 _board_of 每候选查全表(N→1)
+    board_map = {}
+    if universe == "stock":
+        try:
+            for b in db.query_rows("industry_board"):
+                members = b.get("members") or b.get("stocks") or []
+                nm = b.get("name", "未知")
+                for m in members:
+                    board_map.setdefault(str(m), nm)
+        except Exception:
+            pass
+    scores, dims_avail, dim_status = _dim_scores(df, universe, days, min_signals, close=close)
     eff_min_dims = min(min_dims, len(dims_avail)) if dims_avail else 0
     enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4)}
     for c in codes:
@@ -456,7 +496,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     main = [it for it in enriched if it["hits"] >= eff_min_dims]
     main.sort(key=lambda x: x["resonance"] or 0, reverse=True)
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
-                        combo_method=combo_method)
+                        combo_method=combo_method, close=close, board_map=board_map)
 
     def _clean_item(it):
         it["reasons"] = _build_reasons(it)
@@ -466,7 +506,9 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
 
     main = [_clean_item(it) for it in main]
     by_dim = {d: [_clean_item(it) for it in lst] for d, lst in by_dim.items()}
-    return {"main": main, "by_dim": by_dim, "dims_available": dims_avail,
-            "dim_status": dim_status, "min_dims": eff_min_dims,
-            "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4)},
-            "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
+    result = {"main": main, "by_dim": by_dim, "dims_available": dims_avail,
+              "dim_status": dim_status, "min_dims": eff_min_dims,
+              "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4)},
+              "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
+    _RESULT_CACHE[_key] = (_now, result)
+    return result

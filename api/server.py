@@ -515,12 +515,14 @@ def comments(code: str):
 def quality_screen(universe: str = Query("stock"), days: int = Query(20),
                    min_dims: int = Query(2), min_turnover: float = Query(5e7),
                    max_per_board: int = Query(3), max_corr: float = Query(0.85),
-                   limit: int = Query(20), combo_method: str = Query("greedy")):
+                   limit: int = Query(20), combo_method: str = Query("greedy"),
+                   dim_thresh: float = Query(0.6, ge=0.0, le=1.0)):
     from backtest import quality
     res = quality.quality_rank(
         universe=universe, days=days, min_dims=min_dims,
         min_turnover=min_turnover, max_per_board=max_per_board,
-        max_corr=max_corr, limit=limit, combo_method=combo_method)
+        max_corr=max_corr, limit=limit, combo_method=combo_method,
+        dim_thresh=dim_thresh)
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
 

@@ -246,7 +246,10 @@
         <div class="f"><label>窗口</label><select id="qsDays" class="btn ghost"><option>20</option><option>40</option><option>60</option></select></div>
         <div class="f"><label>数量</label><select id="qsLimit" class="btn ghost"><option>10</option><option selected>20</option><option>30</option></select></div>
         <div class="f"><label>最少口径</label><select id="qsMinDims" class="btn ghost"><option>1</option><option selected>2</option><option>3</option></select></div>
-        <div class="f"><label>组合</label><select id="qsCombo" class="btn ghost"><option value="greedy">贪心</option><option value="min_var">最小方差</option></select></div>
+        <div class="f"><label>组合</label><select id="qsCombo" class="btn ghost" title="贪心=等权+行业≤上限+相关性≤上限；最小方差=风险预算机械分配(非推荐仓位)"><option value="greedy">贪心(等权)</option><option value="min_var">最小方差</option></select></div>
+        <div class="f"><label>共振阈值</label><select id="qsThresh" class="btn ghost" title="口径分位≥此值才算命中(共振)"><option>0.4</option><option>0.5</option><option selected>0.6</option><option>0.7</option><option>0.8</option></select></div>
+        <div class="f"><label>行业≤</label><select id="qsBoard" class="btn ghost" title="组合内同行业最多N只(分散)"><option>1</option><option>2</option><option selected>3</option><option>4</option></select></div>
+        <div class="f"><label>相关性≤</label><select id="qsCorr" class="btn ghost" title="组合内两两相关≤此值(去冗余)"><option>0.7</option><option>0.8</option><option selected>0.85</option><option>0.9</option><option>0.95</option></select></div>
         <button class="btn ghost" id="qsRun" type="button">筛选优质清单</button>
         <span id="qsDims" style="font-size:12px;color:var(--muted)"></span>
       </div>
@@ -720,45 +723,76 @@ document.getElementById('smRefresh').onclick=smRefresh;
 // smart tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------
+const qsState={raw:[],sortKey:'resonance',sortDir:'desc',dimSortKey:'resonance',dimSortDir:'desc'};
 async function qsLoad(){
   const uni=document.getElementById('qsUniverse').value;
   const days=document.getElementById('qsDays').value;
   const limit=document.getElementById('qsLimit').value;
   const min_dims=document.getElementById('qsMinDims').value;
   const combo=document.getElementById('qsCombo').value;
+  const thresh=document.getElementById('qsThresh').value;
+  const board=document.getElementById('qsBoard').value;
+  const corr=document.getElementById('qsCorr').value;
   const btn=document.getElementById('qsRun');
-  btn.disabled=true; document.getElementById('qsMsg').textContent='加载中(buffett/历史较慢，耐心等)...';
+  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett/历史/信号较慢，首次约几十秒；5分钟内重复会缓存秒回)...';
   try{
-    const r=await fetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}`).then(r=>r.json());
+    const r=await fetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`).then(r=>r.json());
     const d=r.data||{};
+    const dt=((Date.now()-t0)/1000).toFixed(1);
     document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
-    document.getElementById('qsDims').textContent='可用口径: '+((d.dims_available||[]).join(',')||'无')+'；主清单'+(d.main||[]).length+'只';
+    document.getElementById('qsDims').textContent='可用口径: '+((d.dims_available||[]).join(',')||'无')+'；主清单'+(d.main||[]).length+'只；耗时'+dt+'s'+(dt<2?' (缓存命中)':'');
     const ds=d.dim_status||{};
     document.getElementById('qsMsg').innerHTML = d.error?('错误: '+d.error) :
       Object.entries(ds).map(([k,v])=>{const ok=(v||'').startsWith('ok');return `<span style="color:${ok?'#16A34A':'#F59E0B'};font-size:12px;margin-right:8px" title="${v}">●口径${k}: ${(v||'').slice(0,30)}</span>`;}).join('');
-    const main=d.main||[];
-    const showW = combo==='min_var';
-    const heads=['代码','名称','共振','命中','分位(1/2/3/4)'];if(showW)heads.push('权重');heads.push('理由');
-    const ths=heads.map(h=>`<th>${h}</th>`).join('');
-    const trs=main.length?main.map(x=>{
-      const ds2=x.dim_scores||{};
-      const wcol = showW?`<td class="num">${x.weight!=null?(+x.weight*100).toFixed(1)+'%':'—'}</td>`:'';
-      return `<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td><td class="num">${x.hits||0}</td><td>${[1,2,3,4].map(k=>ds2[k]!=null?(+ds2[k]).toFixed(2):'—').join('/')}</td>${wcol}<td style="font-size:12px">${(x.reasons||[]).join('；')}</td></tr>`;
-    }).join(''):'';
-    const byDim=d.by_dim||{};
-    const dimNames={1:'风险调整',2:'价值质量',3:'资金流向',4:'多信号'};
-    const dimHtml=Object.entries(byDim).map(([k,lst])=>{
-      if(!lst||!lst.length) return '';
-      const rows=lst.slice(0,10).map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td></tr>`).join('');
-      return `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">口径${k} ${dimNames[k]} (${lst.length})</summary><table><thead><tr><th>代码</th><th>名称</th><th class="num">共振</th></tr></thead><tbody>${rows}</tbody></table></details>`;
-    }).join('');
-    document.getElementById('qsOut').innerHTML=trs?`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>${dimHtml}`:'<div class="empty">无共振清单(口径不足或历史未拉，先 /api/backtest/fetch；stock 口径2 需 akshare 财务摘要，东财被封时可能失败)</div>';
+    qsState.raw = d;
+    qsRender();
   }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时: '+e; }
   finally{ btn.disabled=false; }
+}
+function _qscmp(a,b,k,dir){
+  const va=a[k],vb=b[k];
+  if(typeof va==='number'||typeof vb==='number'){const na=va??0,nb=vb??0;return dir==='desc'?nb-na:na-nb;}
+  return dir==='desc'?String(vb??'').localeCompare(String(va??'')):String(va??'').localeCompare(String(vb??''));
+}
+function qsRender(){
+  const d=qsState.raw||{};
+  const main=[...(d.main||[])];
+  const combo=(document.getElementById('qsCombo')||{}).value||'greedy';
+  const SK=qsState.sortKey,SD=qsState.sortDir;
+  const _arr=k=>SK===k?(SD==='desc'?' ▼':' ▲'):'';
+  main.sort((a,b)=>_qscmp(a,b,SK,SD));
+  const showW = combo==='min_var';
+  const cols=[['code','代码'],['name','名称'],['resonance','共振'],['hits','命中'],['dim_scores','分位(1/2/3/4)']];
+  if(showW)cols.push(['weight','权重']);
+  cols.push(['reasons','理由']);
+  const ths=cols.map(([k,h])=>k==='dim_scores'?`<th class="num">${h}</th>`:`<th class="num" data-qk="${k}" style="cursor:pointer;user-select:none">${h}${_arr(k)}</th>`).join('');
+  const trs=main.length?main.map(x=>{
+    const ds2=x.dim_scores||{};
+    const wcol = showW?`<td class="num">${x.weight!=null?(+x.weight*100).toFixed(1)+'%':'—'}</td>`:'';
+    return `<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td><td class="num">${x.hits||0}</td><td>${[1,2,3,4].map(k=>ds2[k]!=null?(+ds2[k]).toFixed(2):'—').join('/')}</td>${wcol}<td style="font-size:12px">${(x.reasons||[]).join('；')}</td></tr>`;
+  }).join(''):'';
+  const byDim=d.by_dim||{};
+  const dimNames={1:'风险调整',2:'价值质量',3:'资金流向',4:'多信号'};
+  const dimHtml=Object.entries(byDim).map(([k,lst])=>{
+    if(!lst||!lst.length) return '';
+    const rows=lst.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td></tr>`).join('');
+    return `<details style="margin-top:8px" open><summary style="cursor:pointer;color:var(--muted);font-size:12px">口径${k} ${dimNames[k]} (${lst.length})</summary><table><thead><tr><th>代码</th><th>名称</th><th class="num">共振</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+  }).join('');
+  document.getElementById('qsOut').innerHTML=trs?`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>${dimHtml}`:'<div class="empty">无共振清单(口径不足或历史未拉，先 /api/backtest/fetch；stock 口径2 需 akshare 财务摘要，东财被封时降级 spot 估值代理)</div>';
+  document.querySelectorAll('#qsOut th[data-qk]').forEach(th=>th.onclick=()=>{
+    const k=th.dataset.qk;
+    if(qsState.sortKey===k){qsState.sortDir=qsState.sortDir==='desc'?'asc':'desc';}
+    else{qsState.sortKey=k;qsState.sortDir=(k==='resonance'||k==='hits')?'desc':'asc';}
+    qsRender();
+  });
 }
 document.getElementById('qsRun').onclick=qsLoad;
 document.getElementById('qsUniverse').onchange=qsLoad;
 document.getElementById('qsDays').onchange=qsLoad;
+document.getElementById('qsThresh').onchange=qsLoad;
+document.getElementById('qsBoard').onchange=qsLoad;
+document.getElementById('qsCorr').onchange=qsLoad;
+document.getElementById('qsCombo').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 // ---------------- 数据健康 banner+抽屉(只读聚合) ----------------
 const _HCOLOR={green:'#16A34A',yellow:'#F59E0B',red:'#5C6884'};

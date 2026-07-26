@@ -13,6 +13,13 @@ from backtest import quality
 from data import db
 
 
+@pytest.fixture(autouse=True)
+def _clear_quality_cache():
+    """每个测试前清结果缓存(quality_rank 5min TTL 会让同参数测试返回上次结果)。"""
+    quality._RESULT_CACHE.clear()
+    yield
+
+
 SPOT_STOCK = [
     {"code": "000001", "name": "甲", "latest_price": 10.0, "change_pct": 2.0,
      "turnover_amount": 1e8, "turnover_rate": 3.0, "main_net_inflow": 5e7},
