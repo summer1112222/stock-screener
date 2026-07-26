@@ -56,9 +56,17 @@ def get_conn():
 
     注意：sqlite3.Connection 自身也是上下文管理器，但只负责 commit/rollback，
     不负责 close。这里包一层确保 close。事务提交由调用方显式 conn.commit()。
+    并发：WAL 模式(读并发+单写) + busy_timeout 5s(写等待锁而非立即抛
+    'database is locked'，防 /api/backtest/fetch 并发写 500)。
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass
     try:
         yield conn
     finally:
