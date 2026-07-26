@@ -255,15 +255,22 @@ def test_top_by_amount_desc(sm_db, monkeypatch):
 
 def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
     """主源抛 NoneType 崩 → 备援2 十大成交股出记录。
-    actor="" 保 UNIQUE 去重；action="上榜"；source 标北向十大成交股(盘后)。"""
+    沪/深两通各返回不同 code 1 行，验证双 symbol 循环不被改坏。
+    action="上榜"；source 标北向十大成交股(盘后)。"""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
     db.init_db()
     def _boom(**kw):
         raise RuntimeError("'NoneType' object is not subscriptable")
     def _acc_flow(symbol="沪股通"):
-        return pd.DataFrame({"股票代码": ["600519", "601318"],
-                             "股票简称": ["贵州茅台", "中国平安"],
-                             "净买额": [3.2e8, 1.1e8]})
+        if symbol == "沪股通":
+            return pd.DataFrame({"股票代码": ["600519"],
+                                 "股票简称": ["贵州茅台"],
+                                 "净买额": [3.2e8]})
+        if symbol == "深股通":
+            return pd.DataFrame({"股票代码": ["000001"],
+                                 "股票简称": ["平安银行"],
+                                 "净买额": [1.1e8]})
+        return pd.DataFrame()
     def _net_flow(symbol="北向"):
         return pd.DataFrame({"日期": ["2026-07-25"], "当日资金流入": [5e8]})
     _patch_ak(monkeypatch,
@@ -278,7 +285,14 @@ def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
     assert all(r["channel"] == "北向" for r in recs)
     assert all(r["actor"] == "" for r in recs)
     assert all(r["action"] == "上榜" for r in recs)
-    assert recs[0]["amount"] == 3.2e8
+    r_sh = next(r for r in recs if r["code"] == "600519")
+    assert r_sh["amount"] == 3.2e8
+    assert r_sh["action"] == "上榜"
+    assert r_sh["actor"] == ""
+    r_sz = next(r for r in recs if r["code"] == "000001")
+    assert r_sz["amount"] == 1.1e8
+    assert r_sz["action"] == "上榜"
+    assert r_sz["actor"] == ""
     assert sm.CHANNEL_STATUS["北向"]["source"] == "北向十大成交股(盘后)"
 
 

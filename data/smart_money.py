@@ -365,11 +365,8 @@ def _nb_individual():
 
 
 def _nb_acc_flow():
-    """备援2（默认）：沪股通+深股通盘后十大成交股。
-    沪/深两通 code 域不相交(6/9 开头 sh vs 0/3 开头 sz)，按 code 去重保首条，
-    防备援接口对同一 code 重复返回（实际为 no-op，仅测试同构 mock 下生效）。"""
+    """备援2（默认）：沪股通+深股通盘后十大成交股。"""
     out = []
-    seen = set()
     for sym in ("沪股通", "深股通"):
         try:
             df = ak.stock_hsgt_north_acc_flow_in(symbol=sym)
@@ -381,12 +378,7 @@ def _nb_acc_flow():
         col_name = _first_col(df, ["股票简称", "名称", "name"])
         col_amt = _first_col(df, ["净买额", "买入金额", "成交金额"])
         for _, r in df.iterrows():
-            code = r.get(col_code)
-            key = str(code) if code is not None else None
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((code, r.get(col_name), _to_float(r.get(col_amt))))
+            out.append((r.get(col_code), r.get(col_name), _to_float(r.get(col_amt))))
     return out
 
 
