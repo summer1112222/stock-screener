@@ -216,6 +216,7 @@
       <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
         <div id="smChannels" style="display:flex;gap:10px;flex-wrap:wrap"></div>
         <button class="btn ghost" id="smRefresh" type="button">刷新主力动向</button>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px"><input type="checkbox" id="smAutoRefresh" checked> 进入时自动刷新</label>
         <span id="smLoading" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div class="row" style="align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
@@ -277,7 +278,11 @@ const _tabLoaded = {};
 function ensureTabLoaded(name){
   if(_tabLoaded[name]) return;
   _tabLoaded[name] = true;
-  if(name==='smart'){ smLoadChannels(); smLoad(); }
+  if(name==='smart'){
+    // 首次进 tab 且勾选"进入时自动刷新"→拉最新(6 通道采集)；之后只读缓存，手点按钮再刷新
+    if(document.getElementById('smAutoRefresh').checked){ smRefresh(); }
+    else{ smLoadChannels(); smLoad(); }
+  }
   if(name==='quality'){ qsLoad(); }
 }
 function switchTab(name){
@@ -598,13 +603,15 @@ document.getElementById('bfTop').onclick=()=>bfTop('priority');
 const smState = {raw:[], chip:'all', q:'', agg:false};
 function smChannelsHtml(channels){
   return Object.entries(channels||{}).map(([k,v])=>{
+    const stale=v&&v.stale;
     const ok=v&&v.ok;
-    const color=ok?'#16A34A':'#5C6884';
+    const color=stale?'#F59E0B':(ok?'#16A34A':'#5C6884');
     const rows=v&&v.rows!=null?`:${v.rows}行`:'';
     const dt=v&&v.date?`(${v.date})`:'';
-    const reason=ok?(v.source||'ok'):(v.err||'不可用');
+    const reason=stale?('回退至 '+(v.stale_date||'')+' '+(v.err||''))
+                  :(ok?(v.source||'ok'):(v.err||'不可用'));
     const title=`${k}：${reason} ${rows} ${dt}`;
-    return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">●${k}${rows}</span>`;
+    return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">${stale?'◐':'●'}${k}${rows}</span>`;
   }).join('');
 }
 async function smLoadChannels(){
@@ -659,9 +666,11 @@ function smRender(){
   }else{
     rows=[...rows].sort((a,b)=>Math.abs(b.amount||0)-Math.abs(a.amount||0));
     const shown=rows.slice(0,CAP);
+    const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
+      ?'<span style="color:var(--muted);font-size:12px">北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>':'';
     ths=['日期','代码','名称','市场','通道','席位/股东','动作','净额(元)'].map(h=>`<th class="num">${h}</th>`).join('');
     trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${fmtNum(x.amount)}</td></tr>`).join('');
-    note=rows.length>CAP?`<div class="skipped">按净额绝对值降序前 ${CAP} 条(共 ${rows.length} 条)，其余折叠防卡顿</div>`:'';
+    note=nbNote+(rows.length>CAP?`<div class="skipped">按净额绝对值降序前 ${CAP} 条(共 ${rows.length} 条)，其余折叠防卡顿</div>`:'');
   }
   document.getElementById('smOut').innerHTML = trs?(note+`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`):(note||'<div class="empty">无当日主力动向(先点"刷新主力动向"采集；东财被封通道显示未采集)</div>');
 }
