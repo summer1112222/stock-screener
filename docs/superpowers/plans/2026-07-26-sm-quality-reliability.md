@@ -45,9 +45,11 @@
 追加到 `tests/test_smart_money.py`：
 
 ```python
-def test_northbound_fallback_acc_flow(monkeypatch):
+def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
     """主源抛 NoneType 崩 → 备援2 十大成交股出记录。
     actor="" 保 UNIQUE 去重；action="上榜"；source 标北向十大成交股(盘后)。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
     def _boom(**kw):
         raise RuntimeError("'NoneType' object is not subscriptable")
     def _acc_flow(symbol="沪股通"):
@@ -72,8 +74,10 @@ def test_northbound_fallback_acc_flow(monkeypatch):
     assert sm.CHANNEL_STATUS["北向"]["source"] == "北向十大成交股(盘后)"
 
 
-def test_northbound_degrade_to_total(monkeypatch):
+def test_northbound_degrade_to_total(monkeypatch, tmp_path):
     """备援2 也失败/空 → 降级3 总额 1 条，actor="北向总额"。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
     def _boom(**kw):
         raise RuntimeError("NoneType")
     def _acc_flow(symbol="沪股通"):
@@ -231,6 +235,15 @@ git commit -m "feat(smart_money): 北向多级备援链(盘后十大成交股+�
 追加到 `tests/test_smart_money.py`：
 
 ```python
+def _mock_other_channels(monkeypatch, ok=True):
+    """把非测试目标的 5 通道 mock 成快速返回，避免 refresh_today 触网。
+    龙虎榜/十大股东/高管/限售/北向 默认 ok 空；调用方可覆盖其中之一。"""
+    for name in ("collect_dragon_tiger", "collect_holders",
+                 "collect_management_hold", "collect_share_unlock",
+                 "collect_northbound"):
+        monkeypatch.setattr(sm, name, lambda d, _n=name: ([], ok, "skip"))
+
+
 def test_stale_degradation_keeps_old_data(monkeypatch, tmp_path):
     """通道拉取失败 + DB 有 3 日前旧数据 → stale=True 保留旧、last_ok_date 正确、
     meta 写入；refresh_today 跳过 upsert（不入库新行）。"""
@@ -240,6 +253,7 @@ def test_stale_degradation_keeps_old_data(monkeypatch, tmp_path):
             "channel": "资金流", "actor": "", "action": "净买入", "amount": 1.5e8,
             "as_of": None, "ts": "2026-07-22 10:00:00"}]
     db.upsert_rows("smart_money_action", old)
+    _mock_other_channels(monkeypatch)   # 其余 5 通道 ok 空，不触网
     monkeypatch.setattr(sm, "collect_fund_flow",
                         lambda d: ([], False, "资金流: THS 与 spot 均无净额"))
     metas = {}
@@ -261,12 +275,14 @@ def test_three_state_channel_light(monkeypatch, tmp_path):
                    [{"date": "2026-07-22", "code": "000001", "name": "甲",
                      "market": "股票", "channel": "资金流", "actor": "",
                      "action": "净买入", "amount": 1e8, "as_of": None, "ts": ""}])
+    _mock_other_channels(monkeypatch)
     monkeypatch.setattr(sm, "collect_fund_flow", lambda d: ([], False, "fail"))
     monkeypatch.setattr(db, "set_meta", lambda k, v: None)
     monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
     sm.refresh_today("2026-07-25")
     st = sm.channel_status()["资金流"]
     assert st["ok"] is True and st.get("stale") is True          # 黄
+    # 灰：北向覆盖为失败（无旧数据）
     monkeypatch.setattr(sm, "collect_northbound", lambda d: ([], False, "全失败"))
     sm.CHANNEL_STATUS["北向"] = {"ok": False, "source": "", "err": "未采集", "at": ""}
     sm.refresh_today("2026-07-25")
