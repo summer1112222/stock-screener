@@ -457,6 +457,10 @@ async function btFetch(){
   btMsg('拉取历史中...'); const r=await fetch(`${API}/api/backtest/fetch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())}).then(r=>r.json());
   btMsg('历史数据: '+JSON.stringify(r.data.counts)+(r.data.errors&&r.data.errors.length?(' | 错误: '+r.data.errors.slice(0,2)):'' ));
 }
+// 自动先拉历史(幂等upsert)再回测/评价——确保任意填入的 code 都可查("全部可查")
+async function _btFetchQuiet(){
+  await fetch(`${API}/api/backtest/fetch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())});
+}
 // 防大数组 spread 栈溢出/超长 SVG 卡顿：循环求极值 + 降采样
 function _minmax(vs){let mn=Infinity,mx=-Infinity;for(let i=0;i<vs.length;i++){const v=vs[i];if(v<mn)mn=v;if(v>mx)mx=v;}if(!isFinite(mn))mn=0;if(!isFinite(mx))mx=0;return[mn,mx];}
 function _downsample(vs,maxN){if(vs.length<=maxN)return vs;const step=vs.length/maxN,out=[];for(let i=0;i<vs.length;i+=step)out.push(vs[Math.floor(i)]);if(out[out.length-1]!==vs[vs.length-1])out.push(vs[vs.length-1]);return out;}
@@ -471,6 +475,7 @@ function sparkline(curve,color='#3B82F6'){
 }
 function riskTable(r){if(!r||!Object.keys(r).length)return '';const rows=Object.entries(r).map(([k,v])=>`<tr><td>${k}</td><td class="num">${v}</td></tr>`).join('');return `<table><thead><tr><th>指标</th><th class="num">值</th></tr></thead><tbody>${rows}</tbody></table>`;}
 async function btRun(){
+  btMsg('拉取历史中(确保可查)...'); await _btFetchQuiet();
   btMsg('回测中...'); const r=await fetch(`${API}/api/backtest/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())}).then(r=>r.json());
   const d=r.data||{};
   if(d.error){btMsg(d.error);document.getElementById('btOut').innerHTML='';return;}
@@ -481,6 +486,7 @@ async function btRun(){
     <div class="disc">${(d.survivorship && d.survivorship.note) || (typeof d.survivorship==='string' ? d.survivorship : '') || ''}</div>`;
 }
 async function btEval(){
+  btMsg('拉取历史中(确保可查)...'); await _btFetchQuiet();
   btMsg('因子评价中...'); const r=await fetch(`${API}/api/backtest/eval`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())}).then(r=>r.json());
   const d=r.data||{};
   if(d.error){btMsg(d.error);document.getElementById('btOut').innerHTML='';return;}
