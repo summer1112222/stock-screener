@@ -318,7 +318,12 @@ def _fetch_ths_individual_fund_flow(max_pages: int = 120) -> tuple[list[dict], b
             amt = _parse_cn_amount(r.get(col_amt))
             if amt is None:
                 continue
-            out.append({"code": str(r.get(col_code)), "name": r.get(col_name),
+            # THS 股票代码带 sh/sz/bj 前缀，剥离存 6 位纯代码(与 stock_spot 一致，
+            # 便跨表关联；否则前端代码列显示"sz000004"不完整)
+            _c = str(r.get(col_code) or "")
+            if _c[:2] in ("sh", "sz", "bj"):
+                _c = _c[2:]
+            out.append({"code": _c, "name": r.get(col_name),
                         "amount": amt})
         return out
 
