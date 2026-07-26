@@ -653,26 +653,45 @@ function smRender(){
   if(smState.chip!=='all') rows=rows.filter(x=>x.channel===smState.chip);
   if(smState.q){const q=smState.q.toLowerCase();rows=rows.filter(x=>((x.code||'')+(x.actor||'')+(x.name||'')).toLowerCase().indexOf(q)>=0);}
   const CAP=300;
+  // 排序：点击表头切换列/方向。amount 默认按绝对值降序，其余按值 asc/desc。
+  const SK=smState.sortKey||'amount', SD=smState.sortDir||'desc';
+  const _arrow=k=>SK===k?(SD==='desc'?' ▼':' ▲'):'';
+  const _cmp=(a,b,k)=>{ // 数值比较（amount 按绝对值，n 按值）
+    const va=k==='amount'?Math.abs(a[k]||0):(a[k]||0), vb=k==='amount'?Math.abs(b[k]||0):(b[k]||0);
+    return SD==='desc'? (vb-va) : (va-vb);
+  };
+  const _scmp=(a,b,k)=>{const va=String(a[k]??''),vb=String(b[k]??'');return SD==='desc'?vb.localeCompare(va):va.localeCompare(vb);};
   let ths, trs, note;
   if(smState.agg){
     const m={};
     rows.forEach(x=>{const a=x.actor||'—';m[a]=(m[a]||0)+(x.amount||0);});
-    const arr=Object.entries(m).map(([a,v])=>({actor:a,amount:v,n:rows.filter(x=>(x.actor||'—')===a).length}));
-    arr.sort((a,b)=>Math.abs(b.amount)-Math.abs(a.amount));
+    let arr=Object.entries(m).map(([a,v])=>({actor:a,amount:v,n:rows.filter(x=>(x.actor||'—')===a).length}));
+    arr.sort((a,b)=> SK==='actor'?_scmp(a,b,'actor'):_cmp(a,b,SK));
     const shown=arr.slice(0,CAP);
-    ths=['席位/股东','累计净额(元)','次数'].map(h=>`<th class="num">${h}</th>`).join('');
+    const cols=[['actor','席位/股东'],['amount','累计净额(元)'],['n','次数']];
+    ths=cols.map(([k,h])=>`<th class="num${k==='amount'||k==='n'?'':''}" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
     trs=shown.map(x=>`<tr><td>${x.actor}</td><td class="num">${fmtNum(x.amount)}</td><td class="num">${x.n}</td></tr>`).join('');
-    note=`<div class="skipped">按席位聚合，前 ${shown.length} (共 ${arr.length} 席位)</div>`;
+    note=`<div class="skipped">按席位聚合，前 ${shown.length} (共 ${arr.length} 席位)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}</div>`;
   }else{
-    rows=[...rows].sort((a,b)=>Math.abs(b.amount||0)-Math.abs(a.amount||0));
-    const shown=rows.slice(0,CAP);
+    let sr=[...rows].sort((a,b)=> SK==='amount'?_cmp(a,b,'amount')
+      : ['code','name','date','market','channel','actor','action'].includes(SK)?_scmp(a,b,SK)
+      : _cmp(a,b,'amount'));
+    const shown=sr.slice(0,CAP);
     const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
       ?'<span style="color:var(--muted);font-size:12px">北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>':'';
-    ths=['日期','代码','名称','市场','通道','席位/股东','动作','净额(元)'].map(h=>`<th class="num">${h}</th>`).join('');
+    const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额(元)']];
+    ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
     trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${fmtNum(x.amount)}</td></tr>`).join('');
-    note=nbNote+(rows.length>CAP?`<div class="skipped">按净额绝对值降序前 ${CAP} 条(共 ${rows.length} 条)，其余折叠防卡顿</div>`:'');
+    note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}，其余折叠防卡顿</div>`:'');
   }
   document.getElementById('smOut').innerHTML = trs?(note+`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`):(note||'<div class="empty">无当日主力动向(先点"刷新主力动向"采集；东财被封通道显示未采集)</div>');
+  // 表头点击排序
+  document.querySelectorAll('#smOut th[data-sk]').forEach(th=>th.onclick=()=>{
+    const k=th.dataset.sk;
+    if(SK===k){ smState.sortDir = SD==='desc'?'asc':'desc'; }
+    else { smState.sortKey=k; smState.sortDir = (k==='amount'||k==='n')?'desc':'asc'; }
+    smRender();
+  });
 }
 document.getElementById('smSearch').oninput=e=>{smState.q=e.target.value;smRender();};
 document.getElementById('smAgg').onchange=e=>{smState.agg=e.target.checked;smRender();};
