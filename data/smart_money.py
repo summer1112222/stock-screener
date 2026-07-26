@@ -30,11 +30,15 @@ NATIONAL_TEAM = ["中国证券金融", "中央汇金", "全国社保基金",
 
 # 国家队历史重仓股种子（硬编兜底，覆盖小盘/低成交额国家队重仓股——成交额 shortlist 会漏）。
 # 学习式扩充：成功拉取后命中 NATIONAL_TEAM 的 code 并入 meta nt_holdings_seed。
-NATIONAL_TEAM_HOLDINGS_SEED = [
-    "600519", "601318", "600036", "601398", "601288", "601628",
-    "600028", "601857", "600030", "601166", "600276", "000858",
-    "600000", "601988", "601328", "600436", "600009", "601088",
-]
+# dict{code:name}：stock_spot 常不含这些大盘股，硬编名字保证十大股东行能显示股票名。
+NATIONAL_TEAM_HOLDINGS_SEED = {
+    "600519": "贵州茅台", "601318": "中国平安", "600036": "招商银行",
+    "601398": "工商银行", "601288": "农业银行", "601628": "中国人寿",
+    "600028": "中国石化", "601857": "中国石油", "600030": "中信证券",
+    "601166": "兴业银行", "600276": "恒瑞医药", "000858": "五粮液",
+    "600000": "浦发银行", "601988": "中国银行", "601328": "交通银行",
+    "600436": "片仔癀", "600009": "上海机场", "601088": "中国神华",
+}
 
 # 各通道最近一次状态，前端据此灰掉不可用通道。
 # 注意：这是内存态，容器重启即归零「未采集」；channel_status() 会叠加 DB 实况
@@ -534,9 +538,13 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
     candidates = spot_df.to_dict("records")
     seed_codes = _load_seed()
     spot_codes = {str(sp.get("code")) for sp in candidates}
+    # stock_spot 全表 code→名（种子代码常不在 top200，需全表兜底解析股票名）
+    spot_name = {str(sp.get("code")): sp.get("name") for sp in spots}
     for sc in seed_codes:
         if sc not in spot_codes:
-            candidates.append({"code": sc, "name": "种子标的", "turnover_amount": 0})
+            candidates.append({"code": sc,
+                                "name": NATIONAL_TEAM_HOLDINGS_SEED.get(sc) or spot_name.get(sc),
+                                "turnover_amount": 0})
     as_of = date
     period = _latest_report_period()
     recs = []

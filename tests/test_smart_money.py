@@ -384,7 +384,7 @@ def test_holders_seed_union(monkeypatch, tmp_path):
         {"code": "600519", "name": "贵州茅台", "turnover_amount": 1e9},
         {"code": "601318", "name": "中国平安", "turnover_amount": 8e8}])
     monkeypatch.setattr(sm, "_AK_OK", True)
-    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", ["600999"])
+    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", {"600999": "测试股"})
     monkeypatch.setattr(sm, "_load_seed", lambda: set(["600999"]))
     monkeypatch.setattr(sm, "_save_seed", lambda codes: None)
     monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
@@ -407,7 +407,7 @@ def test_holders_seed_learning(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "set_meta", lambda k, v: saved.update({k: v}))
     monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
     monkeypatch.setattr(sm, "_AK_OK", True)
-    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", ["600999"])
+    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", {"600999": "测试股"})
     monkeypatch.setattr(sm, "_load_seed", lambda: set(["600999"]))
     monkeypatch.setattr(db, "query_rows", lambda table, **kw:
         [{"code": "600519", "name": "茅台", "turnover_amount": 1e9}] if table=="stock_spot" else [])
