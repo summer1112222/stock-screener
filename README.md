@@ -104,3 +104,4 @@ python -m pytest tests/test_engine.py::test_topn_asc -q   # 单个测试
 ## 免责
 
 数据来自公开接口（AKShare 聚合东方财富/新浪/同花顺等），可能存在延迟、缺失或接口变更。本工具不构成任何投资建议，市场有风险，投资决策请独立判断，盈亏自负。
+# stock-screener
