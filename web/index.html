@@ -92,6 +92,13 @@
     <span class="ut" id="ut">数据未加载</span>
   </header>
 
+  <div id="healthBar" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">
+    <span id="hbOverall" style="font-size:14px">●</span>
+    <span id="hbTime">数据 …</span>
+    <span id="hbDots" style="color:var(--muted)"></span>
+    <button id="hbDetail" class="btn ghost" type="button" style="font-size:12px;padding:2px 10px">详情▾</button>
+  </div>
+
   <nav class="tabs">
     <button class="active" data-tab="screen" type="button">实时筛选</button>
     <button data-tab="backtest" type="button">历史回测</button>
@@ -264,6 +271,16 @@
       </div>
       <div id="pfOut" style="margin-top:10px"></div>
     </div>
+  </aside>
+
+  <aside id="healthDrawer" hidden style="position:fixed;right:0;top:0;bottom:0;width:360px;background:var(--bg);border-left:1px solid var(--border);padding:16px;overflow-y:auto;z-index:50">
+    <div class="card-t" style="display:flex;justify-content:space-between">数据健康 <button onclick="toggleHealth()" type="button" class="btn ghost">×</button></div>
+    <div id="healthBody" style="margin-top:12px"></div>
+    <div style="margin-top:16px">
+      <div id="hbRefreshTime" style="color:var(--muted);font-size:12px"></div>
+      <button id="hbRefresh" class="btn" type="button" style="margin-top:6px">手动刷新采集</button>
+    </div>
+    <div class="disc" style="margin-top:16px"><b>数据健康</b>为新鲜度观察，非投资建议。</div>
   </aside>
 </div>
 <script>
@@ -739,6 +756,53 @@ document.getElementById('qsRun').onclick=qsLoad;
 document.getElementById('qsUniverse').onchange=qsLoad;
 document.getElementById('qsDays').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
+// ---------------- 数据健康 banner+抽屉(只读聚合) ----------------
+const _HCOLOR={green:'#16A34A',yellow:'#F59E0B',red:'#5C6884'};
+async function healthLoad(){
+  try{
+    const r=await fetch(`${API}/api/health`).then(r=>r.json());
+    const d=r.data||{};
+    document.getElementById('hbTime').textContent='数据 '+(r.update_time||'…');
+    const ov=d.overall||'red';
+    const oE=document.getElementById('hbOverall');
+    oE.style.color=_HCOLOR[ov]||_HCOLOR.red;
+    oE.textContent=ov==='yellow'?'◐':'●';
+    const dom=d.domains||{};
+    document.getElementById('hbDots').innerHTML=Object.entries(dom).map(([k,v])=>{
+      const s=(v&&v.status)||'red';
+      return `<span style="color:${_HCOLOR[s]||_HCOLOR.red};margin-right:8px" title="${k}:${s}">${s==='yellow'?'◐':'●'}${k}</span>`;
+    }).join('');
+    document.getElementById('hbRefreshTime').textContent='上次采集: '+(d.last_refresh_time||r.update_time||'—');
+    if(!document.getElementById('healthDrawer').hidden) healthRender(d);
+  }catch(e){
+    const oE=document.getElementById('hbOverall'); oE.textContent='●'; oE.style.color=_HCOLOR.red;
+    document.getElementById('hbTime').textContent='数据健康检查失败';
+  }
+}
+function healthRender(d){
+  const dom=d.domains||{};
+  const names={spot:'板块/ETF快照',history:'历史日线',smart_money:'主力动向',fundamentals:'财报缓存',research:'研报/千评',st_list:'ST名单',portfolio:'持仓'};
+  const rows=Object.entries(dom).map(([k,v])=>{
+    const s=(v&&v.status)||'red';
+    const det=v?Object.entries(v).filter(([kk])=>kk!=='status'&&kk!=='err').map(([kk,vv])=>`${kk}=${vv instanceof Object?JSON.stringify(vv):vv}`).join(' '):'';
+    const err=v&&v.err?` <span style="color:var(--warn)">${String(v.err).slice(0,40)}</span>`:'';
+    return `<tr><td>${names[k]||k}</td><td style="color:${_HCOLOR[s]||_HCOLOR.red}">${s==='yellow'?'◐':'●'}${s}</td><td style="font-size:11px;color:var(--muted)">${det}${err}</td></tr>`;
+  }).join('');
+  document.getElementById('healthBody').innerHTML=`<table><thead><tr><th>域</th><th>状态</th><th>详情</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function toggleHealth(){
+  const dr=document.getElementById('healthDrawer');
+  dr.hidden=!dr.hidden;
+  if(!dr.hidden) healthLoad();
+}
+document.getElementById('hbDetail').onclick=toggleHealth;
+document.getElementById('hbRefresh').onclick=async function(){
+  const btn=this; btn.disabled=true; btn.textContent='采集中…';
+  try{ await fetch(`${API}/api/smart-money/refresh`,{method:'POST'}); await fetch(`${API}/api/refresh`,{method:'POST'}); }
+  finally{ btn.disabled=false; btn.textContent='手动刷新采集'; await healthLoad(); }
+};
+setInterval(healthLoad,60000);
+window.addEventListener('load',healthLoad);
 </script>
 </body>
 </html>
