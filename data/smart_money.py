@@ -42,38 +42,43 @@ CHANNEL_STATUS = {
 
 
 def channel_status() -> dict:
-    """返回各通道状态，叠加 DB 实况：内存 CHANNEL_STATUS 给 source/err/at 细节，
-    DB 查最新日期各通道行数——有行即 ok=True（source 标 "DB(日期)"），
-    防容器重启后内存态全归零、明明有数据却全显「未采集」灰点。只读，不写表。"""
+    """各通道状态，叠加 DB 实况 + stale meta：内存 CHANNEL_STATUS 给 source/err/at/stale
+    细节；DB 给 rows/date；meta(sm_stale_<ch>)给 stale_date/last_ok_date。只读。"""
     status = {k: dict(v) for k, v in CHANNEL_STATUS.items()}
     try:
         from . import db as _db
         _db.init_db()
         with _db.get_conn() as conn:
             row = conn.execute(
-                "SELECT MAX(date) AS d FROM smart_money_action"
-            ).fetchone()
+                "SELECT MAX(date) AS d FROM smart_money_action").fetchone()
             latest = row["d"] if row else None
+            counts = {}
             if latest:
                 cur = conn.execute(
                     "SELECT channel, COUNT(*) AS n FROM smart_money_action "
                     "WHERE date=? GROUP BY channel", (latest,))
                 counts = {r["channel"]: r["n"] for r in cur.fetchall()}
         for ch, st in status.items():
+            meta = _db.get_meta(f"sm_stale_{ch}", "")
+            if meta and "|" in meta:
+                sd, _err = meta.split("|", 1)
+                st.setdefault("stale_date", sd)
+                st.setdefault("stale", True)
+            st.setdefault("stale", False)
+            st.setdefault("last_ok_date", _last_ok_date(ch))
             n = counts.get(ch, 0) if latest else 0
             st["rows"] = n
             st["date"] = latest or ""
-            if n > 0:
-                # DB 有数据：强制 ok，保留内存态 source 细节(若有)，清错
+            if n > 0 and not st.get("stale"):
                 st["ok"] = True
                 if not st.get("source"):
                     st["source"] = f"DB({latest})"
                 st["err"] = ""
     except Exception:
-        # DB 查询失败不阻塞，回落到内存态
         for st in status.values():
             st.setdefault("rows", 0)
             st.setdefault("date", "")
+            st.setdefault("stale", False)
     return status
 
 
@@ -612,12 +617,44 @@ def collect_share_unlock(date: str) -> tuple[list[dict], bool, str]:
     return recs, True, ""
 
 
+def _last_ok_date(channel: str) -> str:
+    """该通道最近一次有数据日期（无则空）。"""
+    try:
+        rows = db.query_rows("smart_money_action", where="channel = ?",
+                             params=(channel,), order_by="date DESC", limit=1)
+        return rows[0].get("date", "") if rows else ""
+    except Exception:
+        return ""
+
+
+def _stale_fallback(channel: str, err: str) -> tuple[list[dict], bool, str]:
+    """拉取失败时查 DB 该通道最近一次有数据日期的全部行作回退数据。
+    有→(旧rows, True, "回退至 <stale_date>（采集失败: <err>）")；
+    无→([], False, err)。stale 标记落 CHANNEL_STATUS + db.set_meta。"""
+    try:
+        stale_date = _last_ok_date(channel)
+        if not stale_date:
+            return [], False, err
+        old = db.query_rows("smart_money_action",
+                            where="channel = ? AND date = ?",
+                            params=(channel, stale_date), order_by="", limit=0)
+        note = f"回退至 {stale_date}（采集失败: {err}）"
+        _set_status(channel, True, "", note)
+        CHANNEL_STATUS[channel]["stale"] = True
+        CHANNEL_STATUS[channel]["stale_date"] = stale_date
+        CHANNEL_STATUS[channel]["stale_note"] = note
+        db.set_meta(f"sm_stale_{channel}", f"{stale_date}|{err}")
+        return old, True, note
+    except Exception:
+        return [], False, err
+
+
 # ------------------------------------------------------------------
 # 编排
 # ------------------------------------------------------------------
 def refresh_today(date: str | None = None) -> dict:
-    """串行跑 4 通道 → upsert smart_money_action → 写 meta + CHANNEL_STATUS。
-    单通道崩不影响其他通道。"""
+    """串行跑 6 通道 → upsert → 写 meta + CHANNEL_STATUS。
+    拉取失败时若 DB 有旧数据 → stale 降级（不入库新行）。"""
     db.init_db()
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -629,12 +666,32 @@ def refresh_today(date: str | None = None) -> dict:
     for ch, fn in plan:
         try:
             recs, ok, err = fn(date)
-        except Exception as e:   # 双保险：collect 内部已 try，这里再兜
+        except Exception as e:
             recs, ok, err = [], False, f"{ch}: 未捕获异常 {e}"
             _set_status(ch, False, "", str(e))
-        n = db.upsert_rows("smart_money_action", recs) if (ok and recs) else 0
+        if not ok:
+            old, stale_flag, note = _stale_fallback(ch, err)
+            if stale_flag:
+                st = CHANNEL_STATUS.get(ch, {})
+                report["counts"][ch] = 0
+                report["channels"][ch] = {
+                    "ok": True, "stale": True, "rows": len(old),
+                    "stale_date": st.get("stale_date", ""),
+                    "last_ok_date": st.get("stale_date", ""),
+                    "err": note, "at": st.get("at", "")}
+                continue
+            st = CHANNEL_STATUS.get(ch, {})
+            report["counts"][ch] = 0
+            report["channels"][ch] = {
+                "ok": False, "stale": False, "rows": 0,
+                "last_ok_date": _last_ok_date(ch),
+                "err": err, "at": st.get("at", "")}
+            continue
+        n = db.upsert_rows("smart_money_action", recs) if recs else 0
         st = CHANNEL_STATUS.get(ch, {})
         report["counts"][ch] = n
-        report["channels"][ch] = {"ok": ok, "rows": n, "err": err, "at": st.get("at", "")}
+        report["channels"][ch] = {
+            "ok": True, "stale": False, "rows": n,
+            "last_ok_date": date, "err": err, "at": st.get("at", "")}
     report["update_time"] = db.stamp_update_time()
     return report
