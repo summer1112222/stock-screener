@@ -420,9 +420,15 @@ def test_holders_seed_learning(monkeypatch, tmp_path):
     assert "600519" in saved["nt_holdings_seed"]
 
 
-def test_today_list_defaults_to_latest_date(sm_db):
-    """date 省略时默认取表内最新日期(避免返回全表拖慢加载)。SM_ROWS 最新 2026-07-14。"""
+def test_today_list_defaults_to_latest_window(sm_db):
+    """date 省略时默认取最新日期往前7日窗口(平衡数据量与速度)。SM_ROWS 最新 2026-07-14。"""
     res = smq.today_list()
-    assert res["date"] == "2026-07-14"
-    assert all(r["date"] == "2026-07-14" for r in res["rows"])
-    assert res["total"] == 2   # 2026-07-14 有 2 行(龙虎榜+资金流)
+    assert res["date"] == "2026-07-14"          # 响应回传实际最新日期
+    assert all(r["date"] in ("2026-07-13", "2026-07-14") for r in res["rows"])
+    assert res["total"] == 4                     # 7日窗口含 SM_ROWS 全部4行
+
+
+def test_today_list_days_window(sm_db):
+    """days=1 仅最新日;days=7 含近7日(SM_ROWS 全4行)。"""
+    assert smq.today_list(days=1)["total"] == 2  # 仅 2026-07-14 2行
+    assert smq.today_list(days=7)["total"] == 4  # 07-13+07-14 共4行

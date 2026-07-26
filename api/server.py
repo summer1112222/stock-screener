@@ -443,10 +443,12 @@ SM_CAND_DISCLAIMER = "主力动向观察清单，机械归类，非荐股非买�
 @app.get("/api/smart-money/today")
 def sm_today(date: str | None = Query(None),
              channel: str | None = Query(None),
-             market: str | None = Query(None)):
-    res = sm_query.today_list(date, channel, market)
+             market: str | None = Query(None),
+             days: int = Query(7, ge=1, le=90)):
+    res = sm_query.today_list(date, channel, market, days=days)
     return _wrap(res["rows"], {
         "total": res["total"], "date": res.get("date", date),
+        "days": days,
         "cand_disclaimer": SM_CAND_DISCLAIMER})
 
 

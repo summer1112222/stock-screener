@@ -18,19 +18,25 @@ def _expand_national_team() -> list[str]:
 
 
 def today_list(date: str | None = None, channel: str | None = None,
-               market: str | None = None) -> dict:
-    """用法 A：某日主力动向清单，按 amount 降序。
-    date 省略时默认取表内最新日期，避免返回全表（数万行）拖慢加载。"""
+               market: str | None = None, days: int = 7) -> dict:
+    """用法 A：主力动向清单，按 amount 降序。
+    date 指定时按单日；省略时取表内最新日期往前 days 日窗口（默认7日），
+    平衡数据量与加载速度，避免返回全表数万行。"""
     where, params = [], []
     if not date:
         try:
             latest = db.query_rows("smart_money_action",
                                    order_by="date DESC", limit=1)
             if latest:
-                date = latest[0].get("date")
+                latest_date = latest[0].get("date")
+                end = datetime.strptime(latest_date, "%Y-%m-%d")
+                start = (end - timedelta(days=max(days - 1, 0))).strftime("%Y-%m-%d")
+                where.append("date >= ?"); params.append(start)
+                where.append("date <= ?"); params.append(latest_date)
+                date = latest_date   # 响应回传实际最新日期
         except Exception:
             pass
-    if date:
+    else:
         where.append("date = ?"); params.append(date)
     if channel:
         where.append("channel = ?"); params.append(channel)

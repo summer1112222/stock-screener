@@ -229,6 +229,7 @@
       <div class="row" style="align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
         <div id="smChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <input id="smSearch" type="text" placeholder="搜索 代码/席位/名称" style="flex:1;min-width:160px">
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px">近<select id="smDays" style="font-size:12px;padding:2px 4px"><option>1</option><option selected>7</option><option>15</option><option>30</option></select>日</label>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px"><input type="checkbox" id="smAgg"> 按席位聚合</label>
       </div>
       <div class="skipped" id="smMsg"></div>
@@ -651,9 +652,11 @@ async function smRefresh(){
 async function smLoad(){
   document.getElementById('smLoading').textContent='加载中...';
   try{
-    const r=await fetch(`${API}/api/smart-money/today`).then(r=>r.json());
+    const days=(document.getElementById('smDays')||{}).value||7;
+    const r=await fetch(`${API}/api/smart-money/today?days=${days}`).then(r=>r.json());
     smState.raw = r.data||[];
-    document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
+    const datestr = r.date?('数据日期 '+r.date+' · '):'';
+    document.getElementById('ut').textContent=datestr+'更新于 '+(r.update_time||'');
     smState.chip='all'; smState.q=''; smState.agg=false;
     document.getElementById('smSearch').value=''; document.getElementById('smAgg').checked=false;
     smRender();
@@ -711,6 +714,7 @@ function smRender(){
   });
 }
 document.getElementById('smSearch').oninput=e=>{smState.q=e.target.value;smRender();};
+document.getElementById('smDays').onchange=()=>smLoad();
 document.getElementById('smAgg').onchange=e=>{smState.agg=e.target.checked;smRender();};
 document.getElementById('smRefresh').onclick=smRefresh;
 // smart tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
