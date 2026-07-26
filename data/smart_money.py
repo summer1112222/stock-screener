@@ -562,12 +562,17 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
         if df is None or df.empty:
             continue
         col_holder = _first_col(df, ["股东名称", "股东"])
+        col_chg = _first_col(df, ["增减", "变动股数", "持股变动", "变化"])
         for _, r in df.iterrows():
             holder = r.get(col_holder)
             if holder is None:
                 continue
+            # 增减=持股变动股数(股)；'不变'/非数值→0。作 amount 让前端净额列有数(单位股)
+            chg = _to_float(r.get(col_chg))
+            if chg is None:
+                chg = 0.0
             recs.append(_rec(date, code, sp.get("name"), "股票", "十大股东",
-                            holder, "持仓", None, as_of=as_of,
+                            holder, "持仓", chg, as_of=as_of,
                             raw={k: _clean(v) for k, v in r.items()}))
     # 区分真空 vs 全失败：tried>0 但 recs 空=全失败标不可用；tried=0=无候选
     if not recs:
