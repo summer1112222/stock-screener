@@ -193,3 +193,43 @@ def test_disclaimer_attached(monkeypatch):
     res = quality.quality_rank("stock", min_dims=1)
     assert "cand_disclaimer" in res
     assert "非荐股" in res["cand_disclaimer"]
+
+
+SPOT_STOCK_FULL = [
+    {"code": "000001", "name": "甲", "latest_price": 10.0, "change_pct": 2.0,
+     "turnover_amount": 1e8, "turnover_rate": 3.0, "main_net_inflow": 5e7,
+     "pe": 8.0, "pb": 0.9, "amplitude": 2.0},
+    {"code": "000004", "name": "丁", "latest_price": 6.0, "change_pct": 1.0,
+     "turnover_amount": 6e7, "turnover_rate": 2.0, "main_net_inflow": 1e7,
+     "pe": 30.0, "pb": 3.0, "amplitude": 8.0},
+]
+
+
+def test_quality_dim2_spot_proxy_fallback(monkeypatch):
+    """buffett _AK_OK=False → 口径2 spot 代理分位非 None、dim_status/source_health 标降级。"""
+    import backtest.buffett as bt_buf
+    monkeypatch.setattr(bt_buf, "_AK_OK", False)
+    monkeypatch.setattr(db, "query_rows",
+                        lambda table, **kw: SPOT_STOCK_FULL if table == "stock_spot" else [])
+    res = quality.quality_rank("stock", min_turnover=5e7, limit_pct=9.9)
+    assert res["dim_status"].get("2", "").startswith("ok(降级spot估值代理)")
+    assert res.get("source_health", {}).get("2", "").startswith("ok(降级")
+    item = next((x for x in res["main"] if x["code"] == "000001"), None)
+    assert item is not None
+    assert item["dim_scores"].get(2) is not None
+    item2 = next((x for x in res["main"] if x["code"] == "000004"), None)
+    if item2:
+        assert item["dim_scores"][2] >= item2["dim_scores"][2]
+
+
+def test_quality_dim2_main_path_intact(monkeypatch):
+    """buffett 正常但 shortlist 空+analyze_many 空 → 触发降级路径（主路径逻辑可被降级接续）。"""
+    import backtest.buffett as bt_buf
+    monkeypatch.setattr(bt_buf, "_AK_OK", True)
+    monkeypatch.setattr(bt_buf, "shortlist_by_turnover",
+                        lambda min_turnover=5e8, k=80: [])
+    monkeypatch.setattr(bt_buf, "analyze_many", lambda codes: [])
+    monkeypatch.setattr(db, "query_rows",
+                        lambda table, **kw: SPOT_STOCK_FULL if table == "stock_spot" else [])
+    res = quality.quality_rank("stock", min_turnover=5e7, limit_pct=9.9)
+    assert res["dim_status"].get("2", "").startswith("ok(降级")
