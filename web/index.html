@@ -610,7 +610,7 @@ function smChannelsHtml(channels){
     const dt=v&&v.date?`(${v.date})`:'';
     const reason=stale?('回退至 '+(v.stale_date||'')+' '+(v.err||''))
                   :(ok?(v.source||'ok'):(v.err||'不可用'));
-    const title=`${k}：${reason} ${rows} ${dt}`;
+    const title=`${k}：${reason} ${rows} ${dt}`.replace(/"/g,'&quot;');
     return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">${stale?'◐':'●'}${k}${rows}</span>`;
   }).join('');
 }
