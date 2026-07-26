@@ -90,9 +90,9 @@ def _stale_fallback(channel: str, err: str) -> tuple[list[dict], bool, str]:
 
 ### 4.3 十大股东国家队反向刷新
 
-- 新增常量 `NATIONAL_TEAM_HOLDINGS_SEED`：种子代码 ~30 只（初版人工填入已知国家队重仓大盘股；空库首次部署可由 `by_actor("国家队", days=365)` 历史汇总去重得到）。
+- 新增常量 `NATIONAL_TEAM_HOLDINGS_SEED`：种子代码 ~30 只，**硬编兜底**（已知国家队重仓大盘股，如沪深300成分里的证金/汇金/社保重仓股；首次部署即有候选，不依赖历史数据）。
 - `collect_holders` 候选集 = 成交额前 200 ∪ 种子名单（去重）。逐股拉 `stock_gdfx_free_top_10_em`。
-- 学习式扩充：每次成功拉取后，把新命中国家队关键字（`NATIONAL_TEAM` 任一）的 code 并入种子，落 meta `nt_holdings_seed`（JSON 逗号分隔），下次启动加载为种子初值。
+- 学习式扩充：每次成功拉取后，把新命中国家队关键字（`NATIONAL_TEAM` 任一）的 code 并入种子，落 meta `nt_holdings_seed`（JSON 逗号分隔），下次启动加载为种子初值（与硬编常量并集）。**不依赖 `by_actor` 冷启动**（空库无历史时 `by_actor` 本身无数据，不可靠）。
 - 季频 60 天跳过逻辑（已有）保留。
 
 **单测**：`test_holders_seed_union` — 种子 5 只 ∪ shortlist 200 只去重后逐股拉（mock），覆盖 1 只仅种子命中、shortlist 外的国家队小盘股。
@@ -111,9 +111,11 @@ if status.get("2", "").startswith("err"):
     try:
         pe = pd.to_numeric(df.get("pe"), errors="coerce")
         pb = pd.to_numeric(df.get("pb"), errors="coerce")
-        cap = pd.to_numeric(df.get("circulating_market_cap"), errors="coerce")
+        amp = pd.to_numeric(df.get("amplitude"), errors="coerce")
         tr = pd.to_numeric(df.get("turnover_rate"), errors="coerce")
-        comp = (_zscore(-pe) + _zscore(-pb) + _zscore(-cap) + _zscore(tr)) / 4
+        # pe/pb 负向(越低越便宜→价值)；amplitude 负向(低波动→质量)；turnover_rate 正向(流动性)
+        # 不用 circulating_market_cap：负向会引入 size factor 偏差，与"价值质量"口径不符
+        comp = (_zscore(-pe) + _zscore(-pb) + _zscore(-amp) + _zscore(tr)) / 4
         pct = _to_pct(comp)
         for c in codes:
             scores[c][2] = _to_float(pct.get(c)) if c in pct.index else None
@@ -123,7 +125,8 @@ if status.get("2", "").startswith("err"):
         status["2"] = f"err:buffett与spot代理均失败:{e}"
 ```
 
-- `pe/pb/cap` 负向（越低越便宜→价值），`turnover_rate` 正向（流动性）。
+- `pe/pb/amplitude` 负向（价值+低波动=质量），`turnover_rate` 正向（流动性）。
+- **不用 `circulating_market_cap`**：负向 cap 会引入 size factor 偏差（偏好小盘），与 buffett 主路径的 earnings_yield/moat/lroe 语义不符。
 - 全 None 列时 `_zscore` 返回全 0（已有守护），分位均 0.5，不崩。
 - ETF 口径2 不变（跟踪误差+成交额稳定）。
 
