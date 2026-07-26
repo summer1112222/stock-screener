@@ -446,7 +446,7 @@ def sm_today(date: str | None = Query(None),
              market: str | None = Query(None)):
     res = sm_query.today_list(date, channel, market)
     return _wrap(res["rows"], {
-        "total": res["total"], "date": date,
+        "total": res["total"], "date": res.get("date", date),
         "cand_disclaimer": SM_CAND_DISCLAIMER})
 
 

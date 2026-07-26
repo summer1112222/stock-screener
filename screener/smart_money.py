@@ -19,8 +19,17 @@ def _expand_national_team() -> list[str]:
 
 def today_list(date: str | None = None, channel: str | None = None,
                market: str | None = None) -> dict:
-    """用法 A：某日主力动向清单，按 amount 降序。"""
+    """用法 A：某日主力动向清单，按 amount 降序。
+    date 省略时默认取表内最新日期，避免返回全表（数万行）拖慢加载。"""
     where, params = [], []
+    if not date:
+        try:
+            latest = db.query_rows("smart_money_action",
+                                   order_by="date DESC", limit=1)
+            if latest:
+                date = latest[0].get("date")
+        except Exception:
+            pass
     if date:
         where.append("date = ?"); params.append(date)
     if channel:
@@ -30,7 +39,7 @@ def today_list(date: str | None = None, channel: str | None = None,
     w = " AND ".join(where) if where else ""
     rows = db.query_rows("smart_money_action", where=w, params=tuple(params),
                          order_by="amount DESC", limit=0)
-    return {"rows": rows, "total": len(rows)}
+    return {"rows": rows, "total": len(rows), "date": date}
 
 
 def by_actor(actor: str, days: int = 30) -> dict:

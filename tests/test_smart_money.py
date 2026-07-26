@@ -418,3 +418,11 @@ def test_holders_seed_learning(monkeypatch, tmp_path):
     assert ok
     assert "nt_holdings_seed" in saved
     assert "600519" in saved["nt_holdings_seed"]
+
+
+def test_today_list_defaults_to_latest_date(sm_db):
+    """date 省略时默认取表内最新日期(避免返回全表拖慢加载)。SM_ROWS 最新 2026-07-14。"""
+    res = smq.today_list()
+    assert res["date"] == "2026-07-14"
+    assert all(r["date"] == "2026-07-14" for r in res["rows"])
+    assert res["total"] == 2   # 2026-07-14 有 2 行(龙虎榜+资金流)
