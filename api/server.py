@@ -62,6 +62,104 @@ def meta():
     return _wrap({"update_time": db.last_update_time()})
 
 
+import datetime as _dt
+
+
+def _domain_status(rows, latest, stale=False, has_old=True):
+    """三态：red(空/失败) > yellow(stale 或非当日有旧) > green(当日非空)。"""
+    if rows is None:
+        return "red"
+    if rows == 0:
+        return "red" if not has_old else "yellow"
+    if stale:
+        return "yellow"
+    if latest and latest.startswith(_dt.date.today().strftime("%Y-%m-%d")):
+        return "green"
+    if latest:
+        return "yellow"
+    return "green"
+
+
+def _collect_health():
+    """聚合 7 数据域健康（只读，单域失败不崩）。非荐股，默认 disclaimer。"""
+    domains = {}
+    try:
+        with db.get_conn() as conn:
+            def _q(sql):
+                return conn.execute(sql).fetchone()
+            def _n(t):
+                try:
+                    r = _q(f"SELECT COUNT(*) AS n FROM {t}")
+                    return r["n"] if r else 0
+                except Exception:
+                    return None
+            ut = db.last_update_time()
+            ss, es = _n("stock_spot"), _n("etf_spot")
+            domains["spot"] = {"stock": {"rows": ss}, "etf": {"rows": es},
+                               "status": _domain_status((ss or 0)+(es or 0), ut)}
+            try:
+                h = _q("SELECT COUNT(*) AS n, MIN(date) AS mn, MAX(date) AS mx, "
+                       "COUNT(DISTINCT code) AS cc FROM stock_daily")
+                etd, bdd = _n("etf_daily"), _n("board_daily")
+                domains["history"] = {"rows": h["n"] if h else 0, "codes": h["cc"] if h else 0,
+                                      "date_range": [h["mn"], h["mx"]] if h else [None, None],
+                                      "etf_rows": etd, "board_rows": bdd,
+                                      "status": "green" if h and h["n"] else "red"}
+            except Exception as e:
+                domains["history"] = {"status": "red", "err": str(e)}
+            try:
+                smr = _q("SELECT COUNT(*) AS n, MAX(date) AS d FROM smart_money_action")
+                ch = smart_money.channel_status()
+                any_stale = any(v.get("stale") for v in ch.values())
+                any_red = any(not v.get("ok") and not v.get("last_ok_date") for v in ch.values())
+                domains["smart_money"] = {"channels": ch, "rows": smr["n"] if smr else 0,
+                                          "latest_date": smr["d"] if smr else "",
+                                          "status": "red" if any_red else ("yellow" if any_stale else "green")}
+            except Exception as e:
+                domains["smart_money"] = {"status": "red", "err": str(e)}
+            try:
+                fa, fc = _n("financial_abstract_cache"), _n("fundamentals_cache")
+                domains["fundamentals"] = {"abstract": {"hit": fa or 0}, "full": {"hit": fc or 0},
+                                            "status": "green" if (fa or fc) else "red"}
+            except Exception as e:
+                domains["fundamentals"] = {"status": "red", "err": str(e)}
+            try:
+                rr = _q("SELECT COUNT(*) AS n, MAX(date) AS d FROM research_report")
+                domains["research"] = {"rows": rr["n"] if rr else 0, "latest": rr["d"] if rr else "",
+                                       "status": _domain_status(rr["n"] if rr else 0, rr["d"] if rr else "")}
+            except Exception as e:
+                domains["research"] = {"status": "red", "err": str(e)}
+            try:
+                sl = _q("SELECT COUNT(*) AS n FROM st_list")
+                domains["st_list"] = {"rows": sl["n"] if sl else 0,
+                                      "status": _domain_status(sl["n"] if sl else 0, ut)}
+            except Exception as e:
+                domains["st_list"] = {"status": "red", "err": str(e)}
+            try:
+                pf = _q("SELECT COUNT(*) AS n FROM portfolio")
+                domains["portfolio"] = {"positions": pf["n"] if pf else 0, "status": "green"}
+            except Exception as e:
+                domains["portfolio"] = {"status": "red", "err": str(e)}
+    except Exception as e:
+        for k in ("spot", "history", "smart_money", "fundamentals",
+                  "research", "st_list", "portfolio"):
+            domains.setdefault(k, {"status": "red", "err": str(e)})
+    order = {"red": 0, "yellow": 1, "green": 2}
+    overall = "green"
+    for d in domains.values():
+        s = d.get("status", "red")
+        if order.get(s, 0) < order.get(overall, 2):
+            overall = s
+    return {"domains": domains, "update_time": db.last_update_time(),
+            "last_refresh_time": db.last_update_time(), "overall": overall}
+
+
+@app.get("/api/health")
+def health():
+    """数据健康聚合（只读）：各域新鲜度三态+overall。非荐股，默认 disclaimer。"""
+    return _wrap(_collect_health())
+
+
 @app.get("/api/fields")
 def fields():
     """返回字段目录 + 运算符，供前端动态渲染条件表单。"""

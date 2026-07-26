@@ -92,6 +92,13 @@
     <span class="ut" id="ut">数据未加载</span>
   </header>
 
+  <div id="healthBar" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">
+    <span id="hbOverall" style="font-size:14px">●</span>
+    <span id="hbTime">数据 …</span>
+    <span id="hbDots" style="color:var(--muted)"></span>
+    <button id="hbDetail" class="btn ghost" type="button" style="font-size:12px;padding:2px 10px">详情▾</button>
+  </div>
+
   <nav class="tabs">
     <button class="active" data-tab="screen" type="button">实时筛选</button>
     <button data-tab="backtest" type="button">历史回测</button>
@@ -216,6 +223,7 @@
       <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
         <div id="smChannels" style="display:flex;gap:10px;flex-wrap:wrap"></div>
         <button class="btn ghost" id="smRefresh" type="button">刷新主力动向</button>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px"><input type="checkbox" id="smAutoRefresh" checked> 进入时自动刷新</label>
         <span id="smLoading" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div class="row" style="align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
@@ -264,6 +272,16 @@
       <div id="pfOut" style="margin-top:10px"></div>
     </div>
   </aside>
+
+  <aside id="healthDrawer" hidden style="position:fixed;right:0;top:0;bottom:0;width:360px;background:var(--bg);border-left:1px solid var(--border);padding:16px;overflow-y:auto;z-index:50">
+    <div class="card-t" style="display:flex;justify-content:space-between">数据健康 <button onclick="toggleHealth()" type="button" class="btn ghost">×</button></div>
+    <div id="healthBody" style="margin-top:12px"></div>
+    <div style="margin-top:16px">
+      <div id="hbRefreshTime" style="color:var(--muted);font-size:12px"></div>
+      <button id="hbRefresh" class="btn" type="button" style="margin-top:6px">手动刷新采集</button>
+    </div>
+    <div class="disc" style="margin-top:16px"><b>数据健康</b>为新鲜度观察，非投资建议。</div>
+  </aside>
 </div>
 <script>
 const API = '';  // 同源：FastAPI 同时托管前端与 /api；本地/Docker 均访问 http://host:8000/web/index.html
@@ -277,7 +295,11 @@ const _tabLoaded = {};
 function ensureTabLoaded(name){
   if(_tabLoaded[name]) return;
   _tabLoaded[name] = true;
-  if(name==='smart'){ smLoadChannels(); smLoad(); }
+  if(name==='smart'){
+    // 首次进 tab 且勾选"进入时自动刷新"→拉最新(6 通道采集)；之后只读缓存，手点按钮再刷新
+    if(document.getElementById('smAutoRefresh').checked){ smRefresh(); }
+    else{ smLoadChannels(); smLoad(); }
+  }
   if(name==='quality'){ qsLoad(); }
 }
 function switchTab(name){
@@ -598,13 +620,15 @@ document.getElementById('bfTop').onclick=()=>bfTop('priority');
 const smState = {raw:[], chip:'all', q:'', agg:false};
 function smChannelsHtml(channels){
   return Object.entries(channels||{}).map(([k,v])=>{
+    const stale=v&&v.stale;
     const ok=v&&v.ok;
-    const color=ok?'#16A34A':'#5C6884';
+    const color=stale?'#F59E0B':(ok?'#16A34A':'#5C6884');
     const rows=v&&v.rows!=null?`:${v.rows}行`:'';
     const dt=v&&v.date?`(${v.date})`:'';
-    const reason=ok?(v.source||'ok'):(v.err||'不可用');
-    const title=`${k}：${reason} ${rows} ${dt}`;
-    return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">●${k}${rows}</span>`;
+    const reason=stale?('回退至 '+(v.stale_date||'')+' '+(v.err||''))
+                  :(ok?(v.source||'ok'):(v.err||'不可用'));
+    const title=`${k}：${reason} ${rows} ${dt}`.replace(/"/g,'&quot;');
+    return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">${stale?'◐':'●'}${k}${rows}</span>`;
   }).join('');
 }
 async function smLoadChannels(){
@@ -646,24 +670,45 @@ function smRender(){
   if(smState.chip!=='all') rows=rows.filter(x=>x.channel===smState.chip);
   if(smState.q){const q=smState.q.toLowerCase();rows=rows.filter(x=>((x.code||'')+(x.actor||'')+(x.name||'')).toLowerCase().indexOf(q)>=0);}
   const CAP=300;
+  // 排序：点击表头切换列/方向。amount 默认按绝对值降序，其余按值 asc/desc。
+  const SK=smState.sortKey||'amount', SD=smState.sortDir||'desc';
+  const _arrow=k=>SK===k?(SD==='desc'?' ▼':' ▲'):'';
+  const _cmp=(a,b,k)=>{ // 数值比较（amount 按绝对值，n 按值）
+    const va=k==='amount'?Math.abs(a[k]||0):(a[k]||0), vb=k==='amount'?Math.abs(b[k]||0):(b[k]||0);
+    return SD==='desc'? (vb-va) : (va-vb);
+  };
+  const _scmp=(a,b,k)=>{const va=String(a[k]??''),vb=String(b[k]??'');return SD==='desc'?vb.localeCompare(va):va.localeCompare(vb);};
   let ths, trs, note;
   if(smState.agg){
     const m={};
     rows.forEach(x=>{const a=x.actor||'—';m[a]=(m[a]||0)+(x.amount||0);});
-    const arr=Object.entries(m).map(([a,v])=>({actor:a,amount:v,n:rows.filter(x=>(x.actor||'—')===a).length}));
-    arr.sort((a,b)=>Math.abs(b.amount)-Math.abs(a.amount));
+    let arr=Object.entries(m).map(([a,v])=>({actor:a,amount:v,n:rows.filter(x=>(x.actor||'—')===a).length}));
+    arr.sort((a,b)=> SK==='actor'?_scmp(a,b,'actor'):_cmp(a,b,SK));
     const shown=arr.slice(0,CAP);
-    ths=['席位/股东','累计净额(元)','次数'].map(h=>`<th class="num">${h}</th>`).join('');
+    const cols=[['actor','席位/股东'],['amount','累计净额(元)'],['n','次数']];
+    ths=cols.map(([k,h])=>`<th class="num${k==='amount'||k==='n'?'':''}" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
     trs=shown.map(x=>`<tr><td>${x.actor}</td><td class="num">${fmtNum(x.amount)}</td><td class="num">${x.n}</td></tr>`).join('');
-    note=`<div class="skipped">按席位聚合，前 ${shown.length} (共 ${arr.length} 席位)</div>`;
+    note=`<div class="skipped">按席位聚合，前 ${shown.length} (共 ${arr.length} 席位)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}</div>`;
   }else{
-    rows=[...rows].sort((a,b)=>Math.abs(b.amount||0)-Math.abs(a.amount||0));
-    const shown=rows.slice(0,CAP);
-    ths=['日期','代码','名称','市场','通道','席位/股东','动作','净额(元)'].map(h=>`<th class="num">${h}</th>`).join('');
+    let sr=[...rows].sort((a,b)=> SK==='amount'?_cmp(a,b,'amount')
+      : ['code','name','date','market','channel','actor','action'].includes(SK)?_scmp(a,b,SK)
+      : _cmp(a,b,'amount'));
+    const shown=sr.slice(0,CAP);
+    const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
+      ?'<span style="color:var(--muted);font-size:12px">北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>':'';
+    const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额(元)']];
+    ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
     trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${fmtNum(x.amount)}</td></tr>`).join('');
-    note=rows.length>CAP?`<div class="skipped">按净额绝对值降序前 ${CAP} 条(共 ${rows.length} 条)，其余折叠防卡顿</div>`:'';
+    note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}，其余折叠防卡顿</div>`:'');
   }
   document.getElementById('smOut').innerHTML = trs?(note+`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`):(note||'<div class="empty">无当日主力动向(先点"刷新主力动向"采集；东财被封通道显示未采集)</div>');
+  // 表头点击排序
+  document.querySelectorAll('#smOut th[data-sk]').forEach(th=>th.onclick=()=>{
+    const k=th.dataset.sk;
+    if(SK===k){ smState.sortDir = SD==='desc'?'asc':'desc'; }
+    else { smState.sortKey=k; smState.sortDir = (k==='amount'||k==='n')?'desc':'asc'; }
+    smRender();
+  });
 }
 document.getElementById('smSearch').oninput=e=>{smState.q=e.target.value;smRender();};
 document.getElementById('smAgg').onchange=e=>{smState.agg=e.target.checked;smRender();};
@@ -711,6 +756,53 @@ document.getElementById('qsRun').onclick=qsLoad;
 document.getElementById('qsUniverse').onchange=qsLoad;
 document.getElementById('qsDays').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
+// ---------------- 数据健康 banner+抽屉(只读聚合) ----------------
+const _HCOLOR={green:'#16A34A',yellow:'#F59E0B',red:'#5C6884'};
+async function healthLoad(){
+  try{
+    const r=await fetch(`${API}/api/health`).then(r=>r.json());
+    const d=r.data||{};
+    document.getElementById('hbTime').textContent='数据 '+(r.update_time||'…');
+    const ov=d.overall||'red';
+    const oE=document.getElementById('hbOverall');
+    oE.style.color=_HCOLOR[ov]||_HCOLOR.red;
+    oE.textContent=ov==='yellow'?'◐':'●';
+    const dom=d.domains||{};
+    document.getElementById('hbDots').innerHTML=Object.entries(dom).map(([k,v])=>{
+      const s=(v&&v.status)||'red';
+      return `<span style="color:${_HCOLOR[s]||_HCOLOR.red};margin-right:8px" title="${k}:${s}">${s==='yellow'?'◐':'●'}${k}</span>`;
+    }).join('');
+    document.getElementById('hbRefreshTime').textContent='上次采集: '+(d.last_refresh_time||r.update_time||'—');
+    if(!document.getElementById('healthDrawer').hidden) healthRender(d);
+  }catch(e){
+    const oE=document.getElementById('hbOverall'); oE.textContent='●'; oE.style.color=_HCOLOR.red;
+    document.getElementById('hbTime').textContent='数据健康检查失败';
+  }
+}
+function healthRender(d){
+  const dom=d.domains||{};
+  const names={spot:'板块/ETF快照',history:'历史日线',smart_money:'主力动向',fundamentals:'财报缓存',research:'研报/千评',st_list:'ST名单',portfolio:'持仓'};
+  const rows=Object.entries(dom).map(([k,v])=>{
+    const s=(v&&v.status)||'red';
+    const det=v?Object.entries(v).filter(([kk])=>kk!=='status'&&kk!=='err').map(([kk,vv])=>`${kk}=${vv instanceof Object?JSON.stringify(vv):vv}`).join(' '):'';
+    const err=v&&v.err?` <span style="color:var(--warn)">${String(v.err).slice(0,40)}</span>`:'';
+    return `<tr><td>${names[k]||k}</td><td style="color:${_HCOLOR[s]||_HCOLOR.red}">${s==='yellow'?'◐':'●'}${s}</td><td style="font-size:11px;color:var(--muted)">${det}${err}</td></tr>`;
+  }).join('');
+  document.getElementById('healthBody').innerHTML=`<table><thead><tr><th>域</th><th>状态</th><th>详情</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function toggleHealth(){
+  const dr=document.getElementById('healthDrawer');
+  dr.hidden=!dr.hidden;
+  if(!dr.hidden) healthLoad();
+}
+document.getElementById('hbDetail').onclick=toggleHealth;
+document.getElementById('hbRefresh').onclick=async function(){
+  const btn=this; btn.disabled=true; btn.textContent='采集中…';
+  try{ await fetch(`${API}/api/smart-money/refresh`,{method:'POST'}); await fetch(`${API}/api/refresh`,{method:'POST'}); }
+  finally{ btn.disabled=false; btn.textContent='手动刷新采集'; await healthLoad(); }
+};
+setInterval(healthLoad,60000);
+window.addEventListener('load',healthLoad);
 </script>
 </body>
 </html>

@@ -137,6 +137,25 @@ def _dim_scores(df, universe, days, min_signals):
                 status["2"] = "ok"
         except Exception as e:
             status["2"] = f"err:{e}"
+        # 降级：buffett 主路径失败(_AK_OK=False / analyze_many 空 / 抛异常) → spot 估值代理
+        # 触发条件：status=err，或主路径"成功"但未产出任何分位（空 shortlist/空 results）
+        if status.get("2", "").startswith("err") or not any(
+                scores.get(c, {}).get(2) is not None for c in codes):
+            try:
+                idx = df["code"].astype(str)
+                pe = pd.to_numeric(df.get("pe"), errors="coerce").set_axis(idx)
+                pb = pd.to_numeric(df.get("pb"), errors="coerce").set_axis(idx)
+                amp = pd.to_numeric(df.get("amplitude"), errors="coerce").set_axis(idx)
+                tr = pd.to_numeric(df.get("turnover_rate"), errors="coerce").set_axis(idx)
+                comp = (_zscore(-pe) + _zscore(-pb) + _zscore(-amp) + _zscore(tr)) / 4
+                pct = _to_pct(comp)
+                for c in codes:
+                    scores[c][2] = _to_float(pct.get(c)) if c in pct.index else None
+                if 2 not in dims_avail:
+                    dims_avail.append(2)
+                status["2"] = "ok(降级spot估值代理)"
+            except Exception as e2:
+                status["2"] = f"err:buffett与spot代理均失败:{e2}"
     else:
         # ETF 口径2：跟踪误差 + 成交额稳定性
         try:
@@ -449,4 +468,5 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     by_dim = {d: [_clean_item(it) for it in lst] for d, lst in by_dim.items()}
     return {"main": main, "by_dim": by_dim, "dims_available": dims_avail,
             "dim_status": dim_status, "min_dims": eff_min_dims,
+            "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4)},
             "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
