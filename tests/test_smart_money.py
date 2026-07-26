@@ -62,7 +62,7 @@ def test_fund_flow_nan_to_none(monkeypatch):
     assert len(recs) == 1                       # NaN 行跳过，不写 amount=null 废行
     assert recs[0]["channel"] == "资金流"
     assert recs[0]["market"] == "股票"
-    assert recs[0]["actor"] == ""               # 无 actor 通道用空串，UNIQUE 去重生效
+    assert recs[0]["actor"] == "主力资金"               # 无 actor 通道用空串，UNIQUE 去重生效
     assert recs[0]["action"] == "净买入"
     assert recs[0]["amount"] == 1.5e8
 
@@ -80,7 +80,7 @@ def test_fund_flow_ths_path_preferred(monkeypatch):
     assert len(recs) == 1
     assert recs[0]["code"] == "600519"
     assert recs[0]["amount"] == 8.22e7
-    assert recs[0]["actor"] == ""
+    assert recs[0]["actor"] == "主力资金"
     assert sm.CHANNEL_STATUS["资金流"]["source"] == "同花顺"
 
 
@@ -156,7 +156,7 @@ def test_upsert_dedup_empty_actor_on_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "query_rows", _qr)
     recs, ok, _ = sm.collect_fund_flow("2026-07-14")
     assert ok and len(recs) == 2
-    assert all(r["actor"] == "" for r in recs)        # 空串，非 None
+    assert all(r["actor"] == "主力资金" for r in recs)  # 资金流 actor=主力资金,UNIQUE 去重生效
     # upsert_rows 不经 mock（直接走真实 conn）
     n1 = db.upsert_rows("smart_money_action", recs)
     n2 = db.upsert_rows("smart_money_action", recs)   # 模拟重刷同日
@@ -283,16 +283,16 @@ def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
     assert ok, err
     assert len(recs) == 2
     assert all(r["channel"] == "北向" for r in recs)
-    assert all(r["actor"] == "" for r in recs)
+    assert all(r["actor"] == "北向资金" for r in recs)
     assert all(r["action"] == "上榜" for r in recs)
     r_sh = next(r for r in recs if r["code"] == "600519")
     assert r_sh["amount"] == 3.2e8
     assert r_sh["action"] == "上榜"
-    assert r_sh["actor"] == ""
+    assert r_sh["actor"] == "北向资金"
     r_sz = next(r for r in recs if r["code"] == "000001")
     assert r_sz["amount"] == 1.1e8
     assert r_sz["action"] == "上榜"
-    assert r_sz["actor"] == ""
+    assert r_sz["actor"] == "北向资金"
     assert sm.CHANNEL_STATUS["北向"]["source"] == "北向十大成交股(盘后)"
 
 

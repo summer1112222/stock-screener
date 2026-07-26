@@ -357,7 +357,7 @@ def collect_fund_flow(date: str) -> tuple[list[dict], bool, str]:
         out = []
         for r in recs_ths:
             out.append(_rec(date, r["code"], r["name"], "股票",
-                            "资金流", "", "净买入", r["amount"],
+                            "资金流", "主力资金", "净买入", r["amount"],
                             raw={"source": "同花顺", "净额(元)": r["amount"]}))
         _set_status("资金流", True, "同花顺", "")
         return out, True, ""
@@ -369,7 +369,7 @@ def collect_fund_flow(date: str) -> tuple[list[dict], bool, str]:
         if amt is None:
             continue
         recs.append(_rec(date, sp.get("code"), sp.get("name"), "股票",
-                        "资金流", "", "净买入", amt,
+                        "资金流", "主力资金", "净买入", amt,
                         raw={k: _clean(v) for k, v in sp.items()
                              if k in ("code", "name", "main_net_inflow",
                                       "change_pct", "turnover_amount")}))
@@ -456,14 +456,14 @@ def collect_northbound(date: str) -> tuple[list[dict], bool, str]:
             col_name = _first_col(df, ["股票简称", "名称", "name"])
             col_amt = _first_col(df, ["持股数量变化", "增持市值", "净买额", "今日增持市值"])
             recs = [_rec(date, r.get(col_code), r.get(col_name), "股票",
-                         "北向", "", "净买入", r.get(col_amt),
+                         "北向", "北向资金", "净买入", r.get(col_amt),
                          raw={k: _clean(v) for k, v in r.items()})
                     for _, r in df.iterrows()]
             _set_status("北向", True, src, "")
             return recs, True, ""
     acc = _nb_acc_flow()
     if acc:
-        recs = [_rec(date, code, name, "股票", "北向", "", "上榜", amt,
+        recs = [_rec(date, code, name, "股票", "北向", "北向资金", "上榜", amt,
                      raw={"source": "北向十大成交股(盘后)", "净额(元)": amt})
                 for code, name, amt in acc]
         _set_status("北向", True, "北向十大成交股(盘后)", "")
