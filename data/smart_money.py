@@ -516,6 +516,40 @@ def collect_dragon_tiger(date: str) -> tuple[list[dict], bool, str]:
 
 
 # ------------------------------------------------------------------
+# 游资营业部统计(龙虎榜席位级,按需 on-demand,不入 smart_money_action)
+# ------------------------------------------------------------------
+def collect_seats(period: str = "近一月") -> dict:
+    """游资营业部龙虎榜统计：ak.stock_lhb_traderstatistic_em(symbol=period)
+    返回 {rows:[{seat,count,buy,sell,net,amount}], total, error}。
+    净额=买入-卖出(>0 净买入游资),按净额降序。机械汇总,非荐股。"""
+    if not _AK_OK:
+        return {"rows": [], "total": 0, "error": _AK_ERR}
+    try:
+        df = ak.stock_lhb_traderstatistic_em(symbol=period)
+    except Exception as e:
+        return {"rows": [], "total": 0, "error": _friendly_err("游资", e)}
+    if df is None or df.empty:
+        return {"rows": [], "total": 0, "error": None}
+    col_name = _first_col(df, ["营业部名称", "营业部"])
+    col_cnt = _first_col(df, ["上榜次数"])
+    col_buy = _first_col(df, ["买入额"])
+    col_sell = _first_col(df, ["卖出额"])
+    col_amt = _first_col(df, ["龙虎榜成交金额"])
+    rows = []
+    for _, r in df.iterrows():
+        buy = _to_float(r.get(col_buy))
+        sell = _to_float(r.get(col_sell))
+        net = (buy - sell) if (buy is not None and sell is not None) else None
+        rows.append({
+            "seat": r.get(col_name), "count": _to_float(r.get(col_cnt)),
+            "buy": buy, "sell": sell, "net": net,
+            "amount": _to_float(r.get(col_amt)),
+        })
+    rows.sort(key=lambda x: x.get("net") or 0, reverse=True)
+    return {"rows": rows, "total": len(rows), "error": None}
+
+
+# ------------------------------------------------------------------
 # 十大流通股东（季频，国家队关键字命中靠查询层 LIKE）
 # ------------------------------------------------------------------
 def collect_holders(date: str) -> tuple[list[dict], bool, str]:

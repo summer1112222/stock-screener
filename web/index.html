@@ -223,6 +223,8 @@
       <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
         <div id="smChannels" style="display:flex;gap:10px;flex-wrap:wrap"></div>
         <button class="btn ghost" id="smRefresh" type="button">刷新主力动向</button>
+        <button class="btn ghost" id="smSeats" type="button" title="龙虎榜营业部(游资席位)上榜次数/买入/卖出/净额统计">游资营业部统计</button>
+        <select id="smSeatsPeriod" class="btn ghost" style="font-size:12px" title="统计周期"><option>近一月</option><option>近三月</option><option>近六月</option><option>近一年</option></select>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px"><input type="checkbox" id="smAutoRefresh"> 进入时自动刷新</label>
         <span id="smLoading" style="font-size:12px;color:var(--muted)"></span>
       </div>
@@ -727,6 +729,25 @@ document.getElementById('smSearch').oninput=e=>{smState.q=e.target.value;smRende
 document.getElementById('smDays').onchange=()=>smLoad();
 document.getElementById('smAgg').onchange=e=>{smState.agg=e.target.checked;smRender();};
 document.getElementById('smRefresh').onclick=smRefresh;
+// 游资营业部统计(龙虎榜席位级,on-demand)
+async function smSeatsLoad(){
+  const period=document.getElementById('smSeatsPeriod').value||'近一月';
+  const out=document.getElementById('smOut');
+  document.getElementById('smLoading').textContent='游资营业部统计加载中...';
+  try{
+    const r=await fetch(`${API}/api/smart-money/seats?period=${encodeURIComponent(period)}`).then(r=>r.json());
+    const rows=r.data||[];
+    document.getElementById('ut').textContent='游资统计 '+period+' · 更新于 '+(r.update_time||'');
+    if(r.error||!rows.length){ out.innerHTML='<div class="empty">'+(r.error||('无游资营业部数据('+period+')'))+'</div>'; return; }
+    const shown=rows.slice(0,300);
+    const ths=['排名','营业部(游资席位)','上榜次数','买入额(元)','卖出额(元)','净额(元)'].map(h=>`<th class="num">${h}</th>`).join('');
+    const trs=shown.map((x,i)=>`<tr><td class="num">${i+1}</td><td>${x.seat||'—'}</td><td class="num">${x.count||0}</td><td class="num">${fmtNum(x.buy)}</td><td class="num">${fmtNum(x.sell)}</td><td class="num" style="color:${(x.net||0)>=0?'#16A34A':'#F59E0B'}">${fmtNum(x.net)}</td></tr>`).join('');
+    out.innerHTML=`<div class="skipped">按净额(买入-卖出)降序前 ${shown.length} (共 ${rows.length} 营业部)，周期 ${period}</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  }catch(e){ out.innerHTML='<div class="empty">加载失败: '+e+'</div>'; }
+  finally{ document.getElementById('smLoading').textContent=''; }
+}
+document.getElementById('smSeats').onclick=smSeatsLoad;
+document.getElementById('smSeatsPeriod').onchange=smSeatsLoad;
 // smart tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------

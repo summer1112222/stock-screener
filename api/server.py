@@ -465,6 +465,17 @@ def sm_channels():
     return _wrap(smart_money.channel_status())
 
 
+@app.get("/api/smart-money/seats")
+def sm_seats(period: str = Query("近一月")):
+    """游资营业部龙虎榜统计(席位级,按需 on-demand)：上榜次数/买入额/卖出额/净额。
+    机械汇总,非荐股非买卖信号。period ∈ 近一月/近三月/近六月/近一年。"""
+    res = smart_money.collect_seats(period)
+    return _wrap(res.get("rows", []), {
+        "total": res.get("total", 0), "period": period,
+        "error": res.get("error"),
+        "cand_disclaimer": SM_CAND_DISCLAIMER})
+
+
 # ------------------------------------------------------------------
 # ST名单 / 高管增减持 / 限售解禁 / 研报评级 / 千股千评（观察清单口径）
 # ------------------------------------------------------------------
