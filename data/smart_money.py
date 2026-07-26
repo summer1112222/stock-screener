@@ -549,6 +549,56 @@ def collect_seats(period: str = "近一月") -> dict:
     return {"rows": rows, "total": len(rows), "error": None}
 
 
+def collect_seats_stocks(date: str | None = None) -> dict:
+    """游资追逐个股(席位明细): 对该日龙虎榜个股逐个调
+    stock_lhb_stock_detail_em(symbol,date,'买入') 取买入席位明细。
+    返回 {rows:[{date,code,name,seat,buy,sell,net}], total, date, error}。
+    慢(约 N 股 × 1 调用,N≈10-30),on-demand 不入库,机械汇总非荐股。
+    ETF 不上龙虎榜,仅个股。"""
+    if not _AK_OK:
+        return {"rows": [], "total": 0, "error": _AK_ERR}
+    if not date:
+        try:
+            latest = db.query_rows("smart_money_action", where="channel = ?",
+                                   params=("龙虎榜",), order_by="date DESC", limit=1)
+            date = latest[0].get("date") if latest else None
+        except Exception:
+            date = None
+    if not date:
+        return {"rows": [], "total": 0, "date": None, "error": "无龙虎榜数据日期"}
+    stocks = db.query_rows("smart_money_action",
+                           where="channel = ? AND date = ?",
+                           params=("龙虎榜", date), limit=0)
+    if not stocks:
+        return {"rows": [], "total": 0, "date": date, "error": f"{date} 无龙虎榜个股"}
+    dash = date.replace("-", "")
+    rows = []
+    for s in stocks:
+        code = str(s.get("code") or "")
+        if not code:
+            continue
+        try:
+            df = ak.stock_lhb_stock_detail_em(symbol=code, date=dash, flag="买入")
+        except Exception:
+            continue   # 单股失败不丢全量
+        if df is None or df.empty:
+            continue
+        col_seat = _first_col(df, ["交易营业部名称", "营业部名称", "席位"])
+        col_buy = _first_col(df, ["买入金额"])
+        col_sell = _first_col(df, ["卖出金额"])
+        col_net = _first_col(df, ["净额"])
+        for _, r in df.iterrows():
+            seat = r.get(col_seat)
+            if not seat:
+                continue
+            rows.append({"date": date, "code": code, "name": s.get("name"),
+                         "seat": seat, "buy": _to_float(r.get(col_buy)),
+                         "sell": _to_float(r.get(col_sell)),
+                         "net": _to_float(r.get(col_net))})
+    rows.sort(key=lambda x: x.get("net") or 0, reverse=True)
+    return {"rows": rows, "total": len(rows), "date": date, "error": None}
+
+
 # ------------------------------------------------------------------
 # 十大流通股东（季频，国家队关键字命中靠查询层 LIKE）
 # ------------------------------------------------------------------

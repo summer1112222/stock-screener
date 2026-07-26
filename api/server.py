@@ -476,6 +476,17 @@ def sm_seats(period: str = Query("近一月")):
         "cand_disclaimer": SM_CAND_DISCLAIMER})
 
 
+@app.get("/api/smart-money/seats-stocks")
+def sm_seats_stocks(date: str | None = Query(None)):
+    """游资追逐个股(席位明细,按需 on-demand):对该日龙虎榜个股逐个取买入席位。
+    慢(N股×1调用),仅个股(ETF不上龙虎榜)。机械汇总,非荐股。"""
+    res = smart_money.collect_seats_stocks(date)
+    return _wrap(res.get("rows", []), {
+        "total": res.get("total", 0), "date": res.get("date"),
+        "error": res.get("error"),
+        "cand_disclaimer": SM_CAND_DISCLAIMER})
+
+
 # ------------------------------------------------------------------
 # ST名单 / 高管增减持 / 限售解禁 / 研报评级 / 千股千评（观察清单口径）
 # ------------------------------------------------------------------

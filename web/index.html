@@ -224,6 +224,7 @@
         <div id="smChannels" style="display:flex;gap:10px;flex-wrap:wrap"></div>
         <button class="btn ghost" id="smRefresh" type="button">刷新主力动向</button>
         <button class="btn ghost" id="smSeats" type="button" title="龙虎榜营业部(游资席位)上榜次数/买入/卖出/净额统计">游资营业部统计</button>
+        <button class="btn ghost" id="smSeatsStocks" type="button" title="该日龙虎榜个股逐个取买入席位明细(慢,仅个股)">游资追逐个股</button>
         <select id="smSeatsPeriod" class="btn ghost" style="font-size:12px" title="统计周期"><option>近一月</option><option>近三月</option><option>近六月</option><option>近一年</option></select>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px"><input type="checkbox" id="smAutoRefresh"> 进入时自动刷新</label>
         <span id="smLoading" style="font-size:12px;color:var(--muted)"></span>
@@ -748,6 +749,23 @@ async function smSeatsLoad(){
 }
 document.getElementById('smSeats').onclick=smSeatsLoad;
 document.getElementById('smSeatsPeriod').onchange=smSeatsLoad;
+// 游资追逐个股(席位明细,逐股取买入席位,慢)
+async function smSeatsStocksLoad(){
+  const out=document.getElementById('smOut');
+  document.getElementById('smLoading').textContent='游资追逐个股加载中(逐股取席位,约10-30s)...';
+  try{
+    const r=await fetch(`${API}/api/smart-money/seats-stocks`).then(r=>r.json());
+    const rows=r.data||[];
+    document.getElementById('ut').textContent='游资追逐个股 '+(r.date||'')+' · 更新于 '+(r.update_time||'');
+    if(r.error||!rows.length){ out.innerHTML='<div class="empty">'+(r.error||('无数据'))+'</div>'; return; }
+    const shown=rows.slice(0,400);
+    const ths=['日期','代码','名称','席位(营业部)','买入额(元)','卖出额(元)','净额(元)'].map(h=>`<th class="num">${h}</th>`).join('');
+    const trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.seat||'—'}</td><td class="num">${fmtNum(x.buy)}</td><td class="num">${fmtNum(x.sell)}</td><td class="num" style="color:${(x.net||0)>=0?'#16A34A':'#F59E0B'}">${fmtNum(x.net)}</td></tr>`).join('');
+    out.innerHTML=`<div class="skipped">按席位净额降序前 ${shown.length} (共 ${rows.length} 条,日期 ${r.date}),ETF不上龙虎榜故仅个股</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  }catch(e){ out.innerHTML='<div class="empty">加载失败: '+e+'</div>'; }
+  finally{ document.getElementById('smLoading').textContent=''; }
+}
+document.getElementById('smSeatsStocks').onclick=smSeatsStocksLoad;
 // smart tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------
