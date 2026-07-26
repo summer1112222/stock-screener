@@ -72,6 +72,7 @@ def channel_status() -> dict:
                 sd, _err = meta.split("|", 1)
                 st.setdefault("stale_date", sd)
                 st.setdefault("stale", True)
+                st.setdefault("stale_note", f"采集失败: {_err}")
             st.setdefault("stale", False)
             st.setdefault("last_ok_date", _last_ok_date(ch))
             n = counts.get(ch, 0) if latest else 0
