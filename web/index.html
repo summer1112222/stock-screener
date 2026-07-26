@@ -305,6 +305,7 @@ function ensureTabLoaded(name){
     else{ smLoadChannels(); smLoad(); }
   }
   if(name==='quality'){ qsLoad(); }
+  if(name==='backtest'){ btRun(); }   // 首次进回测页自动跑默认ETF回测(默认codes有历史),免空白
 }
 function switchTab(name){
   document.querySelectorAll('.tabs button[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));

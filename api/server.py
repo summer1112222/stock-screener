@@ -98,8 +98,9 @@ def _collect_health():
             domains["spot"] = {"stock": {"rows": ss}, "etf": {"rows": es},
                                "status": _domain_status((ss or 0)+(es or 0), ut)}
             try:
+                # stock_daily 列名是 symbol(非 code),board_daily 是 name;etf_daily 是 code
                 h = _q("SELECT COUNT(*) AS n, MIN(date) AS mn, MAX(date) AS mx, "
-                       "COUNT(DISTINCT code) AS cc FROM stock_daily")
+                       "COUNT(DISTINCT symbol) AS cc FROM stock_daily")
                 etd, bdd = _n("etf_daily"), _n("board_daily")
                 domains["history"] = {"rows": h["n"] if h else 0, "codes": h["cc"] if h else 0,
                                       "date_range": [h["mn"], h["mx"]] if h else [None, None],
