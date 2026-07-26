@@ -1,110 +1,106 @@
-# A股板块/ETF 条件筛选器（本地原型）
+# A股板块/ETF 筛选器 · 本地研究工具
 
-基于公开数据（AKShare）的板块/ETF 条件筛选工具。**只筛选不荐股、不承诺收益、不输出买卖点。**
+基于公开数据（AKShare）的 A 股**板块/ETF 条件筛选 + 历史回测 + 主力动向观察 + 优质筛选**本地工具。FastAPI 后端 + 原生 JS 单页前端，Docker 一键起。
 
-## ⚠️ 合规声明
+> **只筛选不荐股、不承诺收益、不输出买卖点、不自动下单。** 无证券投资咨询资质。所有输出为"机械排序观察清单/研究优先级"，非投资建议。
 
-本工具是**数据筛选器，非投资咨询**：
+## 合规声明
 
-- 仅基于公开行情/资金流数据做阈值/排名过滤
-- **不荐股、不承诺收益、不输出买卖点、不构成投资建议**
-- 不做与推荐结果挂钩的付费/会员/收益分成
-- 无证券投资咨询资质，不提供任何证券投资咨询服务
+- 本工具是**数据筛选/研究工具，非投资咨询**。
+- 仅基于公开行情/财报/资金流数据做阈值过滤与机械排序，附 `disclaimer` + `update_time`。
+- **不荐股、不承诺收益（含"月 X%"表述）、不输出实时买卖点、不自动下单。**
+- "候选池/优质筛选/主力动向"是按因子机械排序的观察清单，措辞用"筛选/排序/观察清单"，不得用"推荐/买入/卖出"。
+- 市场有风险，投资决策请独立判断，盈亏自负。
 
-## 安装
+## 功能（4 tab + 持仓 + 数据健康）
 
-```bash
-cd D:\claude-info\stock-screener
-pip install -r requirements.txt
-```
+- **实时筛选**：板块/ETF/个股 spot 快照，按字段+运算符条件筛选排序。
+- **历史回测**：IC/分档/topN 回测、walk-forward/bootstrap 风控、机械信号扫描（ma_breakout/golden_cross/volume_surge 等）+ 信号历史胜率。
+- **主力动向**：6 通道观察清单（龙虎榜/十大股东/北向/资金流/高管增减持/限售解禁），通道状态三态灯（绿 ok/黄 stale/灰 从未成功），席位/股东聚合，表头可点击排序。
+- **优质筛选**：四口径（风险调整/价值质量/资金流向/多信号）横截分位 → 共振排序 → 组合层（行业分散+相关性+最小方差权重）。
+- **持仓跟踪**：本地记录买入，按 spot 最新价算浮盈（浮窗抽屉）。
+- **数据健康**：顶部 banner + 抽屉，全局数据新鲜度三态总览（7 域 + overall），60s 轮询，手动刷新采集。
 
-## 核对 AKShare 真实字段名（首次运行必做）
-
-AKShare 版本间字段可能微调。装好后先核对：
-
-```bash
-python -c "import akshare as ak; print(ak.__version__); print(ak.stock_board_industry_name_em().head())"
-```
-
-若列名与 `data/models.py` 的 `BOARD_ALIASES` 不一致，补一个别名映射即可，无需改 schema。
-
-## 运行
+## 快速开始
 
 ```bash
-# 1. 单测（不依赖网络）
-pytest tests/test_engine.py
+# Docker（推荐；Dockerfile 配清华 PyPI 镜像）
+docker compose up --build -d            # 构建并后台启动
+curl -X POST http://localhost:8000/api/refresh   # 首次必做：全量采集
+# 前端：http://localhost:8000/web/index.html
+# API 文档(Swagger)：http://localhost:8000/docs   ReDoc：/redoc
 
-# 2. 启动本地服务
+# 或本地宿主跑（需 pandas/akshare）
 uvicorn api.server:app --reload --port 8000
-
-# 3. 手动触发数据采集（浏览器或 curl）
-curl -X POST http://localhost:8000/api/refresh
-
-# 4. 打开前端验证页（直接双击 web/index.html，或）
-python -m http.server 8080 --directory web
-#    浏览器访问 http://localhost:8080
 ```
 
-## 接口
-
-| 接口 | 说明 |
-|---|---|
-| `GET /api/fields` | 字段目录+运算符，前端动态渲染条件表单 |
-| `GET /api/boards?category=行业&sort=change_pct&limit=20` | 板块排名 |
-| `GET /api/etfs?sort=turnover_amount&limit=30` | ETF 排名 |
-| `GET /api/screen?category=行业&conditions=<json>&sort=&limit=` | 条件筛选 |
-| `POST /api/refresh` | 手动全量采集刷新 |
-| `GET /api/meta` | 最近更新时间 |
-
-所有数据响应都附 `disclaimer` + `update_time`。
-
-## 条件结构
-
-```json
-[{"field": "main_net_inflow", "op": "gt", "value": 0},
- {"field": "change_pct", "op": "between", "value": [0, 3]}]
+停止/清理：
+```bash
+docker compose down          # 停止(保留 SQLite 数据卷)
+docker compose down -v       # 连同数据卷清除
 ```
 
-op ∈ `gt | gte | lt | lte | between | topn`；`between` 用 `[lo,hi]`，`topn` 取前 N 名。
+## 路由速查（按域分组）
 
-## 项目结构
+所有数据响应经 `_wrap()` 附 `disclaimer` + `update_time`；回测/候选池类附 `bt_disclaimer`/`cand_disclaimer`。
+
+| 域 | 路由 | 说明 |
+|---|---|---|
+| 元 | `GET /api/meta`、`/api/health` | 最近更新时间 / 数据健康聚合(7域三态+overall) |
+| 筛选 | `GET /api/fields` `/api/boards` `/api/etfs` `/api/screen` | 字段目录 / 板块·ETF·个股排名 / 条件筛选 |
+| 采集 | `GET|POST /api/refresh` | 手动全量采集 |
+| 历史/回测 | `POST /api/backtest/fetch` `/api/backtest/eval` `/api/backtest/run` `/api/backtest/walkforward` `GET /api/history` | 拉历史日线 / IC分档 / topN回测 / walk-forward / 历史查询 |
+| 候选/信号 | `GET /api/candidates` `POST /api/signals` `/api/signals/backtest` | 候选池排序 / 机械信号扫描 / 信号历史胜率 |
+| 主力动向 | `GET /api/smart-money/today` `POST /api/smart-money/refresh` `/api/smart-money/channels` `/api/management` `/api/share-unlock` `/api/st-list` | 当日清单 / 采集 / 通道状态 / 高管增减持 / 限售解禁 / ST名单 |
+| 优质/基本面 | `GET /api/quality` `/api/buffett` `/api/buffett/top` | 多口径共振 / 巴菲特式基本面评分 |
+| 研报 | `GET /api/research` `/api/comments` | 研报评级 / 千股千评 |
+| 持仓 | `GET|POST /api/portfolio` `/api/portfolio/close` | 本地持仓跟踪 |
+
+## 架构
 
 ```
-stock-screener/
-  data/        collector.py db.py models.py
-  screener/    conditions.py engine.py
-  api/         server.py (FastAPI)
-  web/         index.html (暗色CSS验证页)
-  tests/       test_engine.py (mock单测)
-  config.yaml  预置条件模板
+data/        采集与存储
+  models.py(规范字段/AKShare别名/SQLite schema) db.py(连接/建表/迁移/upsert/query/meta)
+  collector.py(spot快照:板块/ETF/ST) history.py(历史日线)
+  fundamentals.py(三大财报按需+缓存7天TTL) research.py(研报+千股千评)
+  portfolio.py(本地持仓) smart_money.py(主力动向6通道+stale降级+北向多级备援)
+screener/    实时筛选
+  conditions.py(因子目录/运算符) engine.py(快照过滤排序/派生因子)
+  smart_money.py(主力动向查询/聚合,只读)
+backtest/    历史研究
+  eval.py(IC/IR/分档) engine.py(topN回测) risk.py robust.py(风控/walk-forward/bootstrap)
+  candidates.py(候选池) buffett.py(巴菲特基本面v2) signals.py(机械信号)
+  quality.py(四口径共振优质筛选编排层,只读因子源不新增表)
+api/server.py  FastAPI 单文件入口(所有路由 + _wrap)
+web/index.html 单页前端(原生JS,4 tab + 持仓抽屉 + 数据健康banner,从/api/fields动态渲染)
 ```
 
-## Docker Desktop 部署
+**四层 + 两个领域模块**：采集层只取数入库；筛选/查询层只读库不触网；回测层只读历史；`api/server.py` 入口经 `_wrap` 统一附 disclaimer。`quality.py` 是编排层，复用 buffett/signals/smart_money/candidates 结果，不新增表。
+
+## 数据源与已知限制
+
+- 数据源：AKShare（聚合东方财富/新浪/同花顺）。
+- **东财 IP 封禁**：当前出口 IP 被东财封（`RemoteDisconnected`/502）。代码已加备援：板块东财失败→同花顺；资金流走同花顺直取（绕 akshare 列名 bug）；北向实时端点 2024-08 起已下线 → 改走**盘后沪深股通十大成交股**备援（前端表头标注）。
+- **北向口径**：盘后十大成交股（20只/日），非实时个股净买额。
+- 概念板块（同花顺备援）无涨跌幅/资金流（已知限制）。
+- 历史日线需先 `/api/backtest/fetch` 拉指定 codes 才能回测/扫信号。
+- 财报按需实时拉取（buffett），`_AK_OK=False` 时整路由返回 None；quality 口径2 buffett 失败时降级为 spot 估值代理。
+
+## 测试与开发
 
 ```bash
-# 一键构建并后台启动
-docker compose up --build -d
+# 单测（仓库根目录跑；tests/ 被 .dockerignore 排除，镜像里没有）
+python -m pytest tests/ -q
+python -m pytest tests/test_engine.py::test_topn_asc -q   # 单个测试
 
-# 采集数据(首次必做)
-curl -X POST http://localhost:8000/api/refresh
+# 环境：Python 3.12 + pandas + akshare（采集层）+ fastapi + uvicorn
 ```
 
-- 前端：http://localhost:8000/web/index.html
-- API 文档：http://localhost:8000/docs
-- SQLite 持久化在命名卷 `screener-db`（挂 `/app/var`），容器重启不丢数据
+## 开发指引
 
-停止 / 清理：
-```bash
-docker compose down            # 停止(保留数据卷)
-docker compose down -v         # 连同数据卷一起清除
-```
-
-## 分期（本仓库只做阶段1）
-
-- ✅ 阶段1：采集 + SQLite + 筛选引擎 + FastAPI + web 验证页 + 单测
-- ⏳ 阶段2：小程序前端（微信开发者工具连 localhost:8000，开发期关域名校验）
-- ⏳ 阶段3：迁云开发/独立后端 + 备案上架
+- 改某模块前先读 `CLAUDE.md`（路由速查/架构/关键设计决策/改动检查清单）——那是给 Claude Code 的开发指引，含非显而易见的约束（NaN→None、日期破折号、DB 迁移、pandas 3.0 兼容、回测因子可重建性等）。
+- 设计文档：`docs/superpowers/specs/`（spec）与 `docs/superpowers/plans/`（实施 plan），按域存档。
 
 ## 免责
 
-数据来自公开接口（AKShare 聚合东方财富等），可能存在延迟或缺失。本工具不构成任何投资建议，市场有风险，投资决策请独立判断，盈亏自负。
+数据来自公开接口（AKShare 聚合东方财富/新浪/同花顺等），可能存在延迟、缺失或接口变更。本工具不构成任何投资建议，市场有风险，投资决策请独立判断，盈亏自负。
