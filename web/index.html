@@ -593,8 +593,12 @@ document.getElementById('hkRun').onclick=()=>hkRun();
 document.addEventListener('click',e=>{
   const tr=e.target.closest('tr.clk'); if(!tr) return;
   const c=tr.dataset.code; if(c){
-    document.getElementById('hkUni').value = c.startsWith('sh')||c.startsWith('sz')||c.startsWith('bj')?'stock':'ETF';
-    switchTab('backtest'); hkRun(c);
+    // 点击任意股票代码行 → 跳"个股分析"tab 并填代码跑分析(剥 sh/sz/bj 前缀成6位)
+    const code=c.replace(/^(sh|sz|bj)/,'');
+    if(!/^\d{6}$/.test(code)) return;
+    const inp=document.getElementById('anCode'); if(inp) inp.value=code;
+    if(typeof switchTab==='function') switchTab('analysis');
+    if(typeof anRun==='function') anRun();
   }
 });
 
@@ -894,21 +898,29 @@ async function anRun(){
     if(fr.debt_ratio_latest!=null&&fr.debt_ratio_latest>75) flags.push(`负债率 ${fr.debt_ratio_latest}%`);
     if(fr.fcf_to_netincome!=null&&fr.fcf_to_netincome<0.3) flags.push(`FCF/净利 ${fr.fcf_to_netincome}`);
     const flagHtml=flags.length?`<span style="color:#F59E0B">⚠ ${flags.join('，')}</span>`:`<span style="color:#16A34A">无红旗</span>`;
+    const score=d.score;
+    const scoreColor=score==null?'#5C6884':(score>=70?'#16A34A':(score>=50?'#F59E0B':'#5C6884'));
+    const daily=(sm.daily||[]);const dailyCurve={};daily.forEach(x=>dailyCurve[x.date]=x.net);
+    const trend=(v)=>v==null?'—':((+v)>0?`<span style="color:#16A34A">↑${(+v).toFixed(1)}%</span>`:`<span style="color:#F59E0B">↓${(+v).toFixed(1)}%</span>`);
     out.innerHTML=`
-      <div class="card-t">${cardName} ${code} <span style="margin-left:12px">研究优先级: ${_badge(priority)} | 估值: ${_badge(val,'#3B82F6')}</span></div>
+      <div class="card-t">${cardName} ${code} <span style="margin-left:12px">综合评分: <b style="color:${scoreColor}">${score??'—'}</b>/100 | 研究优先级: ${_badge(priority)} | 估值: ${_badge(val,'#3B82F6')}</span></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">
         <div><div class="card-t" style="font-size:13px">基本面质量</div>
-          ${_kv('ROE',fr.leverage_adj_roe!=null?(+fr.leverage_adj_roe).toFixed(2)+'%':'—')}
-          ${_kv('毛利率',fr.gross_margin_latest!=null?(+fr.gross_margin_latest).toFixed(2)+'%':'—')}
-          ${_kv('净利率',fr.net_margin_latest!=null?(+fr.net_margin_latest).toFixed(2)+'%':'—')}
-          ${_kv('资产负债率',fr.debt_ratio_latest!=null?(+fr.debt_ratio_latest).toFixed(2)+'%':'—')}
-          ${_kv('EPS',f.eps)}
+          ${_kv('ROE(均值)',fr.roe_avg!=null?(+fr.roe_avg).toFixed(2)+'%':'—')}
+          ${_kv('ROE趋势',trend(fr.roe_trend))}
+          ${_kv('毛利率(均值)',fr.gross_margin_avg!=null?(+fr.gross_margin_avg).toFixed(2)+'%':'—')}
+          ${_kv('毛利率趋势',trend(fr.gross_margin_trend))}
+          ${_kv('净利率(均值)',fr.net_margin_avg!=null?(+fr.net_margin_avg).toFixed(2)+'%':'—')}
+          ${_kv('资产负债率',fr.debt_ratio_latest!=null?(+fr.debt_ratio_latest).toFixed(2)+'%'+'%':'—')}
+          ${_kv('EPS(年化)',fr.eps_annual||f.eps)}
           ${_kv('盈利收益率',f.earnings_yield_pct!=null?(+f.earnings_yield_pct).toFixed(2)+'%':'—')}
           ${_kv('护城河分',f.moat_score)}
+          ${_kv('FCF/净利',fr.fcf_to_netincome!=null?(+fr.fcf_to_netincome).toFixed(2):'—')}
           ${_kv('FCF来源',fr.fcf_source)}
           ${_kv('数据陈旧',f.stale_data?'是':'否')}
         </div>
-        <div><div class="card-t" style="font-size:13px">主力动向(近30日)</div>
+        <div><div class="card-t" style="font-size:13px">主力动向(近${sm.total_rows||0}行)</div>
+          ${daily.length>1?`<div style="font-size:11px;color:var(--muted);margin-bottom:2px">每日主力净额时序</div>${sparkline(dailyCurve,'#3B82F6')}`:''}
           <table><thead><tr><th>通道</th><th class="num">净额(元)</th><th class="num">次数</th></tr></thead><tbody>${smRows}</tbody></table>
           <div style="margin-top:8px">${flagHtml}</div>
           <div class="card-t" style="font-size:13px;margin-top:10px">千股千评</div>

@@ -588,6 +588,28 @@ def stock_analysis(code: str = Query(...)):
         ba = bt_buf.analyze(code)
         card["name"] = ba.get("name")
         card["fundamentals"] = ba
+        # 综合评分(0-100 机械): ROE/毛利率/负债/FCF/护城河/估值 - 红旗。研究优先级非买卖信号。
+        rt = ba.get("ratios") or {}
+        def _num(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return None
+        score = 0.0
+        roe = _num(rt.get("leverage_adj_roe"))
+        score += 25 if roe and roe > 20 else (20 if roe and roe > 15 else (15 if roe and roe > 10 else 5))
+        gm = _num(rt.get("gross_margin_avg"))
+        score += 15 if gm and gm > 50 else (10 if gm and gm > 30 else 5)
+        dr = _num(rt.get("debt_ratio_latest"))
+        score += 15 if dr is not None and dr < 40 else (10 if dr is not None and dr < 60 else 5)
+        fc = _num(rt.get("fcf_to_netincome"))
+        score += 15 if fc and fc > 0.7 else (10 if fc and fc > 0.3 else 5)
+        moat = _num(ba.get("moat_score"))
+        score += 15 if moat and moat >= 4 else (10 if moat and moat >= 3 else 5)
+        vt = (ba.get("valuation_tag") or ba.get("valuation") or "")
+        score += 15 if any(w in str(vt) for w in ("便宜", "低估", "低估")) else (10 if "合理" in str(vt) else 5)
+        score -= 10 * len(ba.get("red_flags") or [])
+        card["score"] = max(0, min(100, round(score, 1)))
     except Exception as e:
         card["fundamentals"] = {"error": str(e)}
     # 2. 主力动向(该股近30日各通道净额)
@@ -595,12 +617,16 @@ def stock_analysis(code: str = Query(...)):
         rows = db.query_rows("smart_money_action", where="code = ?",
                              params=(code,), order_by="date DESC", limit=200)
         ch = defaultdict(lambda: [0.0, 0])
+        daily = defaultdict(float)
         for r in rows:
-            c = r.get("channel"); a = r.get("amount")
+            c = r.get("channel"); a = r.get("amount"); dd = r.get("date")
             if c and a is not None:
                 ch[c][0] += a; ch[c][1] += 1
+            if dd and a is not None:
+                daily[dd] += a or 0
         card["smart_money"] = {
             "channels": [{"channel": k, "net": v[0], "count": v[1]} for k, v in ch.items()],
+            "daily": [{"date": d, "net": daily[d]} for d in sorted(daily)],
             "latest_date": rows[0].get("date") if rows else None,
             "total_rows": len(rows)}
     except Exception as e:
