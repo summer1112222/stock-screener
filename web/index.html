@@ -902,8 +902,21 @@ async function anRun(){
     const scoreColor=score==null?'#5C6884':(score>=70?'#16A34A':(score>=50?'#F59E0B':'#5C6884'));
     const daily=(sm.daily||[]);const dailyCurve={};daily.forEach(x=>dailyCurve[x.date]=x.net);
     const trend=(v)=>v==null?'—':((+v)>0?`<span style="color:#16A34A">↑${(+v).toFixed(1)}%</span>`:`<span style="color:#F59E0B">↓${(+v).toFixed(1)}%</span>`);
+    const ow=d.outlook||{};
+    const ol=ow.label||'—';
+    const olColor=ol==='偏多'?'#16A34A':(ol==='偏空'?'#F59E0B':'#5C6884');
+    const olRows=(ow.reasons||[]).map(r=>`<tr><td>${r.factor}</td><td style="color:${r.dir==='偏多'?'#16A34A':(r.dir==='偏空'?'#F59E0B':'#5C6884')}">${r.dir}</td><td style="font-size:12px">${r.detail}</td></tr>`).join('');
+    const olHtml=`<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:10px">
+      <div class="card-t" style="font-size:13px">多因子机械预判: <b style="color:${olColor};font-size:15px">${ol}</b>
+      <span style="color:var(--muted);font-size:11px;margin-left:8px">看多${(ow.bullish||[]).length}项 / 看空${(ow.bearish||[]).length}项</span></div>
+      <div style="margin-top:6px">${(ow.bullish||[]).length?`<div style="color:#16A34A;font-size:12px">▲ ${(ow.bullish||[]).join('；')}</div>`:''}</div>
+      <div>${(ow.bearish||[]).length?`<div style="color:#F59E0B;font-size:12px">▼ ${(ow.bearish||[]).join('；')}</div>`:''}</div>
+      <table style="margin-top:6px"><thead><tr><th>参考维度</th><th>方向</th><th>详情</th></tr></thead><tbody>${olRows}</tbody></table>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">${ow.note||'多因子机械信号聚合预判,非买卖建议'}</div>
+    </div>`;
     out.innerHTML=`
       <div class="card-t">${cardName} ${code} <span style="margin-left:12px">综合评分: <b style="color:${scoreColor}">${score??'—'}</b>/100 | 研究优先级: ${_badge(priority)} | 估值: ${_badge(val,'#3B82F6')}</span></div>
+      ${olHtml}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">
         <div><div class="card-t" style="font-size:13px">基本面质量</div>
           ${_kv('ROE(均值)',fr.roe_avg!=null?(+fr.roe_avg).toFixed(2)+'%':'—')}
