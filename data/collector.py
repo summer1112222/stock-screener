@@ -307,7 +307,15 @@ def fetch_stock_spot() -> tuple[pd.DataFrame, bool, str]:
     err_sina = ""
     try:
         df = ak.stock_zh_a_spot()  # 新浪，慢(~60s)但通
-        return _normalize(df, STOCK_SPOT_ALIASES), True, "(新浪,无PE/PB)"
+        # sina 无 振幅/换手率/PE/PB/市值,但给 最高/最低/昨收 → 可算振幅
+        try:
+            _hi = pd.to_numeric(df["最高"], errors="coerce")
+            _lo = pd.to_numeric(df["最低"], errors="coerce")
+            _pc = pd.to_numeric(df["昨收"], errors="coerce").replace(0, float("nan"))
+            df["振幅"] = (_hi - _lo) / _pc * 100
+        except Exception:
+            pass
+        return _normalize(df, STOCK_SPOT_ALIASES), True, "(新浪,无PE/PB,振幅由高低昨收算)"
     except Exception as e:
         err_sina = str(e)
     try:

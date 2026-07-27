@@ -422,7 +422,10 @@ async function run(){
 function renderTable(rows,cat){
   const wrap=document.getElementById('tableWrap');
   if(!rows||!rows.length){wrap.innerHTML='<div class="empty">无满足条件的结果</div>';return;}
-  const keys=Object.keys(rows[0]);
+  const allKeys=Object.keys(rows[0]);
+  // 隐藏全空列(全 null/空/'--')——个股 spot 经 sina 源无 pe/pb/换手率/振幅/量比,这些列全空时不显示,避免满屏"—"
+  const keys=allKeys.filter(k=>rows.some(r=>r[k]!==null&&r[k]!==undefined&&r[k]!==''&&r[k]!=='--'&&!(typeof r[k]==='number'&&isNaN(r[k]))));
+  const hidden=allKeys.length-keys.length;
   const ths=keys.map(k=>`<th class="num">${labelOf(k)}</th>`).join('');
   const trs=rows.map(row=>`<tr>`+keys.map(k=>{
     let v=row[k];
@@ -431,7 +434,8 @@ function renderTable(rows,cat){
     if(k==='change_pct') return `<td class="num ${colorPct(v)}">${fmtPct(v)}</td>`;
     return `<td class="num">${fmtNum(v)}</td>`;
   }).join('')+`</tr>`).join('');
-  wrap.innerHTML=`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  const hiddenNote=hidden?`<div class="skipped">隐藏 ${hidden} 个全空列(数据源未提供)</div>`:'';
+  wrap.innerHTML=`${hiddenNote}<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
 
 async function refresh(){
