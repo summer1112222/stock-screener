@@ -577,6 +577,56 @@ def buffett_top(n: int = Query(10, ge=1, le=50),
     })
 
 
+@app.get("/api/stock-analysis")
+def stock_analysis(code: str = Query(...)):
+    """个股深度分析卡：聚合 基本面(buffett)+主力动向+研报+千股千评+技术信号+风险预筛。
+    多维机械分析,研究优先级非买卖信号,盈亏自负。"""
+    from collections import defaultdict
+    card = {"code": code}
+    # 1. 基本面+估值+护城河+风险+优先级(buffett,复用财报缓存)
+    try:
+        ba = bt_buf.analyze(code)
+        card["name"] = ba.get("name")
+        card["fundamentals"] = ba
+    except Exception as e:
+        card["fundamentals"] = {"error": str(e)}
+    # 2. 主力动向(该股近30日各通道净额)
+    try:
+        rows = db.query_rows("smart_money_action", where="code = ?",
+                             params=(code,), order_by="date DESC", limit=200)
+        ch = defaultdict(lambda: [0.0, 0])
+        for r in rows:
+            c = r.get("channel"); a = r.get("amount")
+            if c and a is not None:
+                ch[c][0] += a; ch[c][1] += 1
+        card["smart_money"] = {
+            "channels": [{"channel": k, "net": v[0], "count": v[1]} for k, v in ch.items()],
+            "latest_date": rows[0].get("date") if rows else None,
+            "total_rows": len(rows)}
+    except Exception as e:
+        card["smart_money"] = {"error": str(e)}
+    # 3. 研报评级
+    try:
+        rr = research_data.query_reports(code=code, days=180, limit=10)
+        card["research"] = {"reports": rr.get("rows", []), "total": rr.get("total", 0)}
+    except Exception as e:
+        card["research"] = {"error": str(e)}
+    # 4. 千股千评
+    try:
+        cm = research_data.fetch_comments(code)
+        card["comments"] = cm[0] if isinstance(cm, tuple) else cm
+    except Exception as e:
+        card["comments"] = {"error": str(e)}
+    # 5. 技术信号(需该 code 历史)
+    try:
+        sc = bt_sig.scan_signals("stock", [code])
+        card["signals"] = sc.get("rows", [])
+        card["signals_error"] = sc.get("error")
+    except Exception as e:
+        card["signals"] = {"error": str(e)}
+    return _wrap(card, {"bt_disclaimer": "基于公开数据的多维机械分析,研究优先级非买卖信号,盈亏自负。"})
+
+
 @app.get("/api/history")
 def history_route(code: str = Query(...), universe: str = Query("stock"),
                  start: str = Query("20230101"), end: str = Query("20240601")):
