@@ -10,8 +10,10 @@ from data import smart_money as sm
 
 def _mock_ak(mgmt_fn, unlock_fn):
     m = ModuleType("akshare")
-    m.stock_hold_management_em = mgmt_fn
-    m.stock_share_change_em = unlock_fn
+    # akshare 1.18：stock_hold_management_em → stock_hold_management_detail_em
+    #              stock_share_change_em → stock_restricted_release_detail_em
+    m.stock_hold_management_detail_em = mgmt_fn
+    m.stock_restricted_release_detail_em = unlock_fn
     return m
 
 
@@ -34,7 +36,7 @@ def _unlock_df():
 def test_collect_management_hold(monkeypatch):
     monkeypatch.setattr(sm, "_AK_OK", True)
     monkeypatch.setattr(sm, "ak", _mock_ak(lambda: _mgmt_df(),
-                                           lambda symbol: pd.DataFrame()))
+                                           lambda **kw: pd.DataFrame()))
     recs, ok, err = sm.collect_management_hold("2026-07-19")
     assert ok, err
     assert len(recs) == 2
@@ -60,7 +62,7 @@ def test_collect_management_hold_fail(monkeypatch):
     def _err():
         raise RuntimeError("remotedisconnected")
 
-    monkeypatch.setattr(sm, "ak", _mock_ak(_err, lambda s: pd.DataFrame()))
+    monkeypatch.setattr(sm, "ak", _mock_ak(_err, lambda **kw: pd.DataFrame()))
     recs, ok, err = sm.collect_management_hold("2026-07-19")
     assert not ok and recs == []
     assert "被封" in err or "不可用" in err
@@ -69,7 +71,7 @@ def test_collect_management_hold_fail(monkeypatch):
 def test_collect_share_unlock(monkeypatch):
     monkeypatch.setattr(sm, "_AK_OK", True)
     monkeypatch.setattr(sm, "ak", _mock_ak(lambda: pd.DataFrame(),
-                                           lambda symbol: _unlock_df()))
+                                           lambda **kw: _unlock_df()))
     recs, ok, err = sm.collect_share_unlock("2026-07-19")
     assert ok, err
     assert len(recs) == 1
