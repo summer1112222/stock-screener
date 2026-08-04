@@ -214,6 +214,15 @@ CREATE TABLE IF NOT EXISTS portfolio (
     ts TEXT
 );
 
+-- 自选股(观察清单，区别于持仓 portfolio：未买入，仅跟踪观察)
+CREATE TABLE IF NOT EXISTS watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT,
+    name TEXT,
+    note TEXT,
+    added_ts TEXT
+);
+
 -- 历史日线(前复权 qfq)，供回测/因子评价
 CREATE TABLE IF NOT EXISTS etf_daily (
     code TEXT, date TEXT,

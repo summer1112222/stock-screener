@@ -22,7 +22,7 @@ _ROOT = str(Path(__file__).resolve().parent.parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from data import collector, db, history, portfolio, smart_money
+from data import collector, db, history, portfolio, smart_money, watchlist
 from data import research as research_data
 from screener import engine, smart_money as sm_query
 from screener.conditions import BOARD_FIELDS_CAT, ETF_FIELDS_CAT, STOCK_FIELDS_CAT, OPS
@@ -383,14 +383,18 @@ class BTSignalReq(BaseModel):
     universe: str = "stock"
     codes: list[str]
     signal_types: list[str] | None = None
+    min_hits: int = 1
 
 
 @app.post("/api/signals")
 def signals(req: BTSignalReq):
-    """扫描今日触发买入信号的标的(需先 /api/backtest/fetch 拉历史)。个人本地规则触发。"""
-    res = bt_sig.scan_signals(req.universe, req.codes, req.signal_types)
+    """扫描今日触发买卖信号的标的(需先 /api/backtest/fetch 拉历史)。个人本地规则触发。
+    min_hits≥2 仅保留同日多信号共振的标的。非买卖点。"""
+    res = bt_sig.scan_signals(req.universe, req.codes, req.signal_types,
+                              min_hits=req.min_hits)
     return _wrap(res["rows"], {
         "n_scanned": res.get("n_scanned"), "error": res.get("error"),
+        "min_hits": res.get("min_hits"),
         "signal_types": res.get("signal_types"),
         "cand_disclaimer": "规则机械触发，非AI推荐，不构成投资建议，盈亏自负。",
     })
@@ -402,14 +406,20 @@ class BtSignalsReq(BaseModel):
     signal_types: list[str] | None = None
     k_days: int = 5
     benchmark: str | None = "sh000300"
+    min_hits: int = 1
+    stop_loss: float | None = None
+    fee_bps: float = 0
 
 
 @app.post("/api/signals/backtest")
 def bt_signals_route(req: BtSignalsReq):
     """信号历史胜率回测：对每信号扫历史触发点 t→t+k 收益统计。
-    合规：历史触发统计事实，非预测。"""
+    min_hits≥2 追加 combo≥N 共振行；stop_loss 止损截断；fee_bps 双边费率。
+    合规：历史触发统计事实，非预测，非买卖点。"""
     res = bt_sig.backtest_signals(req.universe, req.codes, req.signal_types,
-                                  k_days=req.k_days, benchmark=req.benchmark)
+                                  k_days=req.k_days, benchmark=req.benchmark,
+                                  min_hits=req.min_hits, stop_loss=req.stop_loss,
+                                  fee_bps=req.fee_bps)
     return _wrap(res.get("rows", res), {
         "n_scanned": res.get("n_scanned"), "error": res.get("error"),
         "k_days": res.get("k_days"), "signals": res.get("signals"),
@@ -433,6 +443,30 @@ def portfolio_add(req: BTPortfolioReq):
 def portfolio_close(pid: int):
     ok = portfolio.close_position(pid)
     return _wrap({"closed": ok, "id": pid})
+
+
+class WatchlistReq(BaseModel):
+    code: str
+    name: str = ""
+    note: str = ""
+
+
+@app.get("/api/watchlist")
+def watchlist_list():
+    """自选股观察清单(本地)。机械观察清单，非荐股非买卖信号。"""
+    return _wrap(watchlist.list_items())
+
+
+@app.post("/api/watchlist")
+def watchlist_add(req: WatchlistReq):
+    """加入自选(同 code 已存在则更新，不重复)。非荐股非买卖信号。"""
+    return _wrap(watchlist.add(req.code, req.name, req.note))
+
+
+@app.delete("/api/watchlist/{wid}")
+def watchlist_remove(wid: int):
+    ok = watchlist.remove(wid)
+    return _wrap({"removed": ok, "id": wid})
 
 
 # ------------------------------------------------------------------
@@ -650,33 +684,49 @@ def stock_analysis(code: str = Query(...)):
         card["signals_error"] = sc.get("error")
     except Exception as e:
         card["signals"] = {"error": str(e)}
-    # 6. 多因子机械预判(偏多/偏空/中性):聚合 基本面评分/资金净额/技术信号/机构评级/估值
-    #    非买卖建议,仅多因子同向机械归类。bullish/bearish 计数定标签。
-    bull, bear, reasons = [], [], []
+    # 6. 多因子机械预判(偏多/偏空/中性):加权聚合 基本面/资金面/技术面/机构评级/估值
+    #    每因子带权重，加权 score∈[-1,1] 定标签 + 置信度。非买卖建议，仅多因子同向机械归类。
+    WEIGHTS = {"基本面评分": 0.35, "资金面": 0.20, "技术面": 0.20,
+              "机构评级": 0.15, "估值": 0.10}
+    bull, bear, reasons, contribs = [], [], [], []
+
+    def _push(factor, d, detail):
+        """记一条因子：reasons 带 weight；bull/bear 收展示串；contribs 算加权贡献。"""
+        w = WEIGHTS.get(factor, 0)
+        reasons.append({"factor": factor, "dir": d, "detail": detail, "weight": w})
+        sign = 1 if d == "偏多" else (-1 if d == "偏空" else 0)
+        if sign == 1:
+            bull.append(f"{factor}:{detail}")
+        elif sign == -1:
+            bear.append(f"{factor}:{detail}")
+        contribs.append({"factor": factor, "dir": d, "weight": w,
+                         "contrib": round(w * sign, 3)})
+
     # 基本面评分
     s = card.get("score")
     if s is not None:
-        (bull if s >= 60 else bear if s < 40 else []).append(f"综合评分 {s}/100")
-        if 40 <= s < 60: reasons.append({"factor": "基本面评分", "dir": "中性", "detail": f"{s}/100"})
-        else: reasons.append({"factor": "基本面评分", "dir": "偏多" if s >= 60 else "偏空", "detail": f"{s}/100"})
+        d = "偏多" if s >= 60 else ("偏空" if s < 40 else "中性")
+        _push("基本面评分", d, f"{s}/100")
     # 估值
     vt = str((card.get("fundamentals") or {}).get("valuation_tag") or
              (card.get("fundamentals") or {}).get("valuation") or "")
     if any(w in vt for w in ("便宜", "低估")):
-        bull.append(f"估值{vt}"); reasons.append({"factor": "估值", "dir": "偏多", "detail": vt})
+        _push("估值", "偏多", vt)
     elif any(w in vt for w in ("贵", "高估")):
-        bear.append(f"估值{vt}"); reasons.append({"factor": "估值", "dir": "偏空", "detail": vt})
+        _push("估值", "偏空", vt)
+    else:
+        _push("估值", "中性", vt or "无")
     # 资金面(各通道净额合计)
     try:
         sm_net = sum(c.get("net") or 0 for c in (card.get("smart_money") or {}).get("channels", []))
         if sm_net > 0:
-            bull.append(f"主力净流入 {sm_net:.0f}"); reasons.append({"factor": "资金面", "dir": "偏多", "detail": f"净流入{sm_net:.0f}"})
+            _push("资金面", "偏多", f"净流入{sm_net:.0f}")
         elif sm_net < 0:
-            bear.append(f"主力净流出 {sm_net:.0f}"); reasons.append({"factor": "资金面", "dir": "偏空", "detail": f"净流出{sm_net:.0f}"})
+            _push("资金面", "偏空", f"净流出{sm_net:.0f}")
         else:
-            reasons.append({"factor": "资金面", "dir": "中性", "detail": "无显著净流"})
+            _push("资金面", "中性", "无显著净流")
     except Exception:
-        pass
+        _push("资金面", "中性", "数据缺失")
     # 技术信号(触发即偏多:金叉/突破/放量/超卖反转)
     try:
         sig_rows = card.get("signals") if isinstance(card.get("signals"), list) else []
@@ -686,11 +736,11 @@ def stock_analysis(code: str = Query(...)):
                 t = s.get("type") if isinstance(s, dict) else str(s)
                 if t: trig.append(t)
         if trig:
-            bull.append(f"技术信号 {','.join(trig)}"); reasons.append({"factor": "技术面", "dir": "偏多", "detail": ",".join(trig)})
+            _push("技术面", "偏多", ",".join(trig))
         else:
-            reasons.append({"factor": "技术面", "dir": "中性", "detail": "无触发"})
+            _push("技术面", "中性", "无触发")
     except Exception:
-        pass
+        _push("技术面", "中性", "数据缺失")
     # 机构评级(研报)
     try:
         reps = (card.get("research") or {}).get("reports", [])
@@ -698,17 +748,20 @@ def stock_analysis(code: str = Query(...)):
         buy_kw = [x for x in ratings if any(w in x for w in ("买入", "增持", "推荐", "强烈"))]
         sell_kw = [x for x in ratings if any(w in x for w in ("减持", "卖出", "回避"))]
         if buy_kw:
-            bull.append(f"研报{len(buy_kw)}条看多"); reasons.append({"factor": "机构评级", "dir": "偏多", "detail": ",".join(set(buy_kw))})
+            _push("机构评级", "偏多", ",".join(set(buy_kw)))
         elif sell_kw:
-            bear.append(f"研报{len(sell_kw)}条看空"); reasons.append({"factor": "机构评级", "dir": "偏空", "detail": ",".join(set(sell_kw))})
+            _push("机构评级", "偏空", ",".join(set(sell_kw)))
         else:
-            reasons.append({"factor": "机构评级", "dir": "中性", "detail": f"{len(reps)}条" if reps else "无"})
+            _push("机构评级", "中性", f"{len(reps)}条" if reps else "无")
     except Exception:
-        pass
-    label = "偏多" if len(bull) > len(bear) else ("偏空" if len(bear) > len(bull) else "中性")
-    card["outlook"] = {"label": label, "bullish": bull, "bearish": bear,
-                        "reasons": reasons,
-                        "note": "多因子机械信号聚合预判,非买卖建议,不荐股不承诺收益,盈亏自负"}
+        _push("机构评级", "中性", "数据缺失")
+    score = round(sum(c["contrib"] for c in contribs), 3)
+    label = "偏多" if score > 0.15 else ("偏空" if score < -0.15 else "中性")
+    confidence = round(min(abs(score), 1.0) * 100)  # 加权强度映射 0-100
+    card["outlook"] = {"label": label, "score": score, "confidence": confidence,
+                        "weights": WEIGHTS, "contribs": contribs,
+                        "bullish": bull, "bearish": bear, "reasons": reasons,
+                        "note": "多因子加权机械预判,非买卖建议,不荐股不承诺收益,盈亏自负"}
     return _wrap(card, {"bt_disclaimer": "基于公开数据的多维机械分析+多因子预判,研究优先级非买卖信号,盈亏自负。"})
 
 

@@ -106,6 +106,7 @@
     <button data-tab="quality" type="button">优质筛选</button>
     <button data-tab="analysis" type="button">个股分析</button>
     <button class="pf-btn" style="margin-left:auto" id="pfOpen" type="button">持仓</button>
+    <button class="pf-btn" id="wlOpen" type="button">自选</button>
   </nav>
 
   <section class="tab-panel active" data-tab="screen">
@@ -189,10 +190,41 @@
       <div class="row">
         <div class="f"><label>标的</label><select id="sigUni"><option value="stock">个股</option><option value="ETF">ETF</option><option value="board">板块</option></select></div>
         <div class="f" style="flex:1"><label>codes(逗号分隔，需先拉历史)</label><input id="sigCodes" type="text" style="width:100%" placeholder="sh603986,sz300308,sh600584"></div>
+        <div class="f"><label>共振≥N</label><input id="sigMinHits" type="number" value="1" min="1" max="5" style="width:70px" title="同日触发信号数下限，≥2 仅看多信号共振"></div>
         <button class="btn" id="sigRun" type="button">扫描</button>
       </div>
       <div class="skipped" id="sigMsg"></div>
       <div id="sigOut" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-t">信号回测研究台 <span style="color:var(--warn);font-weight:400;margin-left:8px">历史触发统计·非预测·非买卖点</span></div>
+      <div class="row">
+        <div class="f"><label>标的</label><select id="sbtUni"><option value="stock">个股</option><option value="ETF">ETF</option><option value="board">板块</option></select></div>
+        <div class="f" style="flex:1"><label>codes(逗号分隔，需先拉历史)</label><input id="sbtCodes" type="text" style="width:100%" placeholder="sh603986,sz300308,sh600584"></div>
+      </div>
+      <div class="row" style="margin-top:8px;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="f"><label>信号</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtSig" value="ma_breakout" checked>上穿MA20</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtSig" value="golden_cross" checked>金叉</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtSig" value="volume_surge">放量</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtSig" value="rsi_oversold">RSI超卖</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtSig" value="momentum_up" checked>动量</label>
+        </div>
+        <div class="f"><label>持仓周期 k(多选)</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtK" value="1">1d</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtK" value="3" checked>3d</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtK" value="5" checked>5d</label>
+          <label style="font-weight:400;font-size:12px"><input type="checkbox" class="sbtK" value="10">10d</label>
+        </div>
+        <div class="f"><label>共振≥N</label><input id="sbtMinHits" type="number" value="1" min="1" max="5" style="width:60px" title="≥2 追加 combo共振行"></div>
+        <div class="f"><label>止损%(可选)</label><input id="sbtStop" type="number" placeholder="8" min="0" style="width:60px"></div>
+        <div class="f"><label>费率bp(可选)</label><input id="sbtFee" type="number" placeholder="0" min="0" style="width:60px"></div>
+        <button class="btn" id="sbtRun" type="button">回测</button>
+      </div>
+      <div class="skipped" id="sbtMsg"></div>
+      <div id="sbtOut" style="margin-top:10px;overflow-x:auto"></div>
+      <div class="disc"><b>信号回测免责</b>：以下为<b>历史触发点的统计事实，非预测、非买卖信号、不承诺未来表现</b>；止损/费率为研究参数，不构成投资建议，盈亏自负。</div>
     </div>
 
     <div class="card">
@@ -269,6 +301,7 @@
       <div class="row" style="align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
         <input id="anCode" type="text" placeholder="代码 如 600519 / sz000001" style="width:160px">
         <button class="btn" id="anRun" type="button">分析</button>
+        <button class="btn ghost" id="anWatch" type="button" title="把当前代码加入自选观察清单">＋自选</button>
         <span id="anMsg" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div id="anOut" style="margin-top:12px"></div>
@@ -291,6 +324,21 @@
         <button class="btn ghost" id="pfRefresh" type="button">刷新</button>
       </div>
       <div id="pfOut" style="margin-top:10px"></div>
+    </div>
+  </aside>
+
+  <aside class="portfolio-drawer" id="wlDrawer">
+    <div class="pf-head"><b>自选观察</b><button class="pf-btn" id="wlClose2" type="button">关闭</button></div>
+    <div id="wlDrawerBody">
+      <div class="card-t">自选观察 <span style="color:var(--dim);font-weight:400;margin-left:8px">本地观察清单·非推荐·非买卖点</span></div>
+      <div class="row">
+        <div class="f"><label>代码</label><input id="wlCode" type="text" placeholder="sh603986" style="width:130px"></div>
+        <div class="f"><label>名称</label><input id="wlName" type="text" placeholder="兆易创新" style="width:120px"></div>
+        <div class="f"><label>备注</label><input id="wlNote" type="text" style="width:140px"></div>
+        <button class="btn" id="wlAdd" type="button">加入</button>
+        <button class="btn ghost" id="wlRefresh" type="button">刷新</button>
+      </div>
+      <div id="wlOut" style="margin-top:10px"></div>
     </div>
   </aside>
 
@@ -330,9 +378,12 @@ function switchTab(name){
   ensureTabLoaded(name);
 }
 function togglePortfolio(){document.getElementById('pfDrawer').classList.toggle('open');}
+function toggleWatchlist(){document.getElementById('wlDrawer').classList.toggle('open');}
 document.querySelectorAll('.tabs button[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 document.getElementById('pfOpen').onclick=togglePortfolio;
 document.getElementById('pfClose2').onclick=()=>document.getElementById('pfDrawer').classList.remove('open');
+document.getElementById('wlOpen').onclick=toggleWatchlist;
+document.getElementById('wlClose2').onclick=()=>document.getElementById('wlDrawer').classList.remove('open');
 
 const LABEL = {name:'名称',code:'代码',change_pct:'涨跌幅',total_market_cap:'总市值',
   turnover_rate:'换手率',turnover_amount:'成交额',leading_stock:'领涨股',
@@ -548,12 +599,67 @@ document.getElementById('candRun').onclick=candRun;
 async function sigRun(){
   document.getElementById('sigMsg').textContent='扫描中...';
   const codes=document.getElementById('sigCodes').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
-  const r=await fetch(`${API}/api/signals`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:document.getElementById('sigUni').value,codes})}).then(r=>r.json());
+  const min_hits=parseInt(document.getElementById('sigMinHits').value)||1;
+  const r=await fetch(`${API}/api/signals`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:document.getElementById('sigUni').value,codes,min_hits})}).then(r=>r.json());
   const d=r.data||[];
-  document.getElementById('sigMsg').textContent=`扫描 ${r.n_scanned} 只，触发 ${d.length} 只${r.error?(' | '+r.error):''}`;
-  document.getElementById('sigOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>现价</th><th>触发信号</th></tr></thead><tbody>${d.map(x=>`<tr class="clk" data-code="${x.code}"><td>${x.code}</td><td class="num">${x.close}</td><td>${x.signals.join('；')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">今日无触发</div>';
+  document.getElementById('sigMsg').textContent=`扫描 ${r.n_scanned} 只，触发 ${d.length} 只${r.error?(' | '+r.error):''}${min_hits>=2?(' | 共振≥'+min_hits):''}`;
+  document.getElementById('sigOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>现价</th><th>共振</th><th>触发信号</th><th></th></tr></thead><tbody>${d.map(x=>`<tr class="clk" data-code="${x.code}"><td>${x.code}</td><td class="num">${x.close}</td><td class="num">${x.hits>=2?`<b style="color:var(--warn)">${x.hits}★</b>`:x.hits}</td><td>${x.signals.join('；')}</td><td><button class="btn ghost" style="font-size:11px;padding:2px 8px" onclick="event.stopPropagation();wlQuickAdd('${x.code}')" title="加入自选观察">＋自选</button></td></tr>`).join('')}</tbody></table>`:'<div class="empty">今日无触发</div>';
 }
 document.getElementById('sigRun').onclick=sigRun;
+
+// ---------------- 信号回测研究台 ----------------
+async function sbtRun(){
+  const msg=document.getElementById('sbtMsg'), out=document.getElementById('sbtOut');
+  const codes=document.getElementById('sbtCodes').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
+  if(!codes.length){msg.textContent='请填 codes(需先拉历史)';return;}
+  const signal_types=[...document.querySelectorAll('.sbtSig:checked')].map(c=>c.value);
+  const ks=[...document.querySelectorAll('.sbtK:checked')].map(c=>parseInt(c.value)).sort((a,b)=>a-b);
+  if(!signal_types.length){msg.textContent='请至少勾一个信号';return;}
+  if(!ks.length){msg.textContent='请至少勾一个持仓周期';return;}
+  const min_hits=parseInt(document.getElementById('sbtMinHits').value)||1;
+  const stopV=document.getElementById('sbtStop').value;
+  const stop_loss=stopV?parseFloat(stopV)/100:null;
+  const feeV=document.getElementById('sbtFee').value;
+  const fee_bps=feeV?parseFloat(feeV):0;
+  const uni=document.getElementById('sbtUni').value;
+  const btn=document.getElementById('sbtRun'); btn.disabled=true;
+  msg.textContent=`回测中(${ks.length}×k 并行，首次几十秒)...`;
+  out.innerHTML='';
+  try{
+    const results=await Promise.all(ks.map(k=>fetch(`${API}/api/signals/backtest`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:uni,codes,signal_types,k_days:k,benchmark:'sh000300',min_hits,stop_loss,fee_bps})}).then(r=>r.json())));
+    // 收集所有信号名(含 combo)，按每个 k 返回的 signals 顺序去重保持
+    const sigOrder=[];
+    results.forEach(r=>{for(const row of (r.data||r.rows||[])){if(!sigOrder.includes(row.signal))sigOrder.push(row.signal);}});
+    const colKs=ks;
+    // 矩阵：行=信号，列=各k
+    const cell=(r,k)=>{
+      const rows=r.data||r.rows||[];
+      const row=rows.find(x=>x.signal===k);
+      if(!row)return '—';
+      if(row.n_samples<10)return `<span style="color:var(--muted)">${row.note||'样本不足'}</span>`;
+      const wr=(row.abs_win_rate*100).toFixed(1);
+      const mr=(row.mean_ret*100).toFixed(2);
+      return `<div class="num" style="line-height:1.4"><b>${wr}%</b> 胜率<br><span style="color:${row.mean_ret>=0?'var(--up)':'var(--down)'}">${mr>=0?'+':''}${mr}%</span> 均<br><span style="color:var(--muted);font-size:11px">n=${row.n_samples}</span></div>`;
+    };
+    const err=results.find(r=>r.error);
+    if(err){msg.textContent='错误：'+err.error;return;}
+    let html='<table><thead><tr><th>信号</th>';
+    colKs.forEach(k=>html+=`<th>k=${k}</th>`);
+    html+='</tr></thead><tbody>';
+    sigOrder.forEach(sig=>{
+      const isCombo=sig.startsWith('combo');
+      html+=`<tr${isCombo?' style="background:rgba(245,158,11,.06)"':''}><td>${sig}${isCombo?' <span style="color:var(--warn);font-size:11px">共振</span>':''}</td>`;
+      results.forEach(r=>html+=`<td>${cell(r,sig)}</td>`);
+      html+='</tr>';
+    });
+    html+='</tbody></table>';
+    out.innerHTML=html;
+    const totalN=results.reduce((s,r)=>s+((r.data||r.rows||[]).reduce((a,x)=>a+(x.n_samples||0),0)),0);
+    msg.textContent=`完成：${sigOrder.length} 行 × ${colKs.length} k，共 ${totalN} 样本${min_hits>=2?(' | 含共振≥'+min_hits):''}${stop_loss?(' | 止损'+(stop_loss*100)+'%'):''}${fee_bps?(' | 费率'+fee_bps+'bp'):''}`;
+  }catch(e){msg.textContent='请求失败：'+e.message;}
+  finally{btn.disabled=false;}
+}
+document.getElementById('sbtRun').onclick=sbtRun;
 
 // ---------------- 持仓跟踪 ----------------
 async function pfLoad(){
@@ -569,6 +675,24 @@ async function pfAdd(){
 window.pfClose=async function(id){await fetch(`${API}/api/portfolio/${id}`,{method:'DELETE'});pfLoad();};
 document.getElementById('pfAdd').onclick=pfAdd;
 document.getElementById('pfRefresh').onclick=pfLoad;
+
+// ---------------- 自选观察 ----------------
+async function wlLoad(){
+  const r=await fetch(`${API}/api/watchlist`).then(r=>r.json());
+  const d=r.data||[];
+  document.getElementById('wlOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th class="num">最新价</th><th>备注</th><th>加入</th><th></th></tr></thead><tbody>${d.map(p=>`<tr class="clk" data-code="${p.code}"><td>${p.code}</td><td>${p.name||''}</td><td class="num">${p.latest_price??'—'}</td><td>${p.note||''}</td><td style="color:var(--muted);font-size:11px">${(p.added_ts||'').slice(0,10)}</td><td><button class="del" onclick="wlClose(${p.id})" aria-label="移除自选">✕</button></td></tr>`).join('')}</tbody></table>`:'<div class="empty">暂无自选</div>';
+}
+async function wlAdd(code,name,note){
+  const body={code:code||document.getElementById('wlCode').value,name:name||document.getElementById('wlName').value,note:note||document.getElementById('wlNote').value};
+  if(!body.code)return;
+  await fetch(`${API}/api/watchlist`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if(!code){document.getElementById('wlCode').value='';document.getElementById('wlName').value='';document.getElementById('wlNote').value='';}
+  wlLoad();
+}
+window.wlClose=async function(id){await fetch(`${API}/api/watchlist/${id}`,{method:'DELETE'});wlLoad();};
+window.wlQuickAdd=async function(code,name){await wlAdd(code,name||'','');/*按钮快速加入不展开抽屉*/};
+document.getElementById('wlAdd').onclick=()=>wlAdd();
+document.getElementById('wlRefresh').onclick=wlLoad;
 
 // ---------------- 历史K线 ----------------
 function hkChart(dates, ohlc){
@@ -948,6 +1072,12 @@ async function anRun(){
   }catch(e){ msg.textContent='加载失败: '+e; }
 }
 document.getElementById('anRun').onclick=anRun;
+document.getElementById('anWatch').onclick=async function(){
+  const code=(document.getElementById('anCode').value||'').trim();
+  if(!code){document.getElementById('anMsg').textContent='请先输入代码';return;}
+  await wlQuickAdd(code);
+  document.getElementById('anMsg').textContent=`${code} 已加入自选`;
+};
 // analysis tab 懒加载:不自动 fetch,等用户输代码点分析
 // ---------------- 数据健康 banner+抽屉(只读聚合) ----------------
 const _HCOLOR={green:'#16A34A',yellow:'#F59E0B',red:'#5C6884'};
