@@ -413,6 +413,17 @@ def refresh_all() -> dict:
         report["errors"].append(err)
         report["counts"]["st_list"] = 0
 
+    # 市场温度(涨跌停/两融/估值)：lazy import 避免与 data.market 的循环导入
+    # （market.py 顶层 `from . import collector` 触发 HTTP patch，反向导入会环）。
+    try:
+        from . import market
+        mrec = market.collect_temperature()
+        report["counts"]["market_daily"] = 1 if mrec.get("ok") else 0
+        if not mrec.get("ok") and mrec.get("err"):
+            report["errors"].append(f"market: {mrec['err'][:80]}")
+    except Exception as e:  # 采集失败不崩 refresh_all
+        report["errors"].append(f"market: {e}")
+
     # 至少有一类成功才算本次刷新有效，更新时间
     if n_ok > 0 or flow_count > 0:
         report["ok"] = True
