@@ -99,6 +99,18 @@
     <button id="hbDetail" class="btn ghost" type="button" style="font-size:12px;padding:2px 10px">详情▾</button>
   </div>
 
+  <div id="marketBar" style="display:flex;align-items:center;gap:14px;padding:5px 12px;border-bottom:1px solid var(--border);font-size:12px;cursor:pointer;flex-wrap:wrap" title="市场宽度·机械观察·非择时信号">
+    <b style="font-size:11px;color:var(--muted)">市场温度</b>
+    <span id="mbUpDn">涨跌 —</span>
+    <span id="mbZt">涨停 —</span>
+    <span id="mbDt">跌停 —</span>
+    <span id="mbZbgc">炸板 —</span>
+    <span id="mbLb">连板 —</span>
+    <span id="mbMargin">两融 —</span>
+    <span id="mbPe">PE分位 —</span>
+    <span id="mbDate" style="color:var(--muted);margin-left:auto">—</span>
+  </div>
+
   <nav class="tabs">
     <button class="active" data-tab="screen" type="button">实时筛选</button>
     <button data-tab="backtest" type="button">历史回测</button>
@@ -351,6 +363,12 @@
     </div>
     <div class="disc" style="margin-top:16px"><b>数据健康</b>为新鲜度观察，非投资建议。</div>
   </aside>
+
+  <aside id="marketDrawer" hidden style="position:fixed;right:0;top:0;bottom:0;width:380px;background:var(--bg);border-left:1px solid var(--border);padding:16px;overflow-y:auto;z-index:50">
+    <div class="card-t" style="display:flex;justify-content:space-between">市场温度 <button onclick="toggleMarket()" type="button" class="btn ghost">×</button></div>
+    <div id="marketBody" style="margin-top:12px"></div>
+    <div class="disc" style="margin-top:16px"><b>市场温度</b>为公开市场状态机械观察（涨跌停/两融/估值），非择时信号、非投资建议。</div>
+  </aside>
 </div>
 <script>
 const API = '';  // 同源：FastAPI 同时托管前端与 /api；本地/Docker 均访问 http://host:8000/web/index.html
@@ -492,13 +510,18 @@ function renderTable(rows,cat){
   const keys=allKeys.filter(k=>rows.some(r=>r[k]!==null&&r[k]!==undefined&&r[k]!==''&&r[k]!=='--'&&!(typeof r[k]==='number'&&isNaN(r[k]))));
   const hidden=allKeys.length-keys.length;
   const ths=keys.map(k=>`<th class="num">${labelOf(k)}</th>`).join('');
-  const trs=rows.map(row=>`<tr>`+keys.map(k=>{
-    let v=row[k];
-    if(k==='name') return `<td>${v||''}</td>`;
-    if(k==='code'||k==='leading_stock') return `<td>${v||'—'}</td>`;
-    if(k==='change_pct') return `<td class="num ${colorPct(v)}">${fmtPct(v)}</td>`;
-    return `<td class="num">${fmtNum(v)}</td>`;
-  }).join('')+`</tr>`).join('');
+  const isBoard=cat==='行业'||cat==='概念';
+  const trs=rows.map(row=>{
+    const tds=keys.map(k=>{
+      let v=row[k];
+      if(k==='name') return `<td>${v||''}</td>`;
+      if(k==='code'||k==='leading_stock') return `<td>${v||'—'}</td>`;
+      if(k==='change_pct') return `<td class="num ${colorPct(v)}">${fmtPct(v)}</td>`;
+      return `<td class="num">${fmtNum(v)}</td>`;
+    }).join('');
+    const attrs=isBoard?` class="bd-row" data-board="${row.name||''}"`:'';
+    return `<tr${attrs}>${tds}</tr>`;
+  }).join('');
   const hiddenNote=hidden?`<div class="skipped">隐藏 ${hidden} 个全空列(数据源未提供)</div>`:'';
   wrap.innerHTML=`${hiddenNote}<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
@@ -665,7 +688,14 @@ document.getElementById('sbtRun').onclick=sbtRun;
 async function pfLoad(){
   const r=await fetch(`${API}/api/portfolio`).then(r=>r.json());
   const d=r.data||[];
-  document.getElementById('pfOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th class="num">买价</th><th class="num">股数</th><th class="num">最新</th><th class="num">浮盈</th><th class="num">收益率</th><th>备注</th><th></th></tr></thead><tbody>${d.map(p=>`<tr><td>${p.code}</td><td>${p.name||''}</td><td>${p.buy_date}</td><td class="num">${p.buy_price}</td><td class="num">${p.shares}</td><td class="num">${p.latest_price??'—'}</td><td class="num ${p.pnl>=0?'up':'down'}">${p.pnl??'—'}</td><td class="num ${p.pnl_pct>=0?'up':'down'}">${p.pnl_pct!=null?(p.pnl_pct*100).toFixed(2)+'%':'—'}</td><td>${p.note||''}</td><td><button class="del" onclick="pfClose(${p.id})" aria-label="删除持仓">✕</button></td></tr>`).join('')}</tbody></table>`:'<div class="empty">暂无持仓</div>';
+  document.getElementById('pfOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th class="num">买价</th><th class="num">股数</th><th class="num">最新</th><th class="num">浮盈</th><th class="num">收益率</th><th>备注</th><th>提醒</th><th></th></tr></thead><tbody>${d.map(p=>{
+    const loss = p.pnl_pct!=null && p.pnl_pct<=-0.05;
+    const tg = p.alert_triggered;
+    const alertCell = tg ? `<span class="down" style="font-weight:600">🔔${tg==='hi'?'触上':'触下'}</span> <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditAlert(${p.id})">改</button>`
+      : (p.alert_hi||p.alert_lo ? `上${p.alert_hi??'—'}/下${p.alert_lo??'—'} <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditAlert(${p.id})">改</button>`
+      : `<button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditAlert(${p.id})">设</button>`);
+    return `<tr><td>${p.code}</td><td>${p.name||''}</td><td>${p.buy_date}</td><td class="num">${p.buy_price}</td><td class="num">${p.shares}</td><td class="num">${p.latest_price??'—'}</td><td class="num ${p.pnl>=0?'up':'down'}">${p.pnl??'—'}</td><td class="num ${p.pnl_pct>=0?'up':'down'}" ${loss?'style="font-weight:700"':''}>${p.pnl_pct!=null?(p.pnl_pct*100).toFixed(2)+'%':'—'}</td><td>${p.note||''}</td><td id="pfAlert-${p.id}">${alertCell}</td><td><button class="del" onclick="pfClose(${p.id})" aria-label="删除持仓">✕</button></td></tr>`;
+  }).join('')}</tbody></table>`:'<div class="empty">暂无持仓</div>';
 }
 async function pfAdd(){
   const body={code:document.getElementById('pfCode').value,name:document.getElementById('pfName').value,buy_date:document.getElementById('pfDate').value,buy_price:+document.getElementById('pfPrice').value,shares:+document.getElementById('pfShares').value,note:document.getElementById('pfNote').value};
@@ -673,6 +703,17 @@ async function pfAdd(){
   pfLoad();
 }
 window.pfClose=async function(id){await fetch(`${API}/api/portfolio/${id}`,{method:'DELETE'});pfLoad();};
+window.pfEditAlert=function(id){
+  const cell=document.getElementById('pfAlert-'+id);
+  if(!cell)return;
+  cell.innerHTML=`<input type="number" step="0.01" id="pfAHi-${id}" placeholder="触上价" style="width:64px;font-size:11px"> <input type="number" step="0.01" id="pfALo-${id}" placeholder="触下价" style="width:64px;font-size:11px"> <button class="btn" style="font-size:11px;padding:1px 6px" onclick="pfSaveAlert(${id})">存</button> <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfLoad()">取消</button>`;
+};
+window.pfSaveAlert=async function(id){
+  const hi=document.getElementById('pfAHi-'+id).value;
+  const lo=document.getElementById('pfALo-'+id).value;
+  await fetch(`${API}/api/portfolio/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_hi:hi===''?null:+hi,alert_lo:lo===''?null:+lo})}).then(r=>r.json());
+  pfLoad();
+};
 document.getElementById('pfAdd').onclick=pfAdd;
 document.getElementById('pfRefresh').onclick=pfLoad;
 
@@ -725,6 +766,122 @@ document.addEventListener('click',e=>{
     if(typeof anRun==='function') anRun();
   }
 });
+
+// ---------------- 板块详情卡(点击板块行展开) ----------------
+(function(){
+  const s=document.createElement('style');
+  s.textContent=`tr.bd-row{cursor:pointer}tr.bd-row:hover{background:var(--surface-2,#f4f3ee)}tr.bd-row.open{background:var(--surface-2,#f4f3ee)}td.bd-card{padding:12px}.bd-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;align-items:start}.bd-ftab{font-size:14px;border:none}.bd-ftab th{color:var(--muted);font-weight:400;padding:2px 14px 2px 0;white-space:nowrap;text-align:left}.bd-ftab td{padding:2px 0}.bd-label{color:var(--muted);font-size:12px;margin-bottom:2px}.bd-note{font-size:13px;color:var(--muted);line-height:1.5}`;
+  document.head.appendChild(s);
+})();
+document.addEventListener('click',async e=>{
+  const tr=e.target.closest('tr.bd-row'); if(!tr) return;
+  if(e.target.closest('.lead-link')) return;            // 龙头股链接单独处理
+  const board=tr.dataset.board; if(!board) return;
+  const next=tr.nextElementSibling;
+  if(next&&next.classList.contains('bd-expand')){ next.remove(); tr.classList.remove('open'); return; }  // 再点折叠
+  document.querySelectorAll('tr.bd-expand').forEach(r=>r.remove());
+  document.querySelectorAll('tr.bd-row.open').forEach(r=>r.classList.remove('open'));
+  const exp=document.createElement('tr'); exp.className='bd-expand';
+  exp.innerHTML='<td colspan="99" class="bd-card">加载板块详情...</td>';
+  tr.after(exp); tr.classList.add('open');
+  const cat=document.getElementById('category').value;
+  let r; try{ r=await fetch(`${API}/api/board-stocks?board=${encodeURIComponent(board)}&category=${encodeURIComponent(cat)}`).then(r=>r.json()); }
+  catch(err){ exp.querySelector('.bd-card').innerHTML='<span style="color:var(--warn)">请求失败</span>'; return; }
+  renderBoardCard(exp.querySelector('.bd-card'), r.data||{}, board);
+});
+function renderBoardCard(el,d,board){
+  const det=d.detail;
+  if(!det){ el.innerHTML='<span style="color:var(--muted)">未找到板块详情</span>'; return; }
+  const fields=[['涨跌幅',det.change_pct,'%'],['主力净流入',det.main_net_inflow,'元'],['超大单净流入',det.super_large_net,'元'],['大单净流入',det.large_net,'元'],['上涨家数',det.up_count,''],['下跌家数',det.down_count,''],['成分股数量',det.constituent_count,''],['驱动事件',det.event,''],['活动度',det.activity,''],['动量',det.momentum,'']];
+  const rowsHtml=fields.filter(f=>f[1]!==null&&f[1]!==undefined&&f[1]!=='').map(f=>{
+    let v=f[1]; if(f[2]==='%') v=fmtPct(v); else if(f[2]==='元') v=fmtNum(v); else v=f[1];
+    return `<tr><th>${f[0]}</th><td class="num">${v}</td></tr>`;
+  }).join('');
+  const lc=d.leading_stock_code, ln=d.leading_stock_name||'—';
+  const lead=lc?`<a href="javascript:void(0)" class="lead-link" data-code="${lc}" style="color:var(--accent)">${ln} → 个股分析</a>`:ln;
+  el.innerHTML=`<div class="bd-grid"><table class="bd-ftab"><tbody>${rowsHtml}</tbody></table>
+    <div><div class="bd-label">龙头股</div><div>${lead}</div>
+    <div class="bd-label" style="margin-top:8px">说明</div><div class="bd-note">${d.note||''}</div></div></div>`;
+  el.querySelector('.lead-link')?.addEventListener('click',ev=>{
+    ev.preventDefault();
+    const code=(ev.target.dataset.code||'').replace(/^(sh|sz|bj)/,'');
+    if(!/^\d{6}$/.test(code)) return;
+    const inp=document.getElementById('anCode'); if(inp) inp.value=code;
+    if(typeof switchTab==='function') switchTab('analysis');
+    if(typeof anRun==='function') anRun();
+  });
+  // 成分股子表(同花顺直取)
+  const cs=d.constituents||[];
+  const cErr=d.cons_error;
+  let ch='';
+  if(cErr&&!cs.length){ ch=`<div class="bd-note" style="color:var(--warn)">成分股拉取失败: ${cErr}</div>`; }
+  else if(cs.length){
+    const ctrs=cs.map(s=>`<tr class="clk" data-code="${s.code||''}" style="cursor:pointer">
+      <td>${s.code||s.raw_code||'—'}</td><td>${s.name||'—'}</td>
+      <td class="num">${fmtNum(s.price)}</td>
+      <td class="num ${colorPct(s.change_pct)}">${fmtPct(s.change_pct)}</td>
+      <td class="num">${fmtNum(s.turnover_rate)}</td>
+      <td class="num">${fmtNum(s.volume_ratio)}</td>
+      <td class="num">${s.pe!=null?fmtNum(s.pe):'—'}</td>
+      <td class="num">${s.circulating_market_cap||'—'}</td></tr>`).join('');
+    ch=`<div class="bd-label" style="margin-top:10px">成分股(${d.n_total}只·点行跳个股分析)</div>
+      <table class="bd-ctab"><thead><tr><th>代码</th><th>名称</th><th class="num">现价</th><th class="num">涨跌%</th><th class="num">换手%</th><th class="num">量比</th><th class="num">PE</th><th class="num">流通市值</th></tr></thead><tbody>${ctrs}</tbody></table>`;
+  }
+  const wrap=el.querySelector('.bd-grid');
+  if(wrap) wrap.insertAdjacentHTML('afterend',ch);
+  // 成分股行点击→个股分析(事件委托)
+  el.querySelectorAll('tr.clk[data-code]').forEach(r=>r.addEventListener('click',()=>{
+    const code=(r.dataset.code||'').replace(/^(sh|sz|bj)/,'');
+    if(!/^\d{6}$/.test(code)) return;
+    const inp=document.getElementById('anCode'); if(inp) inp.value=code;
+    if(typeof switchTab==='function') switchTab('analysis');
+    if(typeof anRun==='function') anRun();
+  }));
+}
+
+// ---------------- 股票代码自动补全 ----------------
+function attachAc(id){
+  const inp=document.getElementById(id); if(!inp) return;
+  let box=null,t=null;
+  const hide=()=>{ if(box){box.remove();box=null;} };
+  inp.addEventListener('input',()=>{
+    const q=inp.value.trim(); clearTimeout(t);
+    if(q.length<1){hide();return;}
+    t=setTimeout(async()=>{
+      try{
+        const r=await fetch(`${API}/api/stock-search?q=${encodeURIComponent(q)}&limit=10`).then(r=>r.json());
+        const rows=(r.data||{}).rows||[]; if(!rows.length){hide();return;}
+        hide();
+        box=document.createElement('div'); box.className='ac-box';
+        box.innerHTML=rows.map(s=>`<div class="ac-item" data-code="${s.code}"><b>${s.code}</b> <span class="ac-name">${s.name}</span></div>`).join('');
+        const wrap=inp.parentElement; wrap.style.position='relative'; wrap.appendChild(box);
+        box.querySelectorAll('.ac-item').forEach(it=>it.addEventListener('mousedown',ev=>{
+          ev.preventDefault();
+          inp.value=it.dataset.code; hide();
+          inp.dispatchEvent(new Event('change')); inp.focus();
+        }));
+      }catch(e){hide();}
+    },250);
+  });
+  inp.addEventListener('blur',()=>setTimeout(hide,200));
+  // 键盘导航：↑↓选项，Enter确认，Esc关
+  inp.addEventListener('keydown',ev=>{
+    if(!box) return;
+    const items=[...box.querySelectorAll('.ac-item')]; if(!items.length) return;
+    const cur=box.querySelector('.ac-sel');
+    const idx=cur?items.indexOf(cur):-1;
+    if(ev.key==='ArrowDown'){ev.preventDefault(); items[(idx+1)%items.length].classList.add('ac-sel');}
+    else if(ev.key==='ArrowUp'){ev.preventDefault(); items[(idx-1+items.length)%items.length].classList.add('ac-sel');}
+    else if(ev.key==='Enter'&&cur){ev.preventDefault(); inp.value=cur.dataset.code; hide(); inp.dispatchEvent(new Event('change')); }
+    else if(ev.key==='Escape'){hide();}
+  });
+}
+(function(){
+  const st=document.createElement('style');
+  st.textContent=`.ac-box{position:absolute;z-index:9999;left:0;top:100%;min-width:200px;max-width:320px;background:var(--surface,#fff);border:1px solid var(--border,#ddd);border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.18);max-height:280px;overflow-y:auto;font-size:13px}.ac-item{padding:5px 10px;cursor:pointer;white-space:nowrap;display:flex;gap:8px;align-items:center}.ac-item:hover,.ac-item.ac-sel{background:var(--surface-2,#f4f3ee)}.ac-item b{color:var(--accent,#1a73e8)}.ac-name{color:var(--muted,#666);overflow:hidden;text-overflow:ellipsis}`;
+  document.head.appendChild(st);
+  ['hkCode','bfCode','anCode','pfCode','wlCode'].forEach(attachAc);
+})();
 
 // ---------------- 巴菲特分析 ----------------
 async function bfRun(){
@@ -1126,6 +1283,71 @@ document.getElementById('hbRefresh').onclick=async function(){
 };
 setInterval(healthLoad,60000);
 window.addEventListener('load',healthLoad);
+
+// ---------------- 市场温度条 ----------------
+function miniSpark(vals,color='#3B82F6'){
+  vals=(vals||[]).filter(v=>v!=null && !isNaN(v)).map(v=>+v);
+  if(vals.length<2) return '<span style="color:var(--muted);font-size:11px">数据不足</span>';
+  const W=120,H=28,pad=3; const mn=Math.min(...vals),mx=Math.max(...vals);
+  const X=i=>pad+i*(W-2*pad)/(vals.length-1);
+  const Y=v=>H-pad-(v-mn)/(mx-mn||1)*(H-2*pad);
+  const pts=vals.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  return `<svg role="img" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+}
+async function marketLoad(){
+  try{
+    const r=await fetch(`${API}/api/market`).then(r=>r.json());
+    const d=(r&&r.data)||{};
+    const lat=d.latest;
+    if(!lat){
+      const lbl={mbUpDn:'涨跌',mbZt:'涨停',mbDt:'跌停',mbZbgc:'炸板',mbLb:'连板',mbMargin:'两融',mbPe:'PE分位'};
+      Object.entries(lbl).forEach(([id,t])=>{const e=document.getElementById(id); if(e) e.textContent=t+' —';});
+      document.getElementById('mbDate').textContent='未采集';
+      if(!document.getElementById('marketDrawer').hidden) marketRender(d);
+      return;
+    }
+    const up=lat.up_count, dn=lat.down_count;
+    const breadthColor = (up!=null&&dn!=null) ? (up>=dn ? '#16A34A' : '#DC2626') : 'var(--muted)';
+    document.getElementById('mbUpDn').innerHTML = `<span style="color:${breadthColor}">涨 ${up??'—'} : 跌 ${dn??'—'}</span>`;
+    document.getElementById('mbZt').textContent = '涨停 '+(lat.zt_count??'—');
+    document.getElementById('mbDt').textContent = '跌停 '+(lat.dt_count??'—');
+    document.getElementById('mbZbgc').textContent = '炸板 '+(lat.zbgc_count??'—');
+    document.getElementById('mbLb').textContent = (lat.lb_max!=null)?'连板 '+lat.lb_max:'连板 —';
+    const mc=lat.margin_chg;
+    document.getElementById('mbMargin').innerHTML = '两融 '+(lat.margin_total!=null?(lat.margin_total/1e8).toFixed(0)+'亿':(mc!=null?'—':'未采'))+(mc!=null?` <span style="color:${mc>=0?'#DC2626':'#16A34A'}">${mc>=0?'+':''}${(mc/1e8).toFixed(1)}亿</span>`:'');
+    document.getElementById('mbPe').innerHTML = (lat.pe_pct!=null)?`PE分位 <span style="color:${lat.pe_pct>=0.5?'#DC2626':'#16A34A'}">${(lat.pe_pct*100).toFixed(0)}%</span>`:'PE分位 —';
+    document.getElementById('mbDate').textContent = lat.date||'';
+    if(!document.getElementById('marketDrawer').hidden) marketRender(d);
+  }catch(e){
+    document.getElementById('mbDate').textContent='市场温度检查失败';
+  }
+}
+function marketRender(d){
+  const tr=d.trend||{}; const lat=d.latest||{};
+  const row=(label,key,color)=>{
+    const vals=(tr[key]||[]).filter(v=>v!=null);
+    const cur=lat[key];
+    const curStr = (cur!=null && !isNaN(cur)) ? (key.includes('margin')?(cur/1e8).toFixed(0)+'亿':key==='pe_pct'?(cur*100).toFixed(0)+'%':cur) : '—';
+    return `<tr><td>${label}</td><td class="num">${curStr}</td><td>${miniSpark(tr[key]||[],color)}</td></tr>`;
+  };
+  const dates=(tr.dates||[]).slice(-1)[0]||'';
+  document.getElementById('marketBody').innerHTML=
+    `<div style="color:var(--muted);font-size:11px;margin-bottom:6px">近 ${tr.days||0} 日趋势 · 最新 ${lat.date||'—'}</div>`+
+    `<table><thead><tr><th>指标</th><th class="num">最新</th><th>趋势</th></tr></thead><tbody>`+
+    row('涨家数','up_count','#16A34A')+row('跌家数','down_count','#DC2626')+
+    row('涨停','zt_count','#DC2626')+row('跌停','dt_count','#16A34A')+
+    row('炸板','zbgc_count','#F59E0B')+row('连板高度','lb_max','#3B82F6')+
+    row('两融余额','margin_total','#3B82F6')+row('PE分位','pe_pct','#F59E0B')+
+    `</tbody></table>`+
+    (lat.err?`<div style="margin-top:10px;color:var(--muted);font-size:11px">采集状态: ${lat.err}</div>`:'');
+}
+function toggleMarket(){
+  const dr=document.getElementById('marketDrawer');
+  dr.hidden=!dr.hidden;
+  if(!dr.hidden) marketLoad();
+}
+document.getElementById('marketBar').onclick=toggleMarket;
+window.addEventListener('load',marketLoad);
 </script>
 </body>
 </html>

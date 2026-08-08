@@ -104,3 +104,65 @@ def test_trend_returns_rows(monkeypatch):
     monkeypatch.setattr(market.db, "get_conn", lambda: _C())
     tr = market.trend(30)
     assert len(tr) == 2 and tr[-1]["date"] == "2026-08-07"
+
+
+# ---------- 解析逻辑：用合成 DataFrame（匹配真实结构）不触网 ----------
+def test_parse_legu_item_value_long_format():
+    """legu 实测为 item/value 两列长表，按 item 精确匹配，排除'真实涨停'。"""
+    import pandas as pd
+    df = pd.DataFrame([
+        {"item": "上涨", "value": 2670.0},
+        {"item": "涨停", "value": 75.0},
+        {"item": "真实涨停", "value": 72.0},
+        {"item": "下跌", "value": 2399.0},
+        {"item": "跌停", "value": 4.0},
+        {"item": "真实跌停", "value": 4.0},
+        {"item": "平盘", "value": 133.0},
+    ])
+    p = market._parse_legu(df)
+    assert p["up_count"] == 2670 and p["down_count"] == 2399
+    assert p["zt_count"] == 75          # 精确匹配"涨停"，非"真实涨停"
+    assert p["dt_count"] == 4
+    assert p["zbgc_count"] is None and p["lb_max"] is None
+
+
+def test_sum_col_sums_per_stock_detail():
+    """两融明细是逐只标的，_sum_col 对融资余额列求和得市场总量。"""
+    import pandas as pd
+    df = pd.DataFrame([
+        {"标的证券代码": "600519", "融资余额": 2.5e8, "融资买入额": 1e7},
+        {"标的证券代码": "000858", "融资余额": 1.5e8, "融资买入额": 5e6},
+    ])
+    assert market._sum_col(df, ["融资余额"]) == 4.0e8
+
+
+def test_fetch_margin_sums_both_exchanges(monkeypatch):
+    """mock ak 两个交易所明细 → SUM 合计。"""
+    import pandas as pd
+    sse = pd.DataFrame([{"融资余额": 1.0e11}, {"融资余额": 0.5e11}])
+    szse = pd.DataFrame([{"融资余额": 0.8e11}, {"融资余额": 0.2e11}])
+
+    class _FakeAK:
+        def stock_margin_detail_sse(self): return sse
+        def stock_margin_detail_szse(self): return szse
+    monkeypatch.setattr(market, "_AK_OK", True)
+    monkeypatch.setattr(market, "ak", _FakeAK())
+    total, ok, err = market._fetch_margin()
+    assert ok is True and total == 2.5e11   # (1.0+0.5+0.8+0.2)e11
+
+
+def test_fetch_valuation_latest_and_percentile(monkeypatch):
+    """pe 取最新行平均市盈率；pe_pct 为其在全序列分位。"""
+    import pandas as pd
+    df = pd.DataFrame([
+        {"日期": "2026-08-05", "指数": 14000, "平均市盈率": 20.0},
+        {"日期": "2026-08-06", "指数": 14100, "平均市盈率": 25.0},
+        {"日期": "2026-08-07", "指数": 14311, "平均市盈率": 31.09},  # 最新
+    ])
+    class _FakeAK:
+        def stock_market_pe_lg(self): return df
+    monkeypatch.setattr(market, "_AK_OK", True)
+    monkeypatch.setattr(market, "ak", _FakeAK())
+    pe, pb, pe_pct, ok, err = market._fetch_valuation()
+    assert ok is True and pe == 31.09
+    assert pe_pct == 1.0    # 31.09 是序列最大 → 分位 1.0

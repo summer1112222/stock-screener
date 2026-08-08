@@ -90,22 +90,64 @@ def _scalar(df, keywords):
 
 
 def _parse_legu(df):
-    """解析乐估 df → zt/dt/zbgc/lb_max。列名需实测容错（host 无 akshare 无法预填）。"""
-    if df is None:
+    """解析乐估 item/value 长表 → 涨停/跌停/上涨/下跌（炸板/连板 legu 不提供，留 None）。
+
+    legu 实测结构（2026-08）：两列 item/value，item 为离散中文标签
+    （上涨/涨停/真实涨停/st st*涨停/下跌/跌停/真实跌停/平盘/停牌/活跃度/统计日期）。
+    故按 item 精确匹配，避免"涨停"误命中"真实涨停"。
+    """
+    if df is None or len(df) == 0:
         return {}
+    m = {}
+    try:
+        for _, row in df.iterrows():
+            m[str(row.iloc[0]).strip()] = row.iloc[1]
+    except Exception:
+        return {}
+
+    def _get(key):
+        v = m.get(key)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        try:
+            return float(str(v).replace("%", "").replace("亿", "").strip())
+        except (ValueError, TypeError):
+            return None
+
     return {
-        "zt_count": _scalar(df, ["涨停数量", "涨停家数", "涨停"]),
-        "dt_count": _scalar(df, ["跌停数量", "跌停家数", "跌停"]),
-        "zbgc_count": _scalar(df, ["炸板", "开板"]),
-        "lb_max": _scalar(df, ["连板数", "连板高度", "最高连板", "连板"]),
+        "up_count": _get("上涨"),
+        "down_count": _get("下跌"),
+        "zt_count": _get("涨停"),    # 精确，排除"真实涨停"
+        "dt_count": _get("跌停"),    # 精确，排除"真实跌停"
+        "zbgc_count": None,           # legu 不提供炸板，需东财 stock_zt_pool_zbgc_em（可能被封）
+        "lb_max": None,               # legu 不提供连板高度
     }
 
 
 # ------------------------------------------------------------------
 # 两融余额（沪深合计 + 环比）
 # ------------------------------------------------------------------
+def _sum_col(df, keywords):
+    """对 df 中首个匹配列做数值 SUM（逐只标的明细 → 市场总量）。NaN 跳过。"""
+    if df is None or len(df) == 0:
+        return None
+    try:
+        for col in df.columns:
+            if any(k in str(col) for k in keywords):
+                s = pd.to_numeric(df[col], errors="coerce").dropna()
+                if len(s) == 0:
+                    return None
+                return float(s.sum())
+    except Exception:
+        return None
+    return None
+
+
 def _fetch_margin():
-    """沪深两融余额合计。交易所官方域名。返回 (total, ok, err)。"""
+    """沪深两融余额合计（融资余额 SUM 逐只标的 → 市场总量）。交易所官方域名。
+
+    stock_margin_detail_sse/szse 返回逐只标的明细（非总量），需 SUM 融资余额列。
+    """
     if not _AK_OK:
         return None, False, _AK_ERR or "akshare 不可用"
     total = 0.0
@@ -117,8 +159,7 @@ def _fetch_margin():
             continue
         try:
             df = getattr(ak, fn_name)()
-            # 取最新一行的融资余额合计；列名容错
-            v = _scalar(df, ["融资余额"])
+            v = _sum_col(df, ["融资余额"])
             if v is not None:
                 total += v
                 got += 1
@@ -133,38 +174,25 @@ def _fetch_margin():
 # 估值 PE/PB 及分位
 # ------------------------------------------------------------------
 def _fetch_valuation():
-    """市场 PE/PB 历史分位（乐估）。返回 (pe, pb, pe_pct, ok, err)。"""
+    """市场平均 PE 历史分位（乐估 stock_market_pe_lg）。
+
+    实测列：['日期','指数','平均市盈率']。取最新一行平均市盈率为当前 PE，
+    其在全序列中的分位为 pe_pct。
+    """
     if not _AK_OK:
         return None, None, None, False, _AK_ERR or "akshare 不可用"
     if not hasattr(ak, "stock_market_pe_lg"):
         return None, None, None, False, "akshare 无 stock_market_pe_lg"
     try:
         df = ak.stock_market_pe_lg()
-        if df is None or len(df) == 0:
+        s = pd.to_numeric(df["平均市盈率"], errors="coerce").dropna()
+        if len(s) == 0:
             return None, None, None, False, "pe_lg 空"
-        pe = _scalar(df, ["市盈率", "PE"])
-        pb = _scalar(df, ["市净率", "PB"])
-        pe_pct = _calc_percentile(df, ["市盈率", "PE"], pe)
-        return pe, pb, pe_pct, True, ""
+        pe = float(s.iloc[-1])
+        pe_pct = round(float((s <= pe).sum()) / len(s), 4)
+        return pe, None, pe_pct, True, ""
     except Exception as e:
         return None, None, None, False, f"pe_lg: {e}"
-
-
-def _calc_percentile(df, keywords, current):
-    """当前值在 df 该列历史序列的分位(0-1)。NaN→None。"""
-    if current is None or df is None:
-        return None
-    try:
-        for col in df.columns:
-            if any(k in str(col) for k in keywords):
-                s = pd.to_numeric(df[col], errors="coerce").dropna()
-                if len(s) == 0:
-                    return None
-                rank = (s <= current).sum()
-                return round(rank / len(s), 4)
-    except Exception:
-        return None
-    return None
 
 
 # ------------------------------------------------------------------
@@ -195,10 +223,14 @@ def collect_temperature():
     if not db_ok:
         errs.append("spot DB 失败")
 
-    # 路2：乐估活跃度
+    # 路2：乐估活跃度（涨停/跌停/上涨/下跌，全市场口径优于 spot 计数）
     df, legu_ok, legu_err = _fetch_legu()
     if legu_ok:
-        rec.update(_parse_legu(df))
+        parsed = _parse_legu(df)
+        # 仅用 legu 非 None 值覆盖（避免 None 覆盖已得的 spot 计数）
+        for k, v in parsed.items():
+            if v is not None:
+                rec[k] = v
     else:
         errs.append(legu_err)
 
@@ -242,22 +274,16 @@ def _prev_margin(today):
 
 
 def _upsert(rec):
-    """写 market_daily（date 主键 ON CONFLICT 更新）。"""
+    """写 market_daily（date 主键 ON CONFLICT 更新）。占位符按列数动态生成避免数错。"""
+    cols = _MARKET_COLS
+    ph = ",".join("?" * len(cols))
+    updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "date")
     try:
         with db.get_conn() as c:
             c.execute(
-                """INSERT INTO market_daily(date,up_count,down_count,zt_count,
-                   dt_count,zbgc_count,lb_max,margin_total,margin_chg,pe,pb,pe_pct,
-                   src_ok,err,ts)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(date) DO UPDATE SET
-                   up_count=excluded.up_count, down_count=excluded.down_count,
-                   zt_count=excluded.zt_count, dt_count=excluded.dt_count,
-                   zbgc_count=excluded.zbgc_count, lb_max=excluded.lb_max,
-                   margin_total=excluded.margin_total, margin_chg=excluded.margin_chg,
-                   pe=excluded.pe, pb=excluded.pb, pe_pct=excluded.pe_pct,
-                   src_ok=excluded.src_ok, err=excluded.err, ts=excluded.ts""",
-                tuple(rec.get(k) for k in _MARKET_COLS))
+                f"INSERT INTO market_daily({','.join(cols)}) VALUES({ph}) "
+                f"ON CONFLICT(date) DO UPDATE SET {updates}",
+                tuple(rec.get(k) for k in cols))
             c.commit()
     except Exception:
         pass  # 写库失败不崩（采集本身已返回 rec）

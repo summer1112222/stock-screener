@@ -33,12 +33,16 @@ _BOARD_MIGRATIONS = [
     ("concept_board", "down_count", "INTEGER"),
     ("concept_board", "constituent_count", "INTEGER"),
     ("concept_board", "event", "TEXT"),
+    # 持仓到价提醒：用户自设价位规则触发通知，读时比较 latest_price，非买卖点。
+    ("portfolio", "alert_hi", "REAL"),
+    ("portfolio", "alert_lo", "REAL"),
 ]
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     cur = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('industry_board','concept_board')")
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('industry_board','concept_board','portfolio')")
     existing = {r[0] for r in cur.fetchall()}
     for table, col, coltype in _BOARD_MIGRATIONS:
         if table not in existing:
