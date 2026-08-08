@@ -211,6 +211,8 @@ CREATE TABLE IF NOT EXISTS portfolio (
     buy_price REAL,
     shares REAL,
     note TEXT,
+    alert_hi REAL,   -- 用户自设到价提醒(上界)，读时比较 latest_price 触发，非买卖点
+    alert_lo REAL,    -- 用户自设到价提醒(下界)
     ts TEXT
 );
 
@@ -301,6 +303,26 @@ CREATE TABLE IF NOT EXISTS fundamentals_cache (
     payload_json TEXT,
     ts TEXT,
     PRIMARY KEY (code, source)
+);
+
+-- 市场温度日快照(一日一行,date 主键;供趋势 sparkline 与两融环比)
+-- 合规:只存公开市场状态事实(涨跌停/两融/估值),非择时信号。
+CREATE TABLE IF NOT EXISTS market_daily (
+    date TEXT PRIMARY KEY,
+    up_count INTEGER,
+    down_count INTEGER,
+    zt_count INTEGER,
+    dt_count INTEGER,
+    zbgc_count INTEGER,
+    lb_max INTEGER,
+    margin_total REAL,
+    margin_chg REAL,
+    pe REAL,
+    pb REAL,
+    pe_pct REAL,
+    src_ok INTEGER,
+    err TEXT,
+    ts TEXT
 );
 """
 

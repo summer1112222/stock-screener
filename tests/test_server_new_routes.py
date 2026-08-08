@@ -63,3 +63,44 @@ def test_comments_route(monkeypatch):
     r = client.get("/api/comments?code=600519")
     assert r.status_code == 200
     assert "cand_disclaimer" in r.json()
+
+
+def test_market_route(monkeypatch):
+    """市场温度路由返回结构 + disclaimer + 空数据降级。"""
+    from data import market
+    monkeypatch.setattr(market, "latest", lambda: None)
+    monkeypatch.setattr(market, "trend", lambda days=30: [])
+    r = client.get("/api/market")
+    assert r.status_code == 200
+    body = r.json()
+    assert "disclaimer" in body
+    assert body["data"]["latest"] is None
+    assert body["data"]["trend"]["days"] == 0
+
+
+def test_market_route_with_data(monkeypatch):
+    from data import market
+    monkeypatch.setattr(market, "latest",
+                        lambda: {"date": "2026-08-08", "up_count": 200, "zt_count": 35})
+    monkeypatch.setattr(market, "trend", lambda days=30: [
+        {"date": "2026-08-07", "up_count": 180, "zt_count": 30, "margin_total": 1.5e12},
+        {"date": "2026-08-08", "up_count": 200, "zt_count": 35, "margin_total": 1.51e12},
+    ])
+    r = client.get("/api/market")
+    body = r.json()["data"]
+    assert body["latest"]["zt_count"] == 35
+    assert body["trend"]["days"] == 2
+    assert body["trend"]["up_count"] == [180, 200]
+    assert body["trend"]["margin_total"] == [1.5e12, 1.51e12]
+
+
+def test_portfolio_alert_patch(monkeypatch):
+    """PATCH /api/portfolio/{pid} 只更提醒价位 + disclaimer。"""
+    from data import portfolio
+    monkeypatch.setattr(portfolio, "set_alert", lambda pid, alert_hi, alert_lo: True)
+    r = client.patch("/api/portfolio/3", json={"alert_hi": 12.5, "alert_lo": 9.0})
+    assert r.status_code == 200
+    body = r.json()
+    assert "disclaimer" in body
+    assert body["data"]["updated"] is True
+    assert body["data"]["alert_hi"] == 12.5 and body["data"]["alert_lo"] == 9.0

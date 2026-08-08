@@ -161,6 +161,36 @@ def health():
     return _wrap(_collect_health())
 
 
+def _collect_market():
+    """市场温度快照 + 近 30 日趋势（只读，单域失败不崩）。
+    涨跌停/两融/估值等公开事实，非择时信号。"""
+    from data import market
+    lat = market.latest()
+    tr = market.trend(30)
+
+    def _col(key):
+        return [t.get(key) for t in tr]
+
+    return {
+        "latest": lat,
+        "trend": {
+            "dates": [t["date"] for t in tr],
+            "up_count": _col("up_count"), "down_count": _col("down_count"),
+            "zt_count": _col("zt_count"), "dt_count": _col("dt_count"),
+            "zbgc_count": _col("zbgc_count"), "lb_max": _col("lb_max"),
+            "margin_total": _col("margin_total"), "margin_chg": _col("margin_chg"),
+            "pe": _col("pe"), "pe_pct": _col("pe_pct"),
+            "days": len(tr),
+        },
+    }
+
+
+@app.get("/api/market")
+def market_route():
+    """市场温度快照+近30日趋势（只读）。机械市场状态观察，非择时信号，默认 disclaimer。"""
+    return _wrap(_collect_market())
+
+
 @app.get("/api/fields")
 def fields():
     """返回字段目录 + 运算符，供前端动态渲染条件表单。"""
@@ -184,6 +214,49 @@ def boards(category: str = Query("行业"),
                                asc=asc, limit=limit, indicator=indicator)
     return _wrap(res["rows"], {"category": category, "indicator": indicator,
                                "total": res["total"]})
+
+
+@app.get("/api/board-stocks")
+def board_stocks(board: str = Query(...), category: str = Query("行业")):
+    """板块详情卡 + 成分股列表(同花顺直取)。
+    东财成分股接口(stock_board_industry_cons_em)出口 IP 被 RemoteDisconnected 封死、
+    无 THS 备援 → 改走同花顺静态表 thshy/gn 详情页(每页20可翻页)。
+    THS 失败降级：返回板块详情+龙头股(无成分股)，诚实标 cons_error。
+    机械聚合观察清单，非荐股非买卖信号，盈亏自负。"""
+    from data import board_stocks as bs
+    table = "concept_board" if category in ("概念", "concept") else "industry_board"
+    rows = db.query_rows(table, where="name = ?", params=(board,))
+    detail = rows[0] if rows else None
+    leading_name = detail.get("leading_stock") if detail else None
+    leading_code = None
+    if leading_name:
+        sp = db.query_rows("stock_spot", where="name = ?", params=(leading_name,))
+        if sp:
+            leading_code = sp[0].get("code")
+    constituents, cons_err = [], None
+    try:
+        constituents = bs.fetch_constituents(board, category)
+    except Exception as e:
+        cons_err = f"{type(e).__name__}: {str(e)[:80]}"
+    return _wrap({
+        "detail": detail, "board": board, "category": category,
+        "leading_stock_code": leading_code, "leading_stock_name": leading_name,
+        "constituents": constituents, "n_total": len(constituents),
+        "source": "ths", "cons_error": cons_err,
+        "note": "成分股列表由同花顺静态表直取(thshy/gn)，每页20可翻页；东财成分股接口反爬已弃用",
+    }, {"cand_disclaimer": "板块详情+成分股机械聚合，观察清单非荐股非买卖信号，盈亏自负。"})
+
+
+@app.get("/api/stock-search")
+def stock_search(q: str = Query("", min_length=1), limit: int = Query(10, ge=1, le=30)):
+    """股票代码/名称模糊搜索(供前端输入框自动补全)。
+    查 stock_spot，code LIKE OR name LIKE。机械查询非荐股。"""
+    q = q.strip()
+    if not q:
+        return _wrap({"rows": [], "q": q})
+    pat = f"%{q}%"
+    rows = db.query_rows("stock_spot", where="code LIKE ? OR name LIKE ?", params=(pat, pat), limit=limit)
+    return _wrap({"rows": [{"code": r.get("code"), "name": r.get("name")} for r in rows], "q": q})
 
 
 @app.get("/api/etfs")
@@ -443,6 +516,19 @@ def portfolio_add(req: BTPortfolioReq):
 def portfolio_close(pid: int):
     ok = portfolio.close_position(pid)
     return _wrap({"closed": ok, "id": pid})
+
+
+class PortfolioAlertReq(BaseModel):
+    alert_hi: float | None = None
+    alert_lo: float | None = None
+
+
+@app.patch("/api/portfolio/{pid}")
+def portfolio_alert(pid: int, req: PortfolioAlertReq):
+    """更新持仓到价提醒价位（用户自设规则，非买卖点）。默认 disclaimer。"""
+    ok = portfolio.set_alert(pid, req.alert_hi, req.alert_lo)
+    return _wrap({"updated": ok, "id": pid,
+                  "alert_hi": req.alert_hi, "alert_lo": req.alert_lo})
 
 
 class WatchlistReq(BaseModel):

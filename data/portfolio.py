@@ -27,11 +27,14 @@ def add_position(code: str, name: str, buy_date: str, buy_price: float,
 
 
 def list_positions() -> list[dict]:
-    """列持仓 + 按 stock_spot 最新价算浮盈/收益率。"""
+    """列持仓 + 按 stock_spot 最新价算浮盈/收益率 + 到价提醒触发态。
+
+    提醒为用户自设价位规则（alert_hi/alert_lo），读时比较 latest_price：
+    最新价 >= alert_hi → 'hi'，<= alert_lo → 'lo'，否则 None。非 AI 买卖点。"""
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT id,code,name,buy_date,buy_price,shares,note,ts FROM portfolio "
-            "ORDER BY buy_date DESC"
+            "SELECT id,code,name,buy_date,buy_price,shares,note,alert_hi,alert_lo,ts "
+            "FROM portfolio ORDER BY buy_date DESC"
         ).fetchall()
     if not rows:
         return []
@@ -58,14 +61,29 @@ def list_positions() -> list[dict]:
         shares = r["shares"] or 0
         pnl = (lp - cost) * shares if lp else None
         pct = (lp / cost - 1) if (lp and cost) else None
+        hi = r["alert_hi"]
+        lo = r["alert_lo"]
+        triggered = "hi" if (hi is not None and lp is not None and lp >= hi) \
+            else ("lo" if (lo is not None and lp is not None and lp <= lo) else None)
         out.append({
             "id": r["id"], "code": r["code"], "name": r["name"],
             "buy_date": r["buy_date"], "buy_price": cost, "shares": shares,
             "note": r["note"], "ts": r["ts"],
             "latest_price": lp, "pnl": round(pnl, 2) if pnl is not None else None,
             "pnl_pct": round(pct, 4) if pct is not None else None,
+            "alert_hi": hi, "alert_lo": lo, "alert_triggered": triggered,
         })
     return out
+
+
+def set_alert(pid: int, alert_hi: float | None, alert_lo: float | None) -> bool:
+    """更新持仓的到价提醒价位（只更 alert_hi/alert_lo，不动买入价/股数）。"""
+    with db.get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE portfolio SET alert_hi=?, alert_lo=? WHERE id=?",
+            (alert_hi, alert_lo, pid))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def close_position(pid: int) -> bool:
