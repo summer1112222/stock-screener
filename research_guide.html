@@ -1,0 +1,258 @@
+<!-- @dsCard group="研究指南" -->
+<title>stock-screener 研究上手指南</title>
+<style>
+  :root{
+    --bg:#FAFAF7; --surface:#FFFFFF; --surface-2:#F4F3EE;
+    --text:#1A1D24; --muted:#5B6270; --border:#E5E4DE;
+    --accent:#1E3A5F; --accent-soft:#E6ECF3;
+    --up:#15803D; --down:#B91C1C; --warn:#B45309;
+    --up-soft:#DCFCE7; --down-soft:#FEE2E2; --warn-soft:#FEF3C7;
+    --rule:#D9D7CF;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0F1115; --surface:#181B21; --surface-2:#1F232B;
+      --text:#E8E9ED; --muted:#9CA3AF; --border:#2A2F3A;
+      --accent:#7C9CB8; --accent-soft:#1B2632;
+      --up:#4ADE80; --down:#F87171; --warn:#FBBF24;
+      --up-soft:#14331F; --down-soft:#331A1A; --warn-soft:#3A2E0E;
+      --rule:#2A2F3A;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0F1115; --surface:#181B21; --surface-2:#1F232B;
+    --text:#E8E9ED; --muted:#9CA3AF; --border:#2A2F3A;
+    --accent:#7C9CB8; --accent-soft:#1B2632;
+    --up:#4ADE80; --down:#F87171; --warn:#FBBF24;
+    --up-soft:#14331F; --down-soft:#331A1A; --warn-soft:#3A2E0E;
+    --rule:#2A2F3A;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:780px; margin:0 auto; padding:48px 24px 80px}
+  h1,h2,h3{font-family:Georgia,"Songti SC","SimSun",serif; font-weight:600; line-height:1.25; text-wrap:balance; letter-spacing:-0.01em}
+  h1{font-size:34px; margin:0 0 8px}
+  h2{font-size:22px; margin:44px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule)}
+  h3{font-size:17px; margin:24px 0 8px}
+  p{margin:0 0 14px}
+  .eyebrow{font-family:inherit; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:var(--muted); margin:0 0 10px}
+  .sub{color:var(--muted); font-size:16px; margin:0 0 20px}
+  .disclaimer{
+    background:var(--warn-soft); border-left:3px solid var(--warn); color:var(--text);
+    padding:12px 16px; font-size:14px; border-radius:2px; margin:0 0 8px;
+  }
+  .disclaimer strong{color:var(--warn)}
+  .lead{font-size:17px; color:var(--text); margin:0 0 8px}
+  ul,ol{padding-left:22px; margin:0 0 16px}
+  li{margin:0 0 8px}
+  code{font-family:"SF Mono","Cascadia Code",Consolas,monospace; font-size:0.88em; background:var(--surface-2); padding:1px 6px; border-radius:3px; color:var(--accent)}
+  .num{font-variant-numeric:tabular-nums}
+  table{width:100%; border-collapse:collapse; font-size:14px; margin:8px 0 16px; display:block; overflow-x:auto}
+  th,td{padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap}
+  th{font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); font-weight:600}
+  td.num,th.num{font-variant-numeric:tabular-nums; text-align:right}
+  .badge{display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; letter-spacing:0.04em; vertical-align:middle}
+  .b-up{background:var(--up-soft); color:var(--up)}
+  .b-down{background:var(--down-soft); color:var(--down)}
+  .b-warn{background:var(--warn-soft); color:var(--warn)}
+  .b-muted{background:var(--surface-2); color:var(--muted)}
+  .step{display:flex; gap:14px; padding:18px 0; border-bottom:1px solid var(--rule)}
+  .step:last-child{border-bottom:none}
+  .step-n{flex:0 0 44px; font-family:Georgia,serif; font-size:26px; color:var(--accent); line-height:1; padding-top:2px}
+  .step-b{flex:1; min-width:0}
+  .step-b h3{margin:0 0 6px; font-size:16px}
+  .meta{font-size:13px; color:var(--muted); margin:0 0 8px}
+  .meta .badge{margin-right:6px}
+  .kv{font-size:14px; margin:0 0 6px}
+  .kv b{color:var(--accent); font-weight:600}
+  .lesson{font-size:14px; background:var(--surface); border:1px solid var(--border); padding:10px 12px; border-radius:3px; margin:6px 0 0}
+  .lesson::before{content:"教训 · "; color:var(--warn); font-weight:600; font-size:12px; letter-spacing:0.06em}
+  .card{background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:16px 18px; margin:0 0 12px}
+  .card h3{margin:0 0 8px}
+  .pos{color:var(--up)} .neg{color:var(--down)} .neu{color:var(--muted)}
+  footer{margin-top:48px; padding-top:20px; border-top:1px solid var(--rule); font-size:13px; color:var(--muted)}
+  .pill{display:inline-block; padding:1px 7px; border-radius:3px; font-size:12px; font-family:"SF Mono",Consolas,monospace; background:var(--surface-2); color:var(--muted); margin-right:4px}
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">研究上手指南 · 2026-08</p>
+  <h1>stock-screener 研究流程</h1>
+  <p class="sub">数据筛选 / 回测研究工具 · 非投资顾问</p>
+
+  <div class="disclaimer">
+    <strong>合规边界</strong> · 本指南记录的是研究方法学，不荐股、不输出实时买卖点、不承诺收益、不自动下单。所有数据响应挂 disclaimer，"候选池"是按因子机械排序的观察清单，不是"推荐买入"。盈亏自负。
+  </div>
+
+  <p class="lead">这套工具不能预测未来股价。它做三件事：<b>把 5000 只标的机械收窄到几十只值得研究的</b>、<b>把你的假设丢进历史回测验灵不灵</b>、<b>把基本面/资金面/技术面/机构评级多维聚合交叉验证</b>。最终的买卖决策、仓位、止损、心态管理，全是你自己的事。</p>
+
+  <h2>五条贯穿始终的方法论</h2>
+  <ol>
+    <li><b>多维交叉 &gt; 单维结论</b> — 任何单一维度（资金面 / outlook / 评分）都可能是噪音或数据假象，多维度同向才是真信号。</li>
+    <li><b>成本是大多数策略的坟墓</b> — 裸信号胜率全 &gt;52%，加 5% 止损 + 万 10 费率后全跌破 45%。刷到任何"胜率 X%"先问加成本了吗。</li>
+    <li><b>median 比 mean 诚实</b> — mean 正 median 负 = 靠少数大涨撑，多数触发亏。看分布不只看平均。</li>
+    <li><b>好公司 ≠ 好价格</b> — 基本面 65 分但 PE 168 贵；基本面 80 分且 PE 23 合理。估值贵贱决定风险收益比。</li>
+    <li><b>note 是纪律工具</b> — 加入自选 / 建持仓时写下"为什么"，日后复盘才能分清逻辑与运气。不写等于没逻辑。</li>
+  </ol>
+
+  <h2>P0–P9 研究步骤（按优先度）</h2>
+  <p style="font-size:14px;color:var(--muted)">每步是下一步的前提，跳级会踩空。P0–P3 是研究期不碰仓位，P4 后才进决策期。</p>
+
+  <div class="step">
+    <div class="step-n">0</div>
+    <div class="step-b">
+      <h3>数据健康与基线</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>/api/health</code> · <code>/api/refresh</code></p>
+      <p class="kv"><b>动作</b> 拉一次全量，看各域新鲜度红/黄/绿。</p>
+      <p class="kv"><b>产出</b> spot 行情 + 板块资金流可用；个股派生字段（换手率/市值/PE）当前缺失；research 报 <code>no such column: date</code> schema bug 待修；主力资金流通道（THS DNS + 东财反爬）停摆。</p>
+      <p class="lesson">先知道哪些维度可信，再开始研究。地基没数据，上面一切白搭。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">1</div>
+    <div class="step-b">
+      <h3>市场结构：板块 + 成交额交叉验证</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>/api/boards</code> · <code>/api/screen</code></p>
+      <p class="kv"><b>动作</b> 板块级按主力净流入排序；个股级资金流缺失时用成交额排序做代理。</p>
+      <p class="kv"><b>产出</b> 半导体主力净流入 102 亿第一 + 成交额 top 几乎全是半导体/光模块；医药四子板块全线吸金 + 药明康德 +8.49% 领涨。主线锁定。</p>
+      <p class="lesson">用多个维度交叉确认。光模块"成交 546 亿全市场第一却跌 3.68%"是典型高位放量分歧——单看涨幅会错过这个顶部信号。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">2</div>
+    <div class="step-b">
+      <h3>自选观察清单：先看不动手</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>POST /api/watchlist</code></p>
+      <p class="kv"><b>动作</b> 把候选加入 watchlist，note 写下研究依据，隔几天回看。</p>
+      <p class="kv"><b>产出</b> 3 只入清单：兆易创新（半导体主线领涨）/ 药明康德（医药领涨）/ 中际旭创（标注"高位放量分歧 非买入"）。</p>
+      <p class="lesson">自选清单是冷却池不是买入池。风险标的也加入但标"非买入"——不观察就学不到顶部长什么样。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">3</div>
+    <div class="step-b">
+      <h3>信号回测：证伪直觉</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>/api/backtest/fetch</code> · <code>/api/signals/backtest</code></p>
+      <p class="kv"><b>动作</b> fetch 5 只历史；跑 5 信号 × 持有 5 日，对比裸信号 vs 带成本（5% 止损 + 万 10 费率 + min_hits=2 共振）。</p>
+      <p class="kv"><b>产出</b></p>
+      <table>
+        <tr><th>信号</th><th>n</th><th class="num">裸胜率</th><th class="num">带成本胜率</th><th class="num">带成本中位</th></tr>
+        <tr><td>volume_surge</td><td class="num">43</td><td class="num">58.1%</td><td class="num pos">55.8%</td><td class="num pos">+1.1%</td></tr>
+        <tr><td>golden_cross</td><td class="num">116</td><td class="num">53.4%</td><td class="num">50.0%</td><td class="num">-0.1%</td></tr>
+        <tr><td>ma_breakout</td><td class="num">216</td><td class="num">54.6%</td><td class="num neg">44.9%</td><td class="num neg">-1.5%</td></tr>
+        <tr><td>rsi_oversold</td><td class="num">511</td><td class="num">52.8%</td><td class="num neg">45.4%</td><td class="num neg">-1.0%</td></tr>
+        <tr><td>momentum_up</td><td class="num">1301</td><td class="num">53.6%</td><td class="num neg">44.6%</td><td class="num neg">-1.3%</td></tr>
+        <tr><td>combo≥2</td><td class="num">204</td><td class="num">—</td><td class="num neg">44.6%</td><td class="num neg">-1.6%</td></tr>
+      </table>
+      <p class="lesson">volume_surge 是唯一扛住成本的信号（有经济学逻辑：放量=真金白银参与）。"共振更可靠"反直觉地不灵。样本量 n=43 vs 1301 差 30 倍，小样本的好结果最可能是运气。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">4</div>
+    <div class="step-b">
+      <h3>个股 outlook 解构：看几条腿</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>/api/stock-analysis?code=</code></p>
+      <p class="kv"><b>动作</b> 对自选逐个跑多维聚合（基本面+评分+主力+研报+信号+outlook），看 reasons/contribs 哪些维度驱动。</p>
+      <p class="kv"><b>产出</b> 药明康德 score 0.55 / confidence 55% — 基本面强 + 估值合理 + 技术动量正三条腿；兆易创新 0.25 / 25% — 仅基本面一条腿 + 估值偏空拖累。</p>
+      <p class="lesson">confidence（多维一致性）比 score 更重要。资金面"中性"常是数据缺失假象不是事实，要靠 P1 板块级补。权重可心算覆盖——你是长线就把技术面权重在脑中调低。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">5</div>
+    <div class="step-b">
+      <h3>基本面排雷：红旗 + 估值贵贱</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>/api/buffett?code=</code></p>
+      <p class="kv"><b>动作</b> 逐个跑 buffett 评分，看 ROE 趋势 / 红旗 / 护城河 / 盈利收益率 vs 国债。</p>
+      <table>
+        <tr><th>标的</th><th>priority</th><th class="num">ROE趋势</th><th>红旗</th><th class="num">PE</th><th>估值</th></tr>
+        <tr><td>药明康德</td><td><span class="badge b-up">高</span></td><td class="num pos">+7.74</td><td>无</td><td class="num">23.1</td><td>合理</td></tr>
+        <tr><td>兆易创新</td><td><span class="badge b-warn">低</span></td><td class="num neg">-6.79</td><td>ROE下行</td><td class="num">168.2</td><td>贵</td></tr>
+        <tr><td>中际旭创</td><td><span class="badge b-warn">低</span></td><td class="num neg">-7.46</td><td>ROE下行</td><td class="num">93.9</td><td>贵</td></tr>
+      </table>
+      <p class="lesson">红旗 + 估值贵 = 双杀必避。盈利收益率 &lt; 国债 = 贵到没安全边际，纯靠增长预期撑估值。药明是三只里唯一三步共振正的标的。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">6</div>
+    <div class="step-b">
+      <h3>主力动向交叉验证</h3>
+      <p class="meta"><span class="badge b-warn">受限</span> <code>/api/smart-money/*</code></p>
+      <p class="kv"><b>动作</b> 查龙虎榜/十大股东/北向/资金流/高管增减持/限售解禁。</p>
+      <p class="kv"><b>产出</b> 通道大面积停摆（龙虎榜/北向/资金流/高管未采集），仅限售解禁 ok。三只自选近 7 日无主力事件 = 中性偏正（至少无高管减持、无解禁压制）。</p>
+      <p class="lesson">主力维度当前是盲区，是已知网络/反爬限制。高管增持偏正面、限售解禁偏负面日历风险——维度可用时与其它维度交叉确认而非跟单。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">7</div>
+    <div class="step-b">
+      <h3>多口径共振优质筛选</h3>
+      <p class="meta"><span class="badge b-warn">超时</span> <code>/api/quality</code></p>
+      <p class="kv"><b>动作</b> 全市场四口径分位（风险调整/价值质量/资金流向/多信号）共振排序。</p>
+      <p class="kv"><b>产出</b> 全市场 quality 逐个调 buffett（按需拉 akshare 财务摘要）极慢超时。方法论已在 P4+P5 手动实现。</p>
+      <p class="lesson">多维共振的思想不需要全市场机械跑——你自己在 P4/P5 手动交叉了药明康德的三个维度，结论一致。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">8</div>
+    <div class="step-b">
+      <h3>因子有效性 IC</h3>
+      <p class="meta"><span class="badge b-warn">超时</span> <code>/api/backtest/eval</code></p>
+      <p class="kv"><b>动作</b> 对已 fetch 的 5 只算 momentum_n 因子 IC / 分档多空。</p>
+      <p class="kv"><b>产出</b> load_panel 网络/计算重超时。方法论已在 P3 体现——信号胜率/盈亏比就是因子有效性的另一种验证。</p>
+      <p class="lesson">因子 IC 是更严谨的"这个因子有没有预测力"验证，需更长时间窗口或预计算面板。小样本 IC 不可信。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-n">9</div>
+    <div class="step-b">
+      <h3>持仓跟踪与复盘</h3>
+      <p class="meta"><span class="badge b-up">完成</span> <code>POST /api/portfolio</code></p>
+      <p class="kv"><b>动作</b> 建持仓记录买入价/日期/股数，note 写完整逻辑链；浮盈靠 spot 最新价现算。</p>
+      <p class="kv"><b>产出</b> 药明康德演示持仓 #5，note 锚定"P1 板块吸金 + P4 outlook 三腿 + P5 buffett priority 高"完整链。平仓走 DELETE 返回 {closed,id}。</p>
+      <p class="lesson">买时写下逻辑，平仓后回看 note 对照——哪些对了、哪些是运气。这是唯一能真正进步的方式。</p>
+    </div>
+  </div>
+
+  <h2>三只标的研究结论</h2>
+  <table>
+    <tr><th>标的</th><th>P1 板块</th><th>P4 outlook</th><th>P5 排雷</th><th>综合研究置信度</th></tr>
+    <tr><td>药明康德</td><td>医药吸金领涨</td><td class="pos">0.55 / 55% 三腿</td><td><span class="badge b-up">priority 高</span></td><td class="pos">最高</td></tr>
+    <tr><td>兆易创新</td><td>半导体吸金</td><td class="neu">0.25 / 25% 单腿</td><td><span class="badge b-warn">ROE下行+贵</span></td><td class="neu">矛盾待读年报</td></tr>
+    <tr><td>中际旭创</td><td>放量分歧</td><td class="neu">—</td><td><span class="badge b-down">ROE下行+毛利恶化+贵</span></td><td class="neg">顶部警示最强</td></tr>
+  </table>
+  <p style="font-size:14px;color:var(--muted)">研究置信度最高 ≠ "该买"。机械评分到边界后正途是读药明康德年报确认护城河（品牌/客户黏性/切换成本），工具替不了这一步。</p>
+
+  <h2>工具能力边界</h2>
+  <div class="card">
+    <h3 style="color:var(--up)">能做（事实层）</h3>
+    <p style="margin:0">
+      <span class="pill">筛选排序</span><span class="pill">信号回测</span><span class="pill">因子IC</span><span class="pill">基本面排雷</span><span class="pill">主力聚合</span><span class="pill">多维outlook</span><span class="pill">持仓跟踪</span>
+    </p>
+    <p style="margin:8px 0 0;font-size:14px">把研究流程工具化：筛选 → 证伪 → 解构 → 跟踪 → 复盘，每步留痕可查。</p>
+  </div>
+  <div class="card">
+    <h3 style="color:var(--down)">不能做（别期待它替你决策）</h3>
+    <p style="margin:0">
+      <span class="pill">预测未来股价</span><span class="pill">实时买卖点</span><span class="pill">承诺收益</span><span class="pill">自动下单</span><span class="pill">判断护城河</span>
+    </p>
+    <p style="margin:8px 0 0;font-size:14px">回测是事后统计非事前预测。所有"能预测未来"的承诺都不可信。</p>
+  </div>
+
+  <footer>
+    <p>本指南由 stock-screener 项目实际 API 调用产出（2026-08）。每一条数据响应经 <code>server.py _wrap()</code> 附 disclaimer + update_time。<br>研究优先级非买卖信号，盈亏自负。</p>
+  </footer>
+
+</div>
