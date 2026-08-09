@@ -574,8 +574,11 @@ def sm_today(date: str | None = Query(None),
 
 
 @app.post("/api/smart-money/refresh")
-def sm_refresh():
-    report = smart_money.refresh_today()
+def sm_refresh(channel: str | None = Query(None)):
+    """主力动向刷新。channel 逗号分隔时只刷指定通道(单通道按需刷新,标 partial,
+    不刷新全局 update_time 避免误导全量已更新);省略=全量6通道。"""
+    chs = [c.strip() for c in channel.split(",") if c.strip()] if channel else None
+    report = smart_money.refresh_today(channels=chs)
     return _wrap(report, {"cand_disclaimer": SM_CAND_DISCLAIMER})
 
 

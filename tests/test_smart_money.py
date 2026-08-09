@@ -432,3 +432,48 @@ def test_today_list_days_window(sm_db):
     """days=1 仅最新日;days=7 含近7日(SM_ROWS 全4行)。"""
     assert smq.today_list(days=1)["total"] == 2  # 仅 2026-07-14 2行
     assert smq.today_list(days=7)["total"] == 4  # 07-13+07-14 共4行
+
+
+def test_refresh_single_channel_skips_others(monkeypatch, tmp_path):
+    """单通道刷新：channels=["资金流"] 只跑资金流采集，其余5通道 skipped=True
+    不调用采集函数；partial=True 且不刷新全局 update_time（避免误导全量已更新）。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    monkeypatch.setattr(db, "set_meta", lambda k, v: None)
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    called = []
+    monkeypatch.setattr(sm, "collect_fund_flow",
+                        lambda d: (called.append("资金流") or
+                         ([{"date": d, "code": "000001", "name": "甲",
+                            "market": "股票", "channel": "资金流", "actor": "",
+                            "action": "净买入", "amount": 1.5e8, "as_of": None,
+                            "ts": ""}], True, "")))
+    for name in ("collect_dragon_tiger", "collect_holders",
+                 "collect_management_hold", "collect_share_unlock",
+                 "collect_northbound"):
+        monkeypatch.setattr(sm, name,
+                            lambda d, _n=name: (called.append(_n) or ([], True, "skip")))
+    report = sm.refresh_today("2026-07-25", channels=["资金流"])
+    assert called == ["资金流"]                       # 只跑了资金流
+    assert report["channels"]["资金流"]["ok"] is True
+    assert not report["channels"]["资金流"].get("skipped")
+    assert report["channels"]["资金流"]["rows"] == 1
+    assert report.get("partial") is True               # 单通道标 partial
+    for other in ("龙虎榜", "十大股东", "高管增减持", "限售解禁", "北向"):
+        ch = report["channels"][other]
+        assert ch.get("skipped") is True, other
+        assert ch["rows"] == 0
+
+
+def test_refresh_all_channels_no_partial(monkeypatch, tmp_path):
+    """全量刷新(channels=None)：所有通道都跑、无 skipped、无 partial 键。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    monkeypatch.setattr(db, "set_meta", lambda k, v: None)
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    for name in ("collect_fund_flow", "collect_dragon_tiger", "collect_holders",
+                 "collect_management_hold", "collect_share_unlock", "collect_northbound"):
+        monkeypatch.setattr(sm, name, lambda d: ([], True, ""))
+    report = sm.refresh_today("2026-07-25")
+    assert "partial" not in report
+    assert all(not v.get("skipped") for v in report["channels"].values())

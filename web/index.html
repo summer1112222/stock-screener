@@ -278,7 +278,11 @@
         <div id="smChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <input id="smSearch" type="text" placeholder="搜索 代码/席位/名称" style="flex:1;min-width:160px">
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px">近<select id="smDays" style="font-size:12px;padding:2px 4px"><option>1</option><option selected>7</option><option>15</option><option>30</option></select>日</label>
-        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px"><input type="checkbox" id="smAgg"> 按席位聚合</label>
+        <select id="smView" class="btn ghost" style="font-size:12px" title="视图:流水账=逐条;按席位=营业部累计;按个股=每只股票各通道净额分列(元/股分列避混排)">
+          <option value="flow">流水账</option>
+          <option value="actor">按席位</option>
+          <option value="code">按个股</option>
+        </select>
       </div>
       <div class="skipped" id="smMsg"></div>
       <div id="smOut" style="margin-top:10px"></div>
@@ -934,7 +938,7 @@ async function bfTop(order='priority'){
 document.getElementById('bfTop').onclick=()=>bfTop('priority');
 
 // ---------------- 主力动向(观察清单·非推荐) ----------------
-const smState = {raw:[], chip:'all', q:'', agg:false};
+const smState = {raw:[], chip:'all', q:'', viewMode:'flow'};
 function smChannelsHtml(channels){
   return Object.entries(channels||{}).map(([k,v])=>{
     const stale=v&&v.stale;
@@ -945,7 +949,9 @@ function smChannelsHtml(channels){
     const reason=stale?('回退至 '+(v.stale_date||'')+' '+(v.err||''))
                   :(ok?(v.source||'ok'):(v.err||'不可用'));
     const title=`${k}：${reason} ${rows} ${dt}`.replace(/"/g,'&quot;');
-    return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">${stale?'◐':'●'}${k}${rows}</span>`;
+    // 灰灯附 err 短摘要(≤10字)直接可见,不必悬停
+    const errTag=(!ok&&!stale&&v&&v.err)?`<span style="opacity:.7;font-size:11px"> ${(v.err||'').slice(0,10)}</span>`:'';
+    return `<span title="${title}" data-ch="${k}" style="color:${color};font-size:12px;cursor:pointer;border:1px solid var(--border);border-radius:6px;padding:2px 8px">${stale?'◐':'●'}${k}${rows}${errTag}<span class="sm-ch-refresh" data-chr="${k}" title="只刷 ${k}(单通道,快)" style="margin-left:4px;opacity:.55;cursor:pointer">⟳</span></span>`;
   }).join('');
 }
 async function smLoadChannels(){
@@ -954,16 +960,41 @@ async function smLoadChannels(){
   document.querySelectorAll('#smChannels [data-ch]').forEach(s=>s.onclick=()=>{
     smState.chip=s.dataset.ch; smRender();
   });
+  document.querySelectorAll('#smChannels .sm-ch-refresh').forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    await smRefreshChannel(b.dataset.chr);
+  });
 }
+let smAbort=null;
 async function smRefresh(){
   const btn=document.getElementById('smRefresh');
-  btn.disabled=true; document.getElementById('smLoading').textContent='采集中(东财被封通道会灰掉，不阻塞其他通道)...';
+  btn.disabled=true;
+  smAbort=new AbortController();
+  document.getElementById('smLoading').innerHTML='全量6通道采集中(高管通道约4-5min,东财被封通道灰掉不阻塞)... <a href="#" id="smCancel" style="margin-left:6px">取消</a>';
+  const cancel=document.getElementById('smCancel');
+  if(cancel) cancel.onclick=e=>{e.preventDefault();smAbort.abort();};
   try{
-    const r=await fetch(`${API}/api/smart-money/refresh`,{method:'POST'}).then(r=>r.json());
+    const r=await fetch(`${API}/api/smart-money/refresh`,{method:'POST',signal:smAbort.signal}).then(r=>r.json());
     const d=r.data||{};
-    document.getElementById('smMsg').textContent='通道: '+Object.entries(d.channels||{}).map(([k,v])=>`${k}:${v.rows}行${v.ok?'':'(失败)'}`).join(' | ');
+    document.getElementById('smMsg').textContent='通道: '+Object.entries(d.channels||{}).map(([k,v])=>`${k}:${v.rows}行${v.ok?'':(v.skipped?'跳过':'失败')}`).join(' | ');
     await smLoadChannels(); await smLoad();
-  }finally{ btn.disabled=false; document.getElementById('smLoading').textContent=''; }
+  }catch(e){
+    if(e.name==='AbortError'){ document.getElementById('smMsg').textContent='已取消刷新'; }
+    else{ document.getElementById('smMsg').textContent='刷新失败: '+e; }
+  }finally{ btn.disabled=false; smAbort=null; document.getElementById('smLoading').textContent=''; }
+}
+async function smRefreshChannel(ch){
+  // 单通道按需刷新:只刷指定通道(快),不刷新全局 update_time(partial),刷完重载灯+清单
+  const out=document.getElementById('smLoading');
+  out.textContent=`刷新 ${ch} 中...`;
+  try{
+    const r=await fetch(`${API}/api/smart-money/refresh?channel=${encodeURIComponent(ch)}`,{method:'POST'}).then(r=>r.json());
+    const d=(r&&r.data)||{};
+    const chRep=d.channels&&d.channels[ch];
+    document.getElementById('smMsg').textContent=`${ch}: ${chRep?(chRep.rows+'行'+(chRep.ok?'':(chRep.skipped?'跳过':'失败'))):'无响应'}`+(d.partial?' (单通道,未更全局时间)':'');
+    await smLoadChannels(); await smLoad();
+  }catch(e){ document.getElementById('smMsg').textContent=`刷新 ${ch} 失败: `+e; }
+  finally{ out.textContent=''; }
 }
 async function smLoad(){
   document.getElementById('smLoading').textContent='加载中...';
@@ -973,8 +1004,8 @@ async function smLoad(){
     smState.raw = r.data||[];
     const datestr = r.date?('数据日期 '+r.date+' · '):'';
     document.getElementById('ut').textContent=datestr+'更新于 '+(r.update_time||'');
-    smState.chip='all'; smState.q=''; smState.agg=false;
-    document.getElementById('smSearch').value=''; document.getElementById('smAgg').checked=false;
+    smState.chip='all'; smState.q='';
+    document.getElementById('smSearch').value=''; const _sv=document.getElementById('smView'); if(_sv){_sv.value='flow';} smState.viewMode='flow'; smState.sortKey=null; smState.sortDir=null;
     smRender();
   }finally{ document.getElementById('smLoading').textContent=''; }
 }
@@ -989,49 +1020,73 @@ function smRender(){
   if(smState.chip!=='all') rows=rows.filter(x=>x.channel===smState.chip);
   if(smState.q){const q=smState.q.toLowerCase();rows=rows.filter(x=>((x.code||'')+(x.actor||'')+(x.name||'')).toLowerCase().indexOf(q)>=0);}
   const CAP=300;
-  // 排序：点击表头切换列/方向。amount 默认按绝对值降序，其余按值 asc/desc。
   const SK=smState.sortKey||'amount', SD=smState.sortDir||'desc';
   const _arrow=k=>SK===k?(SD==='desc'?' ▼':' ▲'):'';
-  const _cmp=(a,b,k)=>{ // 数值比较（amount 按绝对值，n 按值）
-    const va=k==='amount'?Math.abs(a[k]||0):(a[k]||0), vb=k==='amount'?Math.abs(b[k]||0):(b[k]||0);
-    return SD==='desc'? (vb-va) : (va-vb);
-  };
+  const _cmp=(a,b,k)=>{const va=k==='amount'?Math.abs(a[k]||0):(a[k]||0), vb=k==='amount'?Math.abs(b[k]||0):(b[k]||0);return SD==='desc'?(vb-va):(va-vb);};
   const _scmp=(a,b,k)=>{const va=String(a[k]??''),vb=String(b[k]??'');return SD==='desc'?vb.localeCompare(va):va.localeCompare(vb);};
+  // 单位标注：龙虎榜/资金流/北向=元，十大股东/高管增减持/限售解禁=股(标注/分列避跨单位混排)
+  const _SHARES_CH=['十大股东','高管增减持','限售解禁'];
+  const _amtUnit=(ch,v)=>(v==null||isNaN(v))?'—':(_SHARES_CH.includes(ch)?fmtNum(v)+'股':fmtNum(v));
+  const _TXT_COLS=['code','name','date','market','actor','action'];
   let ths, trs, note;
-  if(smState.agg){
+  const vm=smState.viewMode||'flow';
+  if(vm==='actor'){
     const m={};
     rows.forEach(x=>{const a=x.actor||'—';m[a]=(m[a]||0)+(x.amount||0);});
     let arr=Object.entries(m).map(([a,v])=>({actor:a,amount:v,n:rows.filter(x=>(x.actor||'—')===a).length}));
-    arr.sort((a,b)=> SK==='actor'?_scmp(a,b,'actor'):_cmp(a,b,SK));
+    arr.sort((a,b)=>SK==='actor'?_scmp(a,b,'actor'):_cmp(a,b,'amount'));
     const shown=arr.slice(0,CAP);
     const cols=[['actor','席位/股东'],['amount','累计净额(元)'],['n','次数']];
-    ths=cols.map(([k,h])=>`<th class="num${k==='amount'||k==='n'?'':''}" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
+    ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
     trs=shown.map(x=>`<tr><td>${x.actor}</td><td class="num">${fmtNum(x.amount)}</td><td class="num">${x.n}</td></tr>`).join('');
     note=`<div class="skipped">按席位聚合，前 ${shown.length} (共 ${arr.length} 席位)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}</div>`;
+  }else if(vm==='code'){
+    // 按个股聚合：每只股票各通道累计净额分列(前3通道元,后3通道股;分列避跨单位混排)
+    const cSK=smState.sortKey||'龙虎榜', cSD=smState.sortDir||'desc';
+    const cArrow=k=>cSK===k?(cSD==='desc'?' ▼':' ▲'):'';
+    const m={};
+    rows.forEach(x=>{const c=x.code||'';if(!c)return;if(!m[c])m[c]={code:c,name:x.name||'',market:x.market||'',byCh:{}};const ch=x.channel||'';if(!m[c].byCh[ch])m[c].byCh[ch]={amt:0,n:0};m[c].byCh[ch].amt+=(x.amount||0);m[c].byCh[ch].n+=1;});
+    let arr=Object.values(m);
+    const CH_COLS=[['龙虎榜','龙虎榜净额'],['资金流','资金流净额'],['北向','北向净额'],['十大股东','十大股东(股)'],['高管增减持','高管(股)'],['限售解禁','解禁(股)']];
+    const _val=o=>{const v=o.byCh[cSK];return v?v.amt:0;};
+    arr.sort((a,b)=>{
+      if(['code','name','market'].includes(cSK)){const va=String(a[cSK]??''),vb=String(b[cSK]??'');return cSD==='desc'?vb.localeCompare(va):va.localeCompare(vb);}
+      const va=Math.abs(_val(a)),vb=Math.abs(_val(b));return cSD==='desc'?vb-va:va-vb;
+    });
+    const shown=arr.slice(0,CAP);
+    const baseThs=[['code','代码'],['name','名称'],['market','市场']].map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${cArrow(k)}</th>`).join('');
+    const chThs=CH_COLS.map(([ch,h])=>`<th class="num" data-sk="${ch}" style="cursor:pointer;user-select:none">${h}${cArrow(ch)}</th>`).join('');
+    ths=baseThs+chThs+`<th class="num">信号通道</th>`;
+    trs=shown.map(o=>{
+      const tds=CH_COLS.map(([ch])=>{const v=o.byCh[ch];return `<td class="num">${v?_amtUnit(ch,v.amt):'—'}</td>`;}).join('');
+      // 机械计数:龙虎榜/资金流/北向/高管/十大股东 amount>0计流入/<0计流出;限售解禁单标"解禁"不参与流入流出(正值=抛压,语义反向)
+      let inflow=0,outflow=0;['龙虎榜','资金流','北向','高管增减持','十大股东'].forEach(ch=>{const v=o.byCh[ch];if(v&&v.amt){if(v.amt>0)inflow++;else if(v.amt<0)outflow++;}});
+      const unlock=o.byCh['限售解禁']&&o.byCh['限售解禁'].amt;
+      const sig=(inflow?`<span style="color:#16A34A">↑${inflow}</span>`:'')+(outflow?` <span style="color:#F59E0B">↓${outflow}</span>`:'')+(unlock?` <span style="color:#5C6884">解禁</span>`:'')||'—';
+      return `<tr class="clk" data-code="${o.code}"><td>${o.code}</td><td>${o.name}</td><td>${o.market||''}</td>${tds}<td>${sig}</td></tr>`;
+    }).join('');
+    note=`<div class="skipped">按个股聚合(各通道累计净额分列),前 ${shown.length} (共 ${arr.length} 只)。前3通道单位元、后3单位股(分列避跨单位混排);<b>信号通道=机械计数(↑净流入通道数/↓净流出/解禁标注),非方向买卖信号</b></div>`;
   }else{
-    let sr=[...rows].sort((a,b)=> SK==='amount'?_cmp(a,b,'amount')
-      : ['code','name','date','market','channel','actor','action'].includes(SK)?_scmp(a,b,SK)
-      : _cmp(a,b,'amount'));
+    let sr=[...rows].sort((a,b)=>SK==='amount'?_cmp(a,b,'amount'):_TXT_COLS.includes(SK)?_scmp(a,b,SK):_cmp(a,b,'amount'));
     const shown=sr.slice(0,CAP);
     const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
-      ?'<span style="color:var(--muted);font-size:12px">北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>':'';
+      ?"<span style='color:var(--muted);font-size:12px'>北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>":'';
     const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额']];
     ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
-    trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${x.channel==='十大股东'?(fmtNum(x.amount)+'股'):fmtNum(x.amount)}</td></tr>`).join('');
+    trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${_amtUnit(x.channel,x.amount)}</td></tr>`).join('');
     note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}，其余折叠防卡顿</div>`:'');
   }
   document.getElementById('smOut').innerHTML = trs?(note+`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`):(note||'<div class="empty">无当日主力动向(先点"刷新主力动向"采集；东财被封通道显示未采集)</div>');
-  // 表头点击排序
   document.querySelectorAll('#smOut th[data-sk]').forEach(th=>th.onclick=()=>{
     const k=th.dataset.sk;
     if(SK===k){ smState.sortDir = SD==='desc'?'asc':'desc'; }
-    else { smState.sortKey=k; smState.sortDir = (k==='amount'||k==='n')?'desc':'asc'; }
+    else { smState.sortKey=k; smState.sortDir = _TXT_COLS.includes(k)?'asc':'desc'; }
     smRender();
   });
 }
 document.getElementById('smSearch').oninput=e=>{smState.q=e.target.value;smRender();};
 document.getElementById('smDays').onchange=()=>smLoad();
-document.getElementById('smAgg').onchange=e=>{smState.agg=e.target.checked;smRender();};
+document.getElementById('smView').onchange=e=>{smState.viewMode=e.target.value;smState.sortKey=null;smState.sortDir=null;smRender();};
 document.getElementById('smRefresh').onclick=smRefresh;
 // 游资营业部统计(龙虎榜席位级,on-demand)
 async function smSeatsLoad(){

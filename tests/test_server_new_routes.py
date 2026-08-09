@@ -104,3 +104,55 @@ def test_portfolio_alert_patch(monkeypatch):
     assert "disclaimer" in body
     assert body["data"]["updated"] is True
     assert body["data"]["alert_hi"] == 12.5 and body["data"]["alert_lo"] == 9.0
+
+
+def test_sm_refresh_single_channel(monkeypatch):
+    """单通道刷新：channel=资金流 传 channels=["资金流"]，返回 partial=True。"""
+    from api import server
+    captured = {}
+
+    def _fake_refresh(date=None, channels=None):
+        captured["channels"] = channels
+        return {"date": "2026-08-09", "counts": {}, "channels": {},
+                "update_time": "x", "partial": True}
+
+    monkeypatch.setattr(server.smart_money, "refresh_today", _fake_refresh)
+    r = client.post("/api/smart-money/refresh?channel=资金流")
+    assert r.status_code == 200
+    body = r.json()
+    assert captured["channels"] == ["资金流"]
+    assert body["data"]["partial"] is True
+    assert "cand_disclaimer" in body
+
+
+def test_sm_refresh_all_no_channel(monkeypatch):
+    """全量刷新：不传 channel → channels=None，无 partial 键。"""
+    from api import server
+    captured = {}
+
+    def _fake_refresh(date=None, channels=None):
+        captured["channels"] = channels
+        return {"date": "2026-08-09", "counts": {}, "channels": {},
+                "update_time": "x"}
+
+    monkeypatch.setattr(server.smart_money, "refresh_today", _fake_refresh)
+    r = client.post("/api/smart-money/refresh")
+    assert r.status_code == 200
+    assert captured["channels"] is None
+    assert "partial" not in r.json()["data"]
+
+
+def test_sm_refresh_multi_channel(monkeypatch):
+    """多通道：channel=资金流,龙虎榜 → channels 列表两元素。"""
+    from api import server
+    captured = {}
+
+    def _fake_refresh(date=None, channels=None):
+        captured["channels"] = channels
+        return {"date": "2026-08-09", "counts": {}, "channels": {},
+                "update_time": "x", "partial": True}
+
+    monkeypatch.setattr(server.smart_money, "refresh_today", _fake_refresh)
+    r = client.post("/api/smart-money/refresh?channel=资金流,龙虎榜")
+    assert r.status_code == 200
+    assert captured["channels"] == ["资金流", "龙虎榜"]

@@ -800,9 +800,13 @@ def _stale_fallback(channel: str, err: str) -> tuple[list[dict], bool, str]:
 # ------------------------------------------------------------------
 # 编排
 # ------------------------------------------------------------------
-def refresh_today(date: str | None = None) -> dict:
+def refresh_today(date: str | None = None,
+                  channels: list[str] | None = None) -> dict:
     """串行跑 6 通道 → upsert → 写 meta + CHANNEL_STATUS。
-    拉取失败时若 DB 有旧数据 → stale 降级（不入库新行）。"""
+    拉取失败时若 DB 有旧数据 → stale 降级（不入库新行）。
+    channels 非空时只跑指定通道，其余用 CHANNEL_STATUS 现状回填 skipped=True
+    （不重采、不误显灰），供单通道按需刷新；单通道模式不刷新全局 update_time
+    （避免误导"全量已更新"），改标 partial=True + 保留上次全量时间。"""
     db.init_db()
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -812,6 +816,15 @@ def refresh_today(date: str | None = None) -> dict:
             ("高管增减持", collect_management_hold),
             ("限售解禁", collect_share_unlock)]
     for ch, fn in plan:
+        if channels and ch not in channels:
+            st = CHANNEL_STATUS.get(ch, {})
+            report["counts"][ch] = 0
+            report["channels"][ch] = {
+                "ok": st.get("ok", False), "stale": st.get("stale", False),
+                "skipped": True, "rows": 0,
+                "last_ok_date": _last_ok_date(ch),
+                "err": "本次未刷新(单通道)", "at": st.get("at", "")}
+            continue
         try:
             recs, ok, err = fn(date)
         except Exception as e:
@@ -841,5 +854,9 @@ def refresh_today(date: str | None = None) -> dict:
         report["channels"][ch] = {
             "ok": True, "stale": False, "rows": n,
             "last_ok_date": date, "err": err, "at": st.get("at", "")}
-    report["update_time"] = db.stamp_update_time()
+    if channels is None:
+        report["update_time"] = db.stamp_update_time()
+    else:
+        report["update_time"] = db.last_update_time()
+        report["partial"] = True
     return report
