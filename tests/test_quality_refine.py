@@ -38,3 +38,58 @@ def test_is_in_session_afterclose():
 def test_is_in_session_weekend():
     sat = dt.datetime(2026, 8, 15, 10, 0)  # 周六
     assert quality._is_in_session(sat) is False
+
+
+def _mock_quote(code):
+    """构造一只 mock 五档行情：bid 略厚、主动买略多。"""
+    return {
+        "code": code, "price": 10.0, "last_close": 9.8, "open": 9.9,
+        "high": 10.2, "low": 9.8, "vol": 10000.0, "amount": 1e7,
+        "b_vol": 5500.0, "s_vol": 4500.0,
+        "bid1": 9.99, "ask1": 10.01,
+        "bid2": 9.98, "ask2": 10.02, "bid3": 9.97, "ask3": 10.03,
+        "bid4": 9.96, "ask4": 10.04, "bid5": 9.95, "ask5": 10.05,
+        "bid_vol1": 600.0, "ask_vol1": 400.0,
+        "bid_vol2": 500.0, "ask_vol2": 300.0,
+        "bid_vol3": 400.0, "ask_vol3": 200.0,
+        "bid_vol4": 300.0, "ask_vol4": 100.0,
+        "bid_vol5": 200.0, "ask_vol5": 50.0,
+    }
+
+
+def test_refine_intraday_factors_and_resort():
+    # 两只候选：A 流动性深度高、B 低，验综合分重排后 A 排前
+    pool = [
+        {"code": "000001", "name": "平A", "resonance": 20.5, "hits": 2, "dim_scores": {}},
+        {"code": "000002", "name": "万B", "resonance": 20.4, "hits": 2, "dim_scores": {}},
+    ]
+    import pandas as pd
+    df = pd.DataFrame([{"code": "000001"}, {"code": "000002"}])
+
+    def fake_get_quote(codes):
+        out = []
+        for c in codes:
+            q = _mock_quote(c)
+            # 000001 盘口更厚
+            if c == "000001":
+                for i in range(1, 6):
+                    q[f"bid_vol{i}"] *= 5
+                    q[f"ask_vol{i}"] *= 5
+            out.append(q)
+        return out
+
+    with patch("data.pytdx_client.get_quote", side_effect=fake_get_quote):
+        out_pool, status, qmap = quality._refine_by_quote(list(pool), df, in_session=True)
+
+    assert status == "ok(盘中)"
+    # 000001 流动性深度更高 → 综合分更高 → 排前
+    assert out_pool[0]["code"] == "000001"
+    # quote 字段齐
+    q0 = out_pool[0]["quote"]
+    assert q0["liquidity_depth"] is not None
+    assert q0["bid_ask_ratio"] is not None
+    assert q0["inner_outer_ratio"] is not None
+    assert q0["liquidity_pct"] is not None
+    assert q0["in_session"] is True
+    # _refine_score 为内部键，最终 quality_rank 清理；此处精排阶段仍存在
+    assert out_pool[0]["_refine_score"] >= out_pool[1]["_refine_score"]

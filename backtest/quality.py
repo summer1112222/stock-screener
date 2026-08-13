@@ -40,6 +40,66 @@ def _is_in_session(now: "_dt.datetime | None" = None) -> bool:
     return (930 <= t <= 1130) or (1300 <= t <= 1500)
 
 
+def _refine_by_quote(pool: list, df_spot, in_session: bool):
+    """对小名单 get_quote 取盘口，算 A 流动性深度(+综合分重排) + B/C raw 展示。
+    B/C 方向不进排序（合规：方向=择时信号非质量）。
+    返回 (pool, refine_status, quote_by_code)。pool 原地附加 quote 字段。
+    盘中：按 _refine_score=0.6*resonance_pct+0.4*liquidity_pct 重排。
+    盘后：A/B=None + note，仅 C 全天内外盘，不重排。
+    get_quote 失败：refine_status=err，pool 不变。"""
+    import math
+    from data import pytdx_client
+    codes = [str(it.get("code")) for it in pool]
+    quotes = {str(q.get("code")): q for q in pytdx_client.get_quote(codes)}
+    if not quotes:
+        return pool, "err:通达信不可用,跳过精排", {}
+
+    depths, brs, iors = {}, {}, {}
+    for c in codes:
+        q = quotes.get(c) or {}
+        bv = [q.get(f"bid_vol{i}") for i in range(1, 6)]
+        av = [q.get(f"ask_vol{i}") for i in range(1, 6)]
+        bid_sum = sum((x or 0) for x in bv)
+        ask_sum = sum((x or 0) for x in av)
+        tot = bid_sum + ask_sum
+        depths[c] = math.log(tot) if tot > 0 else None
+        brs[c] = (bid_sum / tot) if tot > 0 else None
+        b_vol = q.get("b_vol")
+        s_vol = q.get("s_vol")
+        iors[c] = (b_vol / s_vol) if (b_vol and s_vol and s_vol != 0) else None
+
+    def _quote_dict(c):
+        lp = lpct.get(c) if in_session else None
+        return {
+            "liquidity_depth": _to_float(depths.get(c)),
+            "bid_ask_ratio": _to_float(brs.get(c)) if in_session else None,
+            "inner_outer_ratio": _to_float(iors.get(c)),
+            "liquidity_pct": _to_float(lp) if in_session else None,
+            "in_session": in_session,
+            **({} if in_session else {"note": "收盘挂单,A/B失效"}),
+        }
+
+    lpct = {}
+    if in_session:
+        ds = pd.Series({c: depths[c] for c in codes if depths.get(c) is not None})
+        lpct = _to_pct(ds).to_dict() if not ds.empty else {}
+        rs = pd.Series({str(it.get("code")): it.get("resonance") or 0 for it in pool})
+        rpct = _to_pct(rs).to_dict() if not rs.empty else {}
+        for it in pool:
+            c = str(it.get("code"))
+            lp = lpct.get(c, 0.0)
+            rp = rpct.get(c, 0.0)
+            it["_refine_score"] = 0.6 * _to_float(rp) + 0.4 * _to_float(lp)
+            it["quote"] = _quote_dict(c)
+        pool.sort(key=lambda x: x.get("_refine_score") or 0.0, reverse=True)
+    else:
+        for it in pool:
+            it["quote"] = _quote_dict(str(it.get("code")))
+
+    status = "ok(盘中)" if in_session else "ok(盘后,仅C展示)"
+    return pool, status, {c: _quote_dict(c) for c in codes}
+
+
 def _to_float(v):
     if v is None:
         return None
