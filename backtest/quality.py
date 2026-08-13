@@ -50,7 +50,10 @@ def _refine_by_quote(pool: list, df_spot, in_session: bool):
     import math
     from data import pytdx_client
     codes = [str(it.get("code")) for it in pool]
-    quotes = {str(q.get("code")): q for q in pytdx_client.get_quote(codes)}
+    try:
+        quotes = {str(q.get("code")): q for q in pytdx_client.get_quote(codes)}
+    except Exception:
+        return pool, "err:通达信不可用,跳过精排", {}
     if not quotes:
         return pool, "err:通达信不可用,跳过精排", {}
 
@@ -71,7 +74,7 @@ def _refine_by_quote(pool: list, df_spot, in_session: bool):
     def _quote_dict(c):
         lp = lpct.get(c) if in_session else None
         return {
-            "liquidity_depth": _to_float(depths.get(c)),
+            "liquidity_depth": _to_float(depths.get(c)) if in_session else None,
             "bid_ask_ratio": _to_float(brs.get(c)) if in_session else None,
             "inner_outer_ratio": _to_float(iors.get(c)),
             "liquidity_pct": _to_float(lp) if in_session else None,

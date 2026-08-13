@@ -58,10 +58,15 @@ def _mock_quote(code):
 
 
 def test_refine_intraday_factors_and_resort():
-    # 两只候选：A 流动性深度高、B 低，验综合分重排后 A 排前
+    # 000001 低 resonance(20.4) 靠高 liquidity(5x厚盘口) 翻盘；
+    # 000002 高 resonance(20.5) 盘口极薄(挂单量为0, depth=None)。
+    # rank pct 对 2 值对称(两轴 pct 差距均=0.5)，0.6*0.5=0.3 > 0.4*0.5=0.2 →
+    # 仅当 000002 depth=None(排除 lpct→pct=0.0)时 liquidity pct 差距=1.0
+    # 才足以让 0.4×liquidity 覆盖 0.6×resonance。这证明 0.4 权重真生效：
+    # 若权重=0(liquidity 无效)，000002 单靠 resonance 该赢 → 测试 fail。
     pool = [
-        {"code": "000001", "name": "平A", "resonance": 20.5, "hits": 2, "dim_scores": {}},
-        {"code": "000002", "name": "万B", "resonance": 20.4, "hits": 2, "dim_scores": {}},
+        {"code": "000001", "name": "平A", "resonance": 20.4, "hits": 2, "dim_scores": {}},
+        {"code": "000002", "name": "万B", "resonance": 20.5, "hits": 2, "dim_scores": {}},
     ]
     import pandas as pd
     df = pd.DataFrame([{"code": "000001"}, {"code": "000002"}])
@@ -70,11 +75,16 @@ def test_refine_intraday_factors_and_resort():
         out = []
         for c in codes:
             q = _mock_quote(c)
-            # 000001 盘口更厚
             if c == "000001":
+                # 盘口 5× 厚
                 for i in range(1, 6):
                     q[f"bid_vol{i}"] *= 5
                     q[f"ask_vol{i}"] *= 5
+            else:
+                # 000002 盘口极薄：挂单量为 0 → depth=None → 排除 lpct
+                for i in range(1, 6):
+                    q[f"bid_vol{i}"] = 0.0
+                    q[f"ask_vol{i}"] = 0.0
             out.append(q)
         return out
 
@@ -83,6 +93,7 @@ def test_refine_intraday_factors_and_resort():
 
     assert status == "ok(盘中)"
     # 000001 流动性深度更高 → 综合分更高 → 排前
+    # (单靠 resonance 000002 该赢；0.4×liquidity 覆盖了 0.6×resonance)
     assert out_pool[0]["code"] == "000001"
     # quote 字段齐
     q0 = out_pool[0]["quote"]
@@ -93,3 +104,45 @@ def test_refine_intraday_factors_and_resort():
     assert q0["in_session"] is True
     # _refine_score 为内部键，最终 quality_rank 清理；此处精排阶段仍存在
     assert out_pool[0]["_refine_score"] >= out_pool[1]["_refine_score"]
+
+
+def test_refine_afterclose_a_b_none():
+    # 盘后：A(liquidity_depth)/B(bid_ask_ratio) 应置 None + note，
+    # 仅 C(inner_outer_ratio) 全天有效
+    pool = [{"code": "000001", "name": "平A", "resonance": 20.0, "hits": 1, "dim_scores": {}}]
+    import pandas as pd
+    df = pd.DataFrame([{"code": "000001"}])
+
+    with patch("data.pytdx_client.get_quote", side_effect=lambda cs: [_mock_quote(cs[0])]):
+        out_pool, status, qmap = quality._refine_by_quote(list(pool), df, in_session=False)
+
+    assert status == "ok(盘后,仅C展示)"
+    q = out_pool[0]["quote"]
+    assert q["liquidity_depth"] is None
+    assert q["bid_ask_ratio"] is None
+    assert q["inner_outer_ratio"] is not None  # C 全天有效
+    assert q["liquidity_pct"] is None
+    assert q["in_session"] is False
+    assert "note" in q
+    # 盘后不重排，无 _refine_score
+    assert "_refine_score" not in out_pool[0]
+
+
+def test_refine_get_quote_exception():
+    # get_quote 抛异常 → refine_status=err，pool 不变
+    pool = [{"code": "000001", "name": "平A", "resonance": 20.0, "hits": 1, "dim_scores": {}}]
+    import pandas as pd
+    df = pd.DataFrame([{"code": "000001"}])
+
+    def boom(codes):
+        raise ConnectionRefusedError("tdx down")
+
+    with patch("data.pytdx_client.get_quote", side_effect=boom):
+        out_pool, status, qmap = quality._refine_by_quote(list(pool), df, in_session=True)
+
+    assert status == "err:通达信不可用,跳过精排"
+    assert qmap == {}
+    # pool 不变：无 quote 字段、无 _refine_score
+    assert "quote" not in out_pool[0]
+    assert "_refine_score" not in out_pool[0]
+    assert out_pool[0]["code"] == "000001"
