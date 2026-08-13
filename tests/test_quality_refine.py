@@ -146,3 +146,15 @@ def test_refine_get_quote_exception():
     assert "quote" not in out_pool[0]
     assert "_refine_score" not in out_pool[0]
     assert out_pool[0]["code"] == "000001"
+
+
+def test_refine_quote_empty_no_crash():
+    # get_quote 返空 [] → refine_status=err，pool 原样返回不崩
+    pool = [{"code": "000001", "name": "x", "resonance": 20.0, "hits": 2, "dim_scores": {}}]
+    import pandas as pd
+    df = pd.DataFrame([{"code": "000001"}])
+    with patch("data.pytdx_client.get_quote", side_effect=lambda cs: []):
+        out, status, qmap = quality._refine_by_quote(list(pool), df, in_session=True)
+    assert status == "err:通达信不可用,跳过精排"
+    assert qmap == {}
+    assert out[0]["code"] == "000001"  # pool 不变
