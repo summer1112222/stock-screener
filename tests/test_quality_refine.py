@@ -148,6 +148,54 @@ def test_refine_get_quote_exception():
     assert out_pool[0]["code"] == "000001"
 
 
+def _seed_spot_rows():
+    """3 只合成 spot 行，供 quality_rank 走通。"""
+    return [
+        {"code": "000001", "name": "平A", "latest_price": 10.0, "turnover_amount": 1e8,
+         "change_pct": 2.0, "main_net_inflow": 1e7, "turnover_rate": 3.0,
+         "pe": 15.0, "pb": 1.5, "amplitude": 3.0, "board": "银行"},
+        {"code": "000002", "name": "万B", "latest_price": 20.0, "turnover_amount": 1.2e8,
+         "change_pct": 3.0, "main_net_inflow": 2e7, "turnover_rate": 4.0,
+         "pe": 18.0, "pb": 2.0, "amplitude": 4.0, "board": "地产"},
+        {"code": "600519", "name": "贵C", "latest_price": 1500.0, "turnover_amount": 2e8,
+         "change_pct": 1.0, "main_net_inflow": 3e7, "turnover_rate": 2.0,
+         "pe": 30.0, "pb": 8.0, "amplitude": 2.0, "board": "白酒"},
+    ]
+
+
+def test_quality_rank_intraday_attaches_quote_and_resort():
+    # 盘中：mock 全部 DB 表 + get_quote + buffett/signals 依赖
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    rows = _seed_spot_rows()
+    qr = {"stock_spot": rows, "industry_board": []}
+
+    def fake_query(table, **kw):
+        return qr.get(table, [])
+
+    def fake_get_quote(codes):
+        return [_mock_quote(c) for c in codes]
+
+    # 屏蔽口径1/4 对历史的依赖（返空历史）+ 口径2 buffett + 口径3 smart_money
+    # _is_in_session mock 为 True → 盘中精排路径（否则测试受运行时刻影响）
+    with patch("data.db.query_rows", side_effect=fake_query), \
+         patch("data.pytdx_client.get_quote", side_effect=fake_get_quote), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", False), \
+         patch("screener.smart_money.top_by_amount", return_value={"rows": []}), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True):
+        res = quality.quality_rank(universe="stock", refine=True, refine_pool=3,
+                                   min_turnover=0, dim_thresh=0.0, min_dims=1)
+
+    assert res["refine_status"] == "ok(盘中)"
+    assert len(res["main"]) >= 1
+    # 每行有 quote 字段
+    assert "quote" in res["main"][0]
+    assert res["main"][0]["quote"]["in_session"] is True
+
+
 def test_refine_quote_empty_no_crash():
     # get_quote 返空 [] → refine_status=err，pool 原样返回不崩
     pool = [{"code": "000001", "name": "x", "resonance": 20.0, "hits": 2, "dim_scores": {}}]

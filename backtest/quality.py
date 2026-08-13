@@ -505,11 +505,13 @@ def _build_reasons(item):
 def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
                  dim_thresh=0.6, min_turnover=5e7, max_per_board=3,
                  max_corr=0.85, limit=20, min_signals=2, limit_pct=9.9,
-                 combo_method: str = "greedy") -> dict:
+                 combo_method: str = "greedy",
+                 refine: bool = True, refine_pool: int = 50) -> dict:
     """优质筛选主入口。返回 {main, by_dim, dims_available, dim_status,
-    min_dims, cand_disclaimer, error}。口径分位见 _dim_scores；
+    min_dims, refine_status, cand_disclaimer, error}。口径分位见 _dim_scores；
     共振/组合见 _resonance/_apply_combo。combo_method: "greedy" 等权（默认），
-    "min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。"""
+    "min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。
+    refine: 仅个股，盘口精排（盘中按流动性+共振重排 refine_pool 只，盘后仅附 quote 不重排）。"""
     table = _SPOT_TABLE.get(universe)
     if not table:
         return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
@@ -525,13 +527,16 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
                 "min_dims": min_dims, "cand_disclaimer": _CAND_DISCLAIMER,
                 "error": "tradable 预筛后为空"}
-    # 结果缓存(5min TTL)：计算重(历史+buffett+signals)，避免短时重复重算
+    # 结果缓存：盘中 30s TTL（盘口精排需高频刷新），盘后 5min（计算重避免重复重算）
     import time as _time
+    in_session = _is_in_session()
     _key = (universe, days, min_dims, dim_thresh, min_turnover, max_per_board,
-            max_corr, limit, min_signals, limit_pct, combo_method)
+            max_corr, limit, min_signals, limit_pct, combo_method, refine, refine_pool,
+            in_session)
     _now = _time.time()
+    _ttl = 30.0 if in_session else _RESULT_TTL
     _hit = _RESULT_CACHE.get(_key)
-    if _hit and _now - _hit[0] < _RESULT_TTL:
+    if _hit and _now - _hit[0] < _ttl:
         return _hit[1]
     codes = df["code"].astype(str).tolist() if "code" in df.columns else []
     # 性能：历史收盘只加载一次，供口径1/相关性/最小方差共用(原3次→1次)
@@ -570,6 +575,18 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         by_dim[d] = [{k: v for k, v in x.items() if k != "_pct"} for x in by_dim[d]]
     main = [it for it in enriched if it["hits"] >= eff_min_dims]
     main.sort(key=lambda x: x["resonance"] or 0, reverse=True)
+
+    # 盘口精排阶段（仅个股 + refine）
+    refine_status = "skip(refine=False)"
+    quote_by_code = {}
+    if universe == "stock" and refine and main:
+        pool = main[:refine_pool]
+        pool, refine_status, quote_by_code = _refine_by_quote(
+            pool, df, in_session=in_session)
+        main = pool  # 精排重排后的 top refine_pool 直接作为组合层输入
+    elif universe != "stock":
+        refine_status = "skip(ETF不精排)"
+
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)
 
@@ -577,12 +594,14 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         it["reasons"] = _build_reasons(it)
         it["dim_scores"] = {d: _to_float(v) for d, v in it.get("dim_scores", {}).items()}
         it["resonance"] = _to_float(it.get("resonance"))
+        it.pop("_refine_score", None)  # 内部键清理
         return it
 
     main = [_clean_item(it) for it in main]
     by_dim = {d: [_clean_item(it) for it in lst] for d, lst in by_dim.items()}
     result = {"main": main, "by_dim": by_dim, "dims_available": dims_avail,
               "dim_status": dim_status, "min_dims": eff_min_dims,
+              "refine_status": refine_status,
               "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4)},
               "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
     _RESULT_CACHE[_key] = (_now, result)
