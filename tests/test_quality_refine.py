@@ -268,3 +268,24 @@ def test_refine_quote_empty_no_crash():
     assert status == "err:通达信不可用,跳过精排"
     assert qmap == {}
     assert out[0]["code"] == "000001"  # pool 不变
+
+
+def test_api_quality_passes_refine_params():
+    from fastapi.testclient import TestClient
+    from api import server
+    import pandas as pd
+    qr = {"stock_spot": _seed_spot_rows(), "industry_board": []}
+    captured = {}
+
+    def fake_quality_rank(**kw):
+        captured.update(kw)
+        return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
+                "min_dims": 1, "refine_status": "skip(refine=False)",
+                "cand_disclaimer": "x", "error": None}
+
+    with patch("backtest.quality.quality_rank", side_effect=fake_quality_rank):
+        client = TestClient(server.app)
+        r = client.get("/api/quality?universe=stock&refine=false&refine_pool=30")
+    assert r.status_code == 200
+    assert captured.get("refine") is False
+    assert captured.get("refine_pool") == 30

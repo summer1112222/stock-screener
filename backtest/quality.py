@@ -17,7 +17,8 @@ from data import db
 
 _SPOT_TABLE = {"stock": "stock_spot", "etf": "etf_spot"}
 _CAND_DISCLAIMER = ("多口径共振机械排序观察清单，非荐股非买卖信号，"
-                    "不构成投资建议、不承诺收益。市场有风险，盈亏自负。")
+                    "不构成投资建议、不承诺收益。盘口微结构为实时供求机械观察，"
+                    "非买卖信号；A/B 收盘后失效。市场有风险，盈亏自负。")
 # 结果级缓存(5min TTL)：quality_rank 计算重(历史+buffett+signals)，避免短时重复重算
 _RESULT_CACHE: dict = {}
 _RESULT_TTL = 300.0  # 秒

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pandas as pd
 from typing import Any
 
@@ -24,6 +25,7 @@ if _ROOT not in sys.path:
 
 from data import collector, db, history, portfolio, smart_money, watchlist
 from data import research as research_data
+from data import pytdx_client
 from screener import engine, smart_money as sm_query
 from screener.conditions import BOARD_FIELDS_CAT, ETF_FIELDS_CAT, STOCK_FIELDS_CAT, OPS
 from backtest import (eval as bt_eval, engine as bt_engine, risk as bt_risk,
@@ -238,13 +240,31 @@ def board_stocks(board: str = Query(...), category: str = Query("行业")):
         constituents = bs.fetch_constituents(board, category)
     except Exception as e:
         cons_err = f"{type(e).__name__}: {str(e)[:80]}"
+    src = (constituents[0].get("source") if constituents else None) or "ths"
     return _wrap({
         "detail": detail, "board": board, "category": category,
         "leading_stock_code": leading_code, "leading_stock_name": leading_name,
         "constituents": constituents, "n_total": len(constituents),
-        "source": "ths", "cons_error": cons_err,
-        "note": "成分股列表由同花顺静态表直取(thshy/gn)，每页20可翻页；东财成分股接口反爬已弃用",
+        "source": src, "cons_error": cons_err,
+        "note": "成分股优先东财直取(板名同源最准)；东财被封降级同花顺静态表(thshy/gn 每页20可翻页)",
     }, {"cand_disclaimer": "板块详情+成分股机械聚合，观察清单非荐股非买卖信号，盈亏自负。"})
+
+
+@app.get("/api/chip")
+def chip(code: str = Query(...), window: int = Query(60, ge=10, le=250)):
+    """个股筹码分布(移动成交量加权成本)。
+    依赖 stock_daily 历史(需先 /api/backtest/fetch 拉该 code)；无历史→need_history=True。
+    合规:移动成本分布机械统计，非支撑/压力位预测，非买卖信号，盈亏自负。"""
+    return _wrap(sm_query.chip_distribution(code, window),
+                 {"cand_disclaimer": "移动成本分布机械统计，非支撑/压力位预测，非买卖信号，盈亏自负。"})
+
+
+@app.get("/api/smart-money/behavior")
+def smart_money_behavior(code: str = Query(...), days: int = Query(30, ge=5, le=180)):
+    """主力行为时间序列(连续净流入/流出天数·累计净额·边际加速·多通道)。
+    只读 smart_money_action。合规:机械统计非买卖信号,盈亏自负。"""
+    return _wrap(sm_query.behavior_series(code, days),
+                 {"cand_disclaimer": "主力行为序列机械统计，非买卖信号，盈亏自负。"})
 
 
 @app.get("/api/stock-search")
@@ -565,11 +585,12 @@ SM_CAND_DISCLAIMER = "主力动向观察清单，机械归类，非荐股非买�
 def sm_today(date: str | None = Query(None),
              channel: str | None = Query(None),
              market: str | None = Query(None),
-             days: int = Query(7, ge=1, le=90)):
-    res = sm_query.today_list(date, channel, market, days=days)
+             days: int = Query(7, ge=1, le=90),
+             limit: int = Query(1000, ge=0, le=100000)):
+    res = sm_query.today_list(date, channel, market, days=days, limit=limit)
     return _wrap(res["rows"], {
         "total": res["total"], "date": res.get("date", date),
-        "days": days,
+        "days": days, "limit": limit,
         "cand_disclaimer": SM_CAND_DISCLAIMER})
 
 
@@ -662,13 +683,14 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
                    min_dims: int = Query(2), min_turnover: float = Query(5e7),
                    max_per_board: int = Query(3), max_corr: float = Query(0.85),
                    limit: int = Query(20), combo_method: str = Query("greedy"),
-                   dim_thresh: float = Query(0.6, ge=0.0, le=1.0)):
+                   dim_thresh: float = Query(0.6, ge=0.0, le=1.0),
+                   refine: bool = Query(True), refine_pool: int = Query(50)):
     from backtest import quality
     res = quality.quality_rank(
         universe=universe, days=days, min_dims=min_dims,
         min_turnover=min_turnover, max_per_board=max_per_board,
         max_corr=max_corr, limit=limit, combo_method=combo_method,
-        dim_thresh=dim_thresh)
+        dim_thresh=dim_thresh, refine=refine, refine_pool=refine_pool)
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
 
@@ -700,12 +722,41 @@ def buffett_top(n: int = Query(10, ge=1, le=50),
     })
 
 
+@app.get("/api/tdx/quote")
+def tdx_quote(code: str = Query(...)):
+    """通达信实时五档行情(盘中实时,免key直取)。机械行情,非买卖信号。"""
+    q = pytdx_client.get_quote([code])
+    return _wrap(q[0] if q else {}, {
+        "cand_disclaimer": "通达信实时行情机械快照,非买卖信号,盈亏自负。"})
+
+
+@app.get("/api/tdx/company-info")
+def tdx_company_info(code: str = Query(...),
+                     category: str = Query("龙虎榜单")):
+    """通达信公司信息文本块(按需取,16 类)。
+    category ∈ 龙虎榜单/主力追踪/股东研究/财务分析/公司概况/股本结构/研究报告 等。
+    注意:通达信"龙虎榜单"类别实含【融资融券/资金流向/涨跌幅异动/大宗交易】,
+    并非游资席位龙虎榜(后者走 /api/smart-money/seats)。第一版返回原始文本,
+    前端预格式显示。机械汇总,非荐股非买卖信号。"""
+    res = pytdx_client.get_company_info(code, category)
+    return _wrap(res, {
+        "cand_disclaimer": "通达信公司信息机械汇总,非荐股非买卖信号,盈亏自负。"})
+
+
 @app.get("/api/stock-analysis")
 def stock_analysis(code: str = Query(...)):
     """个股深度分析卡：聚合 基本面(buffett)+主力动向+研报+千股千评+技术信号+风险预筛。
     多维机械分析,研究优先级非买卖信号,盈亏自负。"""
     from collections import defaultdict
     card = {"code": code}
+    # 0. 实时五档行情(通达信直取,盘中实时;spot 慢/缺时兜底)
+    try:
+        q = pytdx_client.get_quote([code])
+        if q:
+            card["latest_price"] = q[0].get("price")
+            card["quote"] = q[0]
+    except Exception:
+        pass
     # 1. 基本面+估值+护城河+风险+优先级(buffett,复用财报缓存)
     try:
         ba = bt_buf.analyze(code)
@@ -773,80 +824,120 @@ def stock_analysis(code: str = Query(...)):
         card["signals_error"] = sc.get("error")
     except Exception as e:
         card["signals"] = {"error": str(e)}
-    # 6. 多因子机械预判(偏多/偏空/中性):加权聚合 基本面/资金面/技术面/机构评级/估值
-    #    每因子带权重，加权 score∈[-1,1] 定标签 + 置信度。非买卖建议，仅多因子同向机械归类。
-    WEIGHTS = {"基本面评分": 0.35, "资金面": 0.20, "技术面": 0.20,
-              "机构评级": 0.15, "估值": 0.10}
+    # 6. 多因子机械预判(偏多/偏空/中性):加权聚合 基本面/资金面/技术面/机构评级/估值/内部人
+    #    每因子带权重+连续强度 strength∈[-1,1]（替原 ±1 三态，保留区分度）。
+    #    contrib = weight × strength；score∈[-1,1]→label+confidence。非买卖建议，仅机械归类。
+    #    权重为经验先验，未经回归校准（基本面从0.35挪0.05给内部人，合计仍=1.0）。
+    WEIGHTS = {"基本面评分": 0.30, "资金面": 0.20, "技术面": 0.20,
+              "机构评级": 0.15, "估值": 0.10, "内部人": 0.05}
     bull, bear, reasons, contribs = [], [], [], []
 
-    def _push(factor, d, detail):
-        """记一条因子：reasons 带 weight；bull/bear 收展示串；contribs 算加权贡献。"""
+    def _push(factor, d, detail, strength=None):
+        """记一条因子：reasons 带 weight/strength；bull/bear 收展示串；contribs 算加权贡献。
+        strength∈[-1,1] 连续；None 时按 dir 退化为 ±1/0（触发型因子兼容）。"""
         w = WEIGHTS.get(factor, 0)
-        reasons.append({"factor": factor, "dir": d, "detail": detail, "weight": w})
-        sign = 1 if d == "偏多" else (-1 if d == "偏空" else 0)
-        if sign == 1:
+        if strength is None:
+            strength = 1.0 if d == "偏多" else (-1.0 if d == "偏空" else 0.0)
+        strength = max(-1.0, min(1.0, float(strength)))
+        reasons.append({"factor": factor, "dir": d, "detail": detail,
+                        "weight": w, "strength": round(strength, 3)})
+        if strength > 0:
             bull.append(f"{factor}:{detail}")
-        elif sign == -1:
+        elif strength < 0:
             bear.append(f"{factor}:{detail}")
         contribs.append({"factor": factor, "dir": d, "weight": w,
-                         "contrib": round(w * sign, 3)})
+                         "strength": round(strength, 3),
+                         "contrib": round(w * strength, 3)})
 
-    # 基本面评分
+    # 基本面评分（连续强度：(s-50)/50，59 vs 39 不再同档中性）
     s = card.get("score")
     if s is not None:
-        d = "偏多" if s >= 60 else ("偏空" if s < 40 else "中性")
-        _push("基本面评分", d, f"{s}/100")
-    # 估值
-    vt = str((card.get("fundamentals") or {}).get("valuation_tag") or
-             (card.get("fundamentals") or {}).get("valuation") or "")
-    if any(w in vt for w in ("便宜", "低估")):
-        _push("估值", "偏多", vt)
-    elif any(w in vt for w in ("贵", "高估")):
-        _push("估值", "偏空", vt)
+        strength = (float(s) - 50) / 50
+        d = "偏多" if strength > 0.15 else ("偏空" if strength < -0.15 else "中性")
+        _push("基本面评分", d, f"{s}/100", strength=strength)
+    # 估值（连续强度：tanh(安全边际×3)，MoS 正即偏多）
+    ba = card.get("fundamentals") or {}
+    mos = ba.get("margin_of_safety")
+    if mos is not None:
+        strength = math.tanh(float(mos) * 3)
+        d = "偏多" if strength > 0.15 else ("偏空" if strength < -0.15 else "中性")
+        _push("估值", d, f"安全边际{round(mos*100)}%", strength=strength)
     else:
-        _push("估值", "中性", vt or "无")
-    # 资金面(各通道净额合计)
-    try:
-        sm_net = sum(c.get("net") or 0 for c in (card.get("smart_money") or {}).get("channels", []))
-        if sm_net > 0:
-            _push("资金面", "偏多", f"净流入{sm_net:.0f}")
-        elif sm_net < 0:
-            _push("资金面", "偏空", f"净流出{sm_net:.0f}")
+        vt = str(ba.get("valuation_tag") or ba.get("valuation") or "")
+        if any(w in vt for w in ("便宜", "低估")):
+            _push("估值", "偏多", vt)
+        elif any(w in vt for w in ("贵", "高估")):
+            _push("估值", "偏空", vt)
         else:
-            _push("资金面", "中性", "无显著净流")
+            _push("估值", "中性", vt or "无")
+    # 资金面（用 behavior_series 连续性：streak_inflow/accel，替原 raw 净额合计）
+    try:
+        beh = sm_query.behavior_series(code, 30)
+        si = beh.get("streak_inflow") or 0
+        so = beh.get("streak_outflow") or 0
+        accel = beh.get("margin_accel")
+        if si >= 5 and (accel is None or accel >= 0):
+            strength = math.tanh(si / 8)
+            _push("资金面", "偏多", f"连续净流入{si}日", strength=strength)
+        elif so >= 5:
+            strength = -math.tanh(so / 8)
+            _push("资金面", "偏空", f"连续净流出{so}日", strength=strength)
+        elif si > 0 or so > 0:
+            _push("资金面", "中性", f"流入{si}/流出{so}日")
+        else:
+            _push("资金面", "中性", "无连续流向")
     except Exception:
         _push("资金面", "中性", "数据缺失")
-    # 技术信号(触发即偏多:金叉/突破/放量/超卖反转)
+    # 技术信号（连续强度：命中数/3，触发即偏多）
     try:
         sig_rows = card.get("signals") if isinstance(card.get("signals"), list) else []
         trig = []
         for sr in sig_rows:
-            for s in (sr.get("signals") or []):
-                t = s.get("type") if isinstance(s, dict) else str(s)
+            for s2 in (sr.get("signals") or []):
+                t = s2.get("type") if isinstance(s2, dict) else str(s2)
                 if t: trig.append(t)
         if trig:
-            _push("技术面", "偏多", ",".join(trig))
+            strength = min(len(trig) / 3, 1.0)
+            _push("技术面", "偏多", ",".join(trig), strength=strength)
         else:
             _push("技术面", "中性", "无触发")
     except Exception:
         _push("技术面", "中性", "数据缺失")
-    # 机构评级(研报)
+    # 机构评级（研报：买入/增持数量→强度）
     try:
         reps = (card.get("research") or {}).get("reports", [])
         ratings = [str(r.get("rating") or r.get("评级") or "") for r in reps]
         buy_kw = [x for x in ratings if any(w in x for w in ("买入", "增持", "推荐", "强烈"))]
         sell_kw = [x for x in ratings if any(w in x for w in ("减持", "卖出", "回避"))]
         if buy_kw:
-            _push("机构评级", "偏多", ",".join(set(buy_kw)))
+            strength = min(len(buy_kw) / 3, 1.0)
+            _push("机构评级", "偏多", ",".join(set(buy_kw)), strength=strength)
         elif sell_kw:
-            _push("机构评级", "偏空", ",".join(set(sell_kw)))
+            strength = -min(len(sell_kw) / 3, 1.0)
+            _push("机构评级", "偏空", ",".join(set(sell_kw)), strength=strength)
         else:
             _push("机构评级", "中性", f"{len(reps)}条" if reps else "无")
     except Exception:
         _push("机构评级", "中性", "数据缺失")
+    # 内部人（高管增减持近30日净额方向，巴菲特看重管理层真金白银买入）
+    try:
+        mgmt_rows = db.query_rows("smart_money_action",
+                                  where="code = ? AND channel = ? AND date >= ?",
+                                  params=(code, "高管增减持",
+                                          (_dt.datetime.now() - _dt.timedelta(days=30)).strftime("%Y-%m-%d")),
+                                  limit=0)
+        net_mgmt = sum((r.get("amount") or 0) for r in mgmt_rows)
+        if net_mgmt > 0:
+            _push("内部人", "偏多", f"高管净增持{net_mgmt:.0f}")
+        elif net_mgmt < 0:
+            _push("内部人", "偏空", f"高管净减持{abs(net_mgmt):.0f}")
+        else:
+            _push("内部人", "中性", "无高管变动")
+    except Exception:
+        _push("内部人", "中性", "数据缺失")
     score = round(sum(c["contrib"] for c in contribs), 3)
     label = "偏多" if score > 0.15 else ("偏空" if score < -0.15 else "中性")
-    confidence = round(min(abs(score), 1.0) * 100)  # 加权强度映射 0-100
+    confidence = round(min(abs(score), 1.0) * 100)  # 连续 score→confidence 含义提升
     card["outlook"] = {"label": label, "score": score, "confidence": confidence,
                         "weights": WEIGHTS, "contribs": contribs,
                         "bullish": bull, "bearish": bear, "reasons": reasons,
