@@ -196,6 +196,68 @@ def test_quality_rank_intraday_attaches_quote_and_resort():
     assert res["main"][0]["quote"]["in_session"] is True
 
 
+def test_quality_rank_etf_skips_refine():
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    qr = {"etf_spot": [{"code": "510300", "name": "沪深300ETF", "latest_price": 4.0,
+                        "turnover_amount": 1e8, "change_pct": 1.0,
+                        "main_net_inflow": 1e6, "turnover_rate": 5.0,
+                        "pe": None, "pb": None, "amplitude": 2.0}],
+          "industry_board": []}
+    with patch("data.db.query_rows", side_effect=lambda t, **k: qr.get(t, [])), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True):
+        res = quality.quality_rank(universe="etf", min_turnover=0,
+                                   dim_thresh=0.0, min_dims=1)
+    assert res["refine_status"] == "skip(ETF不精排)"
+
+
+def test_quality_rank_refine_false_skips():
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    qr = {"stock_spot": _seed_spot_rows(), "industry_board": []}
+    with patch("data.db.query_rows", side_effect=lambda t, **k: qr.get(t, [])), \
+         patch("data.pytdx_client.get_quote", side_effect=lambda cs: [_mock_quote(c) for c in cs]) as gq, \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", False), \
+         patch("screener.smart_money.top_by_amount", return_value={"rows": []}), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True):
+        res = quality.quality_rank(universe="stock", refine=False,
+                                   min_turnover=0, dim_thresh=0.0, min_dims=1)
+    assert res["refine_status"] == "skip(refine=False)"
+    gq.assert_not_called()  # refine=False 不触网
+
+
+def test_quality_rank_combo_constraint_holds():
+    # 5 只同行业候选，max_per_board=2 → main 最多 2 只该行业
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    rows = []
+    for i in range(5):
+        rows.append({"code": f"00000{i}", "name": f"N{i}", "latest_price": 10.0,
+                     "turnover_amount": 1e8, "change_pct": 2.0,
+                     "main_net_inflow": 1e7, "turnover_rate": 3.0,
+                     "pe": 15.0, "pb": 1.5, "amplitude": 3.0, "board": "同行业"})
+    qr = {"stock_spot": rows, "industry_board": []}
+    with patch("data.db.query_rows", side_effect=lambda t, **k: qr.get(t, [])), \
+         patch("data.pytdx_client.get_quote", side_effect=lambda cs: [_mock_quote(c) for c in cs]), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", False), \
+         patch("screener.smart_money.top_by_amount", return_value={"rows": []}), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True):
+        res = quality.quality_rank(universe="stock", refine=True, refine_pool=5,
+                                   max_per_board=2, min_turnover=0,
+                                   dim_thresh=0.0, min_dims=1, limit=10)
+    boards = [it.get("constraints", {}).get("board") for it in res["main"]]
+    assert boards.count("同行业") <= 2
+
+
 def test_refine_quote_empty_no_crash():
     # get_quote 返空 [] → refine_status=err，pool 原样返回不崩
     pool = [{"code": "000001", "name": "x", "resonance": 20.0, "hits": 2, "dim_scores": {}}]
