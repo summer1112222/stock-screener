@@ -8,3 +8,4 @@ venv/
 .superpowers/sdd/
 
 *.stackdump
+data/cache/

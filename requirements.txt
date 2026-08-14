@@ -2,9 +2,12 @@
 # Python 3.12.10 已装: pandas 3.0.3, requests 2.34.2
 
 akshare>=1.12.0
+finshare>=2.0.0    # 龙虎榜备援(不走东财 push2 被封端点,实测可用)
+pytdx>=1.70       # 通达信行情直连(免key TCP 7709):日K备援不复权+实时五档+公司信息文本,不走akshare
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 pandas>=2.0.0
+lxml>=4.9.0       # pd.read_html 解析引擎(板块成分股/资金流 THS 静态表)；pandas3.0 默认走 html5lib 未装即崩,需显式 flavor='lxml'
 requests>=2.31.0
 pyyaml>=6.0
 pytest>=7.0.0

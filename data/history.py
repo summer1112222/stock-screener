@@ -20,6 +20,7 @@ except Exception as e:  # pragma: no cover
 
 from . import db
 from .collector import _to_records  # 复用 NaN→None
+from . import pytdx_client
 
 
 def _norm_date(s: str) -> str:
@@ -70,33 +71,75 @@ def _sina_symbol(code: str) -> str:
     return "sz" + code
 
 
+def _fetch_hist_tdx(code: str, start: str, end: str,
+                    key_col: str, key_val: str) -> tuple[pd.DataFrame, bool, str]:
+    """通达信日 K 主源（raw + 本地前复权）。code 为 6 位纯代码。
+    取不复权 raw → adjust.qfq 本地算前复权 → _filter_range 截范围。
+    返回 (df, ok, err)，err 标 source=tdx主源,本地qfq。复权失败退化为不复权。"""
+    if not pytdx_client._TDX_OK:
+        return pd.DataFrame(), False, pytdx_client._TDX_ERR
+    try:
+        from . import adjust
+        n_days = (pd.to_datetime("today") - pd.to_datetime(start, format="%Y%m%d",
+                                                            errors="coerce")).days + 10
+        count = max(int(n_days), 250)
+        raw = pytdx_client.get_daily_bars(code, count)
+        if raw is None or raw.empty:
+            return pd.DataFrame(), False, f"tdx[{code}]: 空"
+        df = _norm_daily(raw, key_col, key_val)
+        # 本地前复权：raw 日 K + xdxr 除权除息因子
+        try:
+            xdxr = adjust.get_xdxr(code)
+            if xdxr is not None and not xdxr.empty:
+                df = adjust.qfq(df, xdxr)
+        except Exception:
+            pass  # 复权失败退化为不复权，诚实标注
+        df = _filter_range(df, start, end)
+        return df, True, "tdx主源,本地qfq"
+    except Exception as e:
+        return pd.DataFrame(), False, f"tdx[{code}]: {e}"
+
+
 def fetch_etf_hist(code: str, start: str = "20200101",
                    end: str = "20240101") -> tuple[pd.DataFrame, bool, str]:
-    """ETF 前复权日线(新浪)。code 例: 510300(自动加 sh/sz 前缀)。"""
+    """ETF 前复权日线。通达信主源(raw+本地qfq)，新浪 qfq 降为备援。code 例: 510300。"""
+    df, ok, err = _fetch_hist_tdx(code, start, end, "code", code)
+    if ok and not df.empty:
+        return df, True, err
     if not _AK_OK:
-        return pd.DataFrame(), False, _AK_ERR
+        return df, ok, err
     try:
         df = ak.fund_etf_hist_sina(symbol=_sina_symbol(code))
         df = _norm_daily(df, "code", code)
         if not df.empty:
             df = _filter_range(df, start, end)
-        return df, True, ""
+        return df, True, "akshare新浪qfq备援"
     except Exception as e:
-        return pd.DataFrame(), False, f"etf_hist[{code}]: {e}"
+        return pd.DataFrame(), False, f"akshare_etf[{code}]: {e}"
 
 
 def fetch_stock_hist(symbol: str, start: str = "20200101",
                      end: str = "20240101") -> tuple[pd.DataFrame, bool, str]:
-    """个股前复权日线(新浪)。symbol 需 sz/sh 前缀，例: sz000001。"""
+    """个股前复权日线。通达信主源(raw+本地qfq)，新浪 qfq 降为备援。symbol 需 sz/sh 前缀。"""
+    code = str(symbol)
+    for pfx in ("sz", "sh", "bj", "SZ", "SH", "BJ"):
+        if code.startswith(pfx):
+            code = code[len(pfx):]
+            break  # 6 位纯代码供 tdx
+    df, ok, err = _fetch_hist_tdx(code, start, end, "symbol", symbol)
+    if ok and not df.empty:
+        return df, True, err
     if not _AK_OK:
-        return pd.DataFrame(), False, _AK_ERR
+        return df, ok, err
     try:
         df = ak.stock_zh_a_daily(symbol=symbol, start_date=start,
                                  end_date=end, adjust="qfq")
         df = _norm_daily(df, "symbol", symbol)
-        return df, True, ""
+        if not df.empty:
+            df = _filter_range(df, start, end)
+        return df, True, "akshare新浪qfq备援"
     except Exception as e:
-        return pd.DataFrame(), False, f"stock_hist[{symbol}]: {e}"
+        return pd.DataFrame(), False, f"akshare[{symbol}]: {e}"
 
 
 def fetch_board_hist(name: str, start: str = "20200101",
