@@ -575,6 +575,119 @@ def watchlist_remove(wid: int):
     return _wrap({"removed": ok, "id": wid})
 
 
+class WLAlertReq(BaseModel):
+    alert_hi: float | None = None
+    alert_lo: float | None = None
+
+
+@app.patch("/api/watchlist/{wid}")
+def watchlist_alert(wid: int, req: WLAlertReq):
+    """更新自选到价提醒价位（用户自设规则，非买卖点）。默认 disclaimer。"""
+    ok = watchlist.set_alert(wid, req.alert_hi, req.alert_lo)
+    return _wrap({"updated": ok, "id": wid,
+                  "alert_hi": req.alert_hi, "alert_lo": req.alert_lo})
+
+
+@app.get("/api/watchlist/live")
+def watchlist_live():
+    """自选股批量实时行情(tdx 直取,盘中秒级)+alert 越线机械标记。
+    tdx 空→降级 spot 陈旧快照。机械行情汇总+用户自设价位标记,非买卖信号,盈亏自负。"""
+    from backtest import quality
+    items = watchlist.list_items()  # 已含 name/alert_hi/alert_lo
+    in_session = quality._is_in_session()
+    _wl_d = "自选股实时行情机械汇总+用户自设价位越线机械标记,观察清单非荐股非买卖信号,盈亏自负。"
+    if not items:
+        return _wrap({"rows": [], "in_session": in_session}, {"cand_disclaimer": _wl_d})
+    codes = [it["code"] for it in items]
+    name_map = {it["code"]: it["name"] for it in items}
+    alert_map = {it["code"]: (it["alert_hi"], it["alert_lo"]) for it in items}
+    qmap = {}
+    quote_err = None
+    try:
+        qs = pytdx_client.get_quote(codes)
+        qmap = {q.get("code"): q for q in qs} if qs else {}
+    except Exception as e:
+        quote_err = f"{type(e).__name__}: {str(e)[:80]}"
+    if not qmap and not quote_err:
+        quote_err = "通达信未连接或无行情"
+    # tdx 空时降级 spot 陈旧快照
+    spot_map = {}
+    if not qmap:
+        ph = ",".join("?" * len(codes))
+        for tbl in ("stock_spot", "etf_spot"):
+            try:
+                with db.get_conn() as conn:
+                    sr = conn.execute(
+                        f"SELECT code, latest_price FROM {tbl} WHERE code IN ({ph})",
+                        codes).fetchall()
+                for x in sr:
+                    if x["latest_price"] is not None and x["code"] not in spot_map:
+                        spot_map[x["code"]] = x["latest_price"]
+            except Exception:
+                pass
+
+    def _num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    rows = []
+    for c in codes:
+        hi, lo = alert_map.get(c, (None, None))
+        q = qmap.get(c) or {}
+        price = _num(q.get("price"))
+        prev_close = _num(q.get("last_close"))
+        src = "tdx"
+        if price is None and not qmap and c in spot_map:
+            price = _num(spot_map[c]); src = "spot陈旧"
+        change = (price - prev_close) if (price is not None and prev_close) else None
+        change_pct = (change / prev_close * 100) if (change is not None and prev_close) else None
+        name = name_map.get(c) or q.get("name") or ""
+        alert_hit = None
+        if price is not None:
+            if hi is not None and price >= hi:
+                alert_hit = "hi"
+            elif lo is not None and price <= lo:
+                alert_hit = "lo"
+        rows.append({"code": c, "name": name, "price": price, "prev_close": prev_close,
+                     "change": change, "change_pct": change_pct,
+                     "alert_hi": hi, "alert_lo": lo, "alert_hit": alert_hit,
+                     "quote_source": src})
+    out = {"rows": rows, "in_session": in_session}
+    if quote_err and not qmap and not spot_map:
+        out["quote_error"] = quote_err
+    return _wrap(out, {"cand_disclaimer": _wl_d})
+
+
+@app.get("/api/watchlist/signals")
+def watchlist_signals():
+    """批量信号扫描 watchlist 全体(个股/ETF 分拆 universe)。
+    依赖 *_daily 历史(需先 /api/backtest/fetch)。机械扫描非AI推荐,盈亏自负。"""
+    codes = watchlist.list_codes()
+    if not codes:
+        return _wrap({"rows": [], "n_scanned": 0, "error": None},
+                     {"cand_disclaimer": "批量机械信号扫描,非AI推荐,不构成投资建议,盈亏自负。"})
+    stock_codes = [c for c in codes if not watchlist._is_etf(c)]
+    etf_codes = [c for c in codes if watchlist._is_etf(c)]
+    rows, n_scanned, err = [], 0, None
+    for uni, cs in (("stock", stock_codes), ("etf", etf_codes)):
+        if not cs:
+            continue
+        try:
+            res = bt_sig.scan_signals(uni, cs)
+            for row in res.get("rows", []):
+                row["universe"] = uni
+                rows.append(row)
+            n_scanned += res.get("n_scanned", 0) or 0
+            if res.get("error"):
+                err = res["error"]
+        except Exception as e:
+            err = f"{uni}: {type(e).__name__}: {str(e)[:60]}"
+    return _wrap({"rows": rows, "n_scanned": n_scanned, "error": err},
+                 {"cand_disclaimer": "批量机械信号扫描,非AI推荐,不构成投资建议,盈亏自负。"})
+
+
 # ------------------------------------------------------------------
 # 主力动向（游资/国家队/外资/资金流）—— 观察清单，非荐股
 # ------------------------------------------------------------------
@@ -726,7 +839,10 @@ def buffett_top(n: int = Query(10, ge=1, le=50),
 def tdx_quote(code: str = Query(...)):
     """通达信实时五档行情(盘中实时,免key直取)。机械行情,非买卖信号。"""
     q = pytdx_client.get_quote([code])
-    return _wrap(q[0] if q else {}, {
+    if not q:
+        return _wrap({"error": "通达信未连接或无此标的，稍后重试"}, {
+            "cand_disclaimer": "通达信实时行情机械快照,非买卖信号,盈亏自负。"})
+    return _wrap(q[0], {
         "cand_disclaimer": "通达信实时行情机械快照,非买卖信号,盈亏自负。"})
 
 
@@ -748,6 +864,7 @@ def stock_analysis(code: str = Query(...)):
     """个股深度分析卡：聚合 基本面(buffett)+主力动向+研报+千股千评+技术信号+风险预筛。
     多维机械分析,研究优先级非买卖信号,盈亏自负。"""
     from collections import defaultdict
+    import concurrent.futures as _cf
     card = {"code": code}
     # 0. 实时五档行情(通达信直取,盘中实时;spot 慢/缺时兜底)
     try:
@@ -755,75 +872,88 @@ def stock_analysis(code: str = Query(...)):
         if q:
             card["latest_price"] = q[0].get("price")
             card["quote"] = q[0]
-    except Exception:
-        pass
-    # 1. 基本面+估值+护城河+风险+优先级(buffett,复用财报缓存)
-    try:
-        ba = bt_buf.analyze(code)
-        card["name"] = ba.get("name")
-        card["fundamentals"] = ba
-        # 综合评分(0-100 机械): ROE/毛利率/负债/FCF/护城河/估值 - 红旗。研究优先级非买卖信号。
-        rt = ba.get("ratios") or {}
-        def _num(x):
-            try:
-                return float(x)
-            except (TypeError, ValueError):
-                return None
-        score = 0.0
-        roe = _num(rt.get("leverage_adj_roe"))
-        score += 25 if roe and roe > 20 else (20 if roe and roe > 15 else (15 if roe and roe > 10 else 5))
-        gm = _num(rt.get("gross_margin_avg"))
-        score += 15 if gm and gm > 50 else (10 if gm and gm > 30 else 5)
-        dr = _num(rt.get("debt_ratio_latest"))
-        score += 15 if dr is not None and dr < 40 else (10 if dr is not None and dr < 60 else 5)
-        fc = _num(rt.get("fcf_to_netincome"))
-        score += 15 if fc and fc > 0.7 else (10 if fc and fc > 0.3 else 5)
-        moat = _num(ba.get("moat_score"))
-        score += 15 if moat and moat >= 4 else (10 if moat and moat >= 3 else 5)
-        vt = (ba.get("valuation_tag") or ba.get("valuation") or "")
-        score += 15 if any(w in str(vt) for w in ("便宜", "低估", "低估")) else (10 if "合理" in str(vt) else 5)
-        score -= 10 * len(ba.get("red_flags") or [])
-        card["score"] = max(0, min(100, round(score, 1)))
+        else:
+            card["quote_error"] = "通达信未连接或无此标的"
     except Exception as e:
-        card["fundamentals"] = {"error": str(e)}
-    # 2. 主力动向(该股近30日各通道净额)
-    try:
-        rows = db.query_rows("smart_money_action", where="code = ?",
-                             params=(code,), order_by="date DESC", limit=200)
-        ch = defaultdict(lambda: [0.0, 0])
-        daily = defaultdict(float)
-        for r in rows:
-            c = r.get("channel"); a = r.get("amount"); dd = r.get("date")
-            if c and a is not None:
-                ch[c][0] += a; ch[c][1] += 1
-            if dd and a is not None:
-                daily[dd] += a or 0
-        card["smart_money"] = {
-            "channels": [{"channel": k, "net": v[0], "count": v[1]} for k, v in ch.items()],
-            "daily": [{"date": d, "net": daily[d]} for d in sorted(daily)],
-            "latest_date": rows[0].get("date") if rows else None,
-            "total_rows": len(rows)}
-    except Exception as e:
-        card["smart_money"] = {"error": str(e)}
-    # 3. 研报评级
-    try:
-        rr = research_data.query_reports(code=code, days=180, limit=10)
-        card["research"] = {"reports": rr.get("rows", []), "total": rr.get("total", 0)}
-    except Exception as e:
-        card["research"] = {"error": str(e)}
-    # 4. 千股千评
-    try:
-        cm = research_data.fetch_comments(code)
-        card["comments"] = cm[0] if isinstance(cm, tuple) else cm
-    except Exception as e:
-        card["comments"] = {"error": str(e)}
-    # 5. 技术信号(需该 code 历史)
-    try:
-        sc = bt_sig.scan_signals("stock", [code])
-        card["signals"] = sc.get("rows", [])
-        card["signals_error"] = sc.get("error")
-    except Exception as e:
-        card["signals"] = {"error": str(e)}
+        card["quote_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+    # 1-5. 并发取独立子域(各 worker 返 fragment,主线程合并;写不同 key 无竞争)。
+    #      单源失败独立兜底不拖垮整卡,行为与原串行版一致。score 仍在 buffett worker 内算(依赖 ratios)。
+    def _num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _buffett():
+        try:
+            ba = bt_buf.analyze(code)
+            frag = {"name": ba.get("name"), "fundamentals": ba}
+            rt = ba.get("ratios") or {}
+            score = 0.0
+            roe = _num(rt.get("leverage_adj_roe"))
+            score += 25 if roe and roe > 20 else (20 if roe and roe > 15 else (15 if roe and roe > 10 else 5))
+            gm = _num(rt.get("gross_margin_avg"))
+            score += 15 if gm and gm > 50 else (10 if gm and gm > 30 else 5)
+            dr = _num(rt.get("debt_ratio_latest"))
+            score += 15 if dr is not None and dr < 40 else (10 if dr is not None and dr < 60 else 5)
+            fc = _num(rt.get("fcf_to_netincome"))
+            score += 15 if fc and fc > 0.7 else (10 if fc and fc > 0.3 else 5)
+            moat = _num(ba.get("moat_score"))
+            score += 15 if moat and moat >= 4 else (10 if moat and moat >= 3 else 5)
+            vt = (ba.get("valuation_tag") or ba.get("valuation") or "")
+            score += 15 if any(w in str(vt) for w in ("便宜", "低估", "低估")) else (10 if "合理" in str(vt) else 5)
+            score -= 10 * len(ba.get("red_flags") or [])
+            frag["score"] = max(0, min(100, round(score, 1)))
+            return frag
+        except Exception as e:
+            return {"fundamentals": {"error": str(e)}}
+
+    def _smart_money():
+        try:
+            rows = db.query_rows("smart_money_action", where="code = ?",
+                                 params=(code,), order_by="date DESC", limit=200)
+            ch = defaultdict(lambda: [0.0, 0])
+            daily = defaultdict(float)
+            for r in rows:
+                c = r.get("channel"); a = r.get("amount"); dd = r.get("date")
+                if c and a is not None:
+                    ch[c][0] += a; ch[c][1] += 1
+                if dd and a is not None:
+                    daily[dd] += a or 0
+            return {"smart_money": {
+                "channels": [{"channel": k, "net": v[0], "count": v[1]} for k, v in ch.items()],
+                "daily": [{"date": d, "net": daily[d]} for d in sorted(daily)],
+                "latest_date": rows[0].get("date") if rows else None,
+                "total_rows": len(rows)}}
+        except Exception as e:
+            return {"smart_money": {"error": str(e)}}
+
+    def _research():
+        try:
+            rr = research_data.query_reports(code=code, days=180, limit=10)
+            return {"research": {"reports": rr.get("rows", []), "total": rr.get("total", 0)}}
+        except Exception as e:
+            return {"research": {"error": str(e)}}
+
+    def _comments():
+        try:
+            cm = research_data.fetch_comments(code)
+            return {"comments": cm[0] if isinstance(cm, tuple) else cm}
+        except Exception as e:
+            return {"comments": {"error": str(e)}}
+
+    def _signals():
+        try:
+            sc = bt_sig.scan_signals("stock", [code])
+            return {"signals": sc.get("rows", []), "signals_error": sc.get("error")}
+        except Exception as e:
+            return {"signals": {"error": str(e)}}
+
+    with _cf.ThreadPoolExecutor(max_workers=5) as _ex:
+        _futs = [_ex.submit(_buffett), _ex.submit(_smart_money), _ex.submit(_research),
+                 _ex.submit(_comments), _ex.submit(_signals)]
+        for _f in _cf.as_completed(_futs):
+            card.update(_f.result())
     # 6. 多因子机械预判(偏多/偏空/中性):加权聚合 基本面/资金面/技术面/机构评级/估值/内部人
     #    每因子带权重+连续强度 strength∈[-1,1]（替原 ±1 三态，保留区分度）。
     #    contrib = weight × strength；score∈[-1,1]→label+confidence。非买卖建议，仅机械归类。
@@ -950,11 +1080,10 @@ def history_route(code: str = Query(...), universe: str = Query("stock"),
                  start: str = Query("20230101"), end: str = Query("20240601")):
     """返回单个标的的历史日线(供前端画K线)。个人本地分析用。"""
     table, key = history._UNIVERSE[universe][0], history._UNIVERSE[universe][2]
-    rows = db.query_rows(table)
+    rows = db.query_rows(table, where=f"{key} = ?", params=(code,))
     if not rows:
         return _wrap({"error": "无历史数据，先 /api/backtest/fetch"}, {"code": code})
     df = pd.DataFrame(rows)
-    df = df[df[key] == code]
     dts = pd.to_datetime(df["date"], errors="coerce")
     df = df[(dts >= pd.to_datetime(start)) & (dts <= pd.to_datetime(end))]
     df = df.sort_values("date")

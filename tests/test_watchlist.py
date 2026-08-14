@@ -9,7 +9,11 @@ def _mem_conn():
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS watchlist (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        code TEXT, name TEXT, note TEXT, added_ts TEXT)""")
+        code TEXT, name TEXT, note TEXT, added_ts TEXT,
+        alert_hi REAL, alert_lo REAL)""")
+    # stock_spot/etf_spot 兜底（list_items 联查现价，空表即可）
+    conn.execute("CREATE TABLE IF NOT EXISTS stock_spot(code TEXT, latest_price REAL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS etf_spot(code TEXT, latest_price REAL)")
     return conn
 
 

@@ -32,10 +32,11 @@ def add(code: str, name: str = "", note: str = "") -> dict:
 
 
 def list_items() -> list[dict]:
-    """列自选 + 按 stock_spot/etf_spot 最新价显示现价。"""
+    """列自选 + 按 stock_spot/etf_spot 最新价显示现价 + alert 提醒价。"""
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT id,code,name,note,added_ts FROM watchlist ORDER BY id DESC"
+            "SELECT id,code,name,note,added_ts,alert_hi,alert_lo "
+            "FROM watchlist ORDER BY id DESC"
         ).fetchall()
     if not rows:
         return []
@@ -58,6 +59,7 @@ def list_items() -> list[dict]:
         "id": r["id"], "code": r["code"], "name": r["name"],
         "note": r["note"], "added_ts": r["added_ts"],
         "latest_price": spot.get(r["code"]),
+        "alert_hi": r["alert_hi"], "alert_lo": r["alert_lo"],
     } for r in rows]
 
 
@@ -66,3 +68,29 @@ def remove(wid: int) -> bool:
         cur = conn.execute("DELETE FROM watchlist WHERE id=?", (wid,))
         conn.commit()
         return cur.rowcount > 0
+
+
+def list_codes() -> list[str]:
+    """返回去重 code 列表（供 live/signals 路由批量取）。"""
+    with db.get_conn() as conn:
+        rows = conn.execute("SELECT DISTINCT code FROM watchlist").fetchall()
+    return [r["code"] for r in rows if r["code"]]
+
+
+def set_alert(wid: int, alert_hi: float | None, alert_lo: float | None) -> bool:
+    """设/清到价提醒（None=清除该项）。机械价位标记，非买卖信号。"""
+    with db.get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE watchlist SET alert_hi=?, alert_lo=? WHERE id=?",
+            (alert_hi, alert_lo, wid))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _is_etf(code: str) -> bool:
+    """前缀判 ETF/基金：51/52/15/16/50/56/58/11/12 开头。
+    启发式，冷门品种误判→走 stock universe，scan_signals 返空不崩。"""
+    c = (code or "").strip()
+    if len(c) < 2:
+        return False
+    return c[:2] in {"51", "52", "15", "16", "50", "56", "58", "11", "12"}

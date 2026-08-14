@@ -244,6 +244,8 @@
       <div class="row">
         <div class="f"><label>代码</label><input id="hkCode" type="text" placeholder="sh603986" style="width:140px"></div>
         <div class="f"><label>标的</label><select id="hkUni"><option value="stock">个股</option><option value="ETF">ETF</option><option value="board">板块</option></select></div>
+        <div class="f"><label>起</label><input id="hkStart" type="text" placeholder="YYYYMMDD" style="width:90px"></div>
+        <div class="f"><label>止</label><input id="hkEnd" type="text" placeholder="YYYYMMDD" style="width:90px"></div>
         <button class="btn" id="hkRun" type="button">画图(需先拉历史)</button>
       </div>
       <div id="hkOut" style="margin-top:10px"></div>
@@ -286,6 +288,13 @@
       </div>
       <div class="skipped" id="smMsg"></div>
       <div id="smOut" style="margin-top:10px"></div>
+      <div class="row" style="align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <input id="smTdxCode" type="text" placeholder="通达信个股主力深查(代码)" style="min-width:160px">
+        <button class="btn ghost" id="smTdxProbe" type="button">深查主力</button>
+        <span style="font-size:11px;color:var(--muted)">机构持股/融资融券/外内盘净流(通达信直取·非买卖信号)</span>
+        <span id="smTdxLoading" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="smTdxOut" style="margin-top:8px"></div>
       <div class="disc"><b>主力动向免责</b>：以下为龙虎榜席位/十大股东/陆股通/大单资金流的<b>机械归类观察清单，非推荐、非买卖点、不构成投资建议、不承诺收益</b>。席位名/股东名为公开事实陈述。市场有风险，盈亏自负。</div>
     </div>
   </section>
@@ -379,6 +388,54 @@ const API = '';  // 同源：FastAPI 同时托管前端与 /api；本地/Docker 
 let FIELDS = {board_fields:[], etf_fields:[], ops:{}, categories:[], indicators:[]};
 let condIdx = 0;
 
+// ---------------- 基础设施：toast + apiFetch + 状态持久化 ----------------
+// 轻量 toast：右下角自动消失，替 alert；err红/ok绿/info灰
+(function(){
+  const st=document.createElement('style');
+  st.textContent=`.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:380px}
+.toast{pointer-events:auto;padding:9px 14px;border-radius:8px;font-size:13px;line-height:1.5;background:var(--surface-2);border:1px solid var(--border);box-shadow:0 6px 20px rgba(0,0,0,.4);opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s;word-break:break-word}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.err{border-color:rgba(229,57,53,.6);color:#FCA5A5}
+.toast.ok{border-color:rgba(22,163,74,.5);color:#86EFAC}
+.toast.info{color:var(--muted)}`;
+  document.head.appendChild(st);
+  const wrap=document.createElement('div'); wrap.className='toast-wrap'; document.body.appendChild(wrap);
+  window.toast=function(msg,type='info',ms=3400){
+    const t=document.createElement('div'); t.className='toast '+type; t.textContent=msg;
+    wrap.appendChild(t);
+    requestAnimationFrame(()=>t.classList.add('show'));
+    setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),220);},ms);
+  };
+})();
+// 统一 fetch 封装：网络错/非2xx→toast+返回{_fail:true}，可选 btn 防重入(busy 文本自动恢复)，可选 msg 元素 id 置 busy。
+// 调用方判 r._fail 走空数据分支，杜绝裸 fetch 静默卡死。
+async function apiFetch(url, opts={}, {btn, msg, busy='加载中…'}={}){
+  const el = typeof msg==='string'?document.getElementById(msg):msg;
+  if(btn){btn.disabled=true; btn.dataset.orig=btn.textContent; btn.textContent=busy;}
+  if(el) el.textContent=busy;
+  try{
+    const r = await fetch(url, opts);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }catch(e){
+    toast('请求失败: '+e.message,'err');
+    return {data:undefined, error:e.message, _fail:true};
+  }finally{
+    if(btn){btn.disabled=false; if(btn.dataset.orig){btn.textContent=btn.dataset.orig; delete btn.dataset.orig;}}
+  }
+}
+// 状态持久化：选中 tab / 筛选 / 候选 / 回测参数 → localStorage，刷新页面即恢复
+const _PKEY='ss_ui_state_v1';
+const _PERSIST_IDS=new Set(['category','sort','asc','limit','indicator','candUni','candFactor','candSort','candLimit','candMinTO','candTradable','btUni','btFactor','btN','btTopn','btFreq','btStart','btEnd','hkStart','hkEnd']);
+function _saveUI(){
+  const s={tab:document.querySelector('.tabs button.active')?.dataset.tab||'screen'};
+  _PERSIST_IDS.forEach(k=>{const e=document.getElementById(k); if(!e)return; s[k]=e.type==='checkbox'?e.checked:e.value;});
+  try{localStorage.setItem(_PKEY,JSON.stringify(s));}catch(e){}
+}
+function _restoreUI(){try{return JSON.parse(localStorage.getItem(_PKEY)||'{}')||{};}catch(e){return{};}}
+function _applyRestoredUI(s){for(const[k,v]of Object.entries(s)){if(k==='tab')continue;const e=document.getElementById(k);if(!e)continue;if(e.type==='checkbox')e.checked=v;else e.value=v;}}
+document.addEventListener('change',e=>{if(e.target&&_PERSIST_IDS.has(e.target.id)) _saveUI();});
+
 // ---------------- tab 切换 + 持仓抽屉 ----------------
 // 懒加载：smart/quality tab 仅在首次切换时拉数据，避免页面加载即触发
 // 5000+ 行 smart_money 渲染 / 昂贵 quality(stock) 路由导致浏览器卡死。
@@ -400,8 +457,8 @@ function switchTab(name){
   ensureTabLoaded(name);
 }
 function togglePortfolio(){document.getElementById('pfDrawer').classList.toggle('open');}
-function toggleWatchlist(){document.getElementById('wlDrawer').classList.toggle('open');}
-document.querySelectorAll('.tabs button[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+function toggleWatchlist(){const d=document.getElementById('wlDrawer');const open=d.classList.toggle('open');if(open){wlLoad();}else{if(_wlTimer){clearInterval(_wlTimer);_wlTimer=null;}}}
+document.querySelectorAll('.tabs button[data-tab]').forEach(b=>b.onclick=()=>{switchTab(b.dataset.tab);_saveUI();});
 document.getElementById('pfOpen').onclick=togglePortfolio;
 document.getElementById('pfClose2').onclick=()=>document.getElementById('pfDrawer').classList.remove('open');
 document.getElementById('wlOpen').onclick=toggleWatchlist;
@@ -437,7 +494,8 @@ const colorPct = v => {
 };
 
 async function loadFields(){
-  const r = await fetch(`${API}/api/fields`).then(r=>r.json());
+  const r = await apiFetch(`${API}/api/fields`);
+  if(r._fail) return;   // toast 已弹；FIELDS 保持默认空，下拉留空待重试
   FIELDS = r.data;
   updateSortOptions();
 }
@@ -499,9 +557,11 @@ async function run(){
   if(cat!=='ETF') params.set('indicator',document.getElementById('indicator').value);
   const conds=readConds();
   if(conds.length) params.set('conditions',JSON.stringify(conds));
-  const r=await fetch(`${API}/api/screen?${params}`).then(r=>r.json());
-  document.getElementById('ut').textContent='更新于 '+r.update_time;
-  document.getElementById('total').textContent='共 '+r.total+' 条';
+  const btn=document.getElementById('run');
+  const r=await apiFetch(`${API}/api/screen?${params}`,{},{btn,msg:'ut',busy:'筛选中…'});
+  if(r._fail){document.getElementById('total').textContent='';renderTable([],cat);return;}
+  document.getElementById('ut').textContent='更新于 '+(r.update_time||'—');
+  document.getElementById('total').textContent='共 '+(r.total??0)+' 条';
   document.getElementById('skipped').textContent=(r.skipped&&r.skipped.length)?('跳过: '+r.skipped.join(' | ')):'';
   renderTable(r.data,cat);
 }
@@ -531,18 +591,24 @@ function renderTable(rows,cat){
 }
 
 async function refresh(){
-  document.getElementById('ut').textContent='刷新中...';
-  const r=await fetch(`${API}/api/refresh`,{method:'POST'}).then(r=>r.json());
-  document.getElementById('ut').textContent='更新于 '+r.data.update_time;
-  alert('刷新完成: '+JSON.stringify(r.data.counts));
+  const btn=document.getElementById('refresh');
+  const r=await apiFetch(`${API}/api/refresh`,{method:'POST'},{btn,msg:'ut',busy:'刷新中…'});
+  if(r._fail){return;}
+  document.getElementById('ut').textContent='更新于 '+(r.data?.update_time||'—');
+  const c=r.data?.counts||{};
+  const summary=Object.entries(c).map(([k,v])=>`${k}:${v}`).join(' | ');
+  toast('刷新完成: '+summary,'ok');
   run();
 }
 
 document.getElementById('addCond').onclick=addCond;
 document.getElementById('run').onclick=run;
 document.getElementById('refresh').onclick=refresh;
-document.getElementById('category').onchange=()=>{updateSortOptions();};
-loadFields().then(()=>{updateSortOptions();addCond();run();});
+document.getElementById('category').onchange=()=>{updateSortOptions();_saveUI();};
+const _r=_restoreUI(); _applyRestoredUI(_r);
+// K线起止默认近一年(未被持久化恢复时)
+(function(){const d=new Date();const f=x=>`${x.getFullYear()}${String(x.getMonth()+1).padStart(2,'0')}${String(x.getDate()).padStart(2,'0')}`;const d2=new Date(d);d2.setFullYear(d2.getFullYear()-1);const s=document.getElementById('hkStart'),e=document.getElementById('hkEnd');if(s&&!s.value)s.value=f(d2);if(e&&!e.value)e.value=f(d);})();
+loadFields().then(()=>{updateSortOptions();addCond();run();if(_r.tab&&_r.tab!=='screen') switchTab(_r.tab);});
 
 // ---------------- 回测研究 ----------------
 const BT_FACTORS=[['momentum_n','动量(n日)'],['volatility_n','波动(n日)'],['turnover_n','成交额均值(n日)'],['activity','活跃度'],['momentum','动量(带符号)'],['reversal_5','5日反转'],['reversal_20','20日反转'],['amihud_20','Amihud非流动性(20日)']];
@@ -553,12 +619,15 @@ const btBody=()=>({universe:document.getElementById('btUni').value,factor:btFact
 
 function btMsg(s){document.getElementById('btMsg').textContent=s||'';}
 async function btFetch(){
-  btMsg('拉取历史中...'); const r=await fetch(`${API}/api/backtest/fetch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())}).then(r=>r.json());
-  btMsg('历史数据: '+JSON.stringify(r.data.counts)+(r.data.errors&&r.data.errors.length?(' | 错误: '+r.data.errors.slice(0,2)):'' ));
+  const btn=document.getElementById('btFetch');
+  const r=await apiFetch(`${API}/api/backtest/fetch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())},{btn,msg:'btMsg',busy:'拉取历史中…'});
+  if(r._fail){btMsg('拉取失败');return;}
+  const d=r.data||{};
+  btMsg('历史数据: '+JSON.stringify(d.counts||{})+(d.errors&&d.errors.length?(' | 错误: '+d.errors.slice(0,2)):''));
 }
 // 自动先拉历史(幂等upsert)再回测/评价——确保任意填入的 code 都可查("全部可查")
 async function _btFetchQuiet(){
-  await fetch(`${API}/api/backtest/fetch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())});
+  await apiFetch(`${API}/api/backtest/fetch`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())});
 }
 // 防大数组 spread 栈溢出/超长 SVG 卡顿：循环求极值 + 降采样
 function _minmax(vs){let mn=Infinity,mx=-Infinity;for(let i=0;i<vs.length;i++){const v=vs[i];if(v<mn)mn=v;if(v>mx)mx=v;}if(!isFinite(mn))mn=0;if(!isFinite(mx))mx=0;return[mn,mx];}
@@ -574,9 +643,12 @@ function sparkline(curve,color='#3B82F6'){
 }
 function riskTable(r){if(!r||!Object.keys(r).length)return '';const rows=Object.entries(r).map(([k,v])=>`<tr><td>${k}</td><td class="num">${v}</td></tr>`).join('');return `<table><thead><tr><th>指标</th><th class="num">值</th></tr></thead><tbody>${rows}</tbody></table>`;}
 async function btRun(){
-  btMsg('拉取历史中(确保可查)...'); await _btFetchQuiet();
-  btMsg('回测中...'); const r=await fetch(`${API}/api/backtest/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())}).then(r=>r.json());
+  const btn=document.getElementById('btRun');
+  btMsg('拉取历史中(确保可查)…'); await _btFetchQuiet();
+  btMsg('回测中…');
+  const r=await apiFetch(`${API}/api/backtest/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())},{btn,msg:'btMsg',busy:'回测中…'});
   const d=r.data||{};
+  if(r._fail){btMsg('回测失败');return;}
   if(d.error){btMsg(d.error);document.getElementById('btOut').innerHTML='';return;}
   btMsg(`topN=${d.topn} 调仓日 ${d.rebalance_dates?d.rebalance_dates.length:0} 个 | 换手均值 ${d.turnover}`);
   document.getElementById('btOut').innerHTML=`
@@ -585,9 +657,12 @@ async function btRun(){
     <div class="disc">${(d.survivorship && d.survivorship.note) || (typeof d.survivorship==='string' ? d.survivorship : '') || ''}</div>`;
 }
 async function btEval(){
-  btMsg('拉取历史中(确保可查)...'); await _btFetchQuiet();
-  btMsg('因子评价中...'); const r=await fetch(`${API}/api/backtest/eval`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())}).then(r=>r.json());
+  const btn=document.getElementById('btEval');
+  btMsg('拉取历史中(确保可查)…'); await _btFetchQuiet();
+  btMsg('因子评价中…');
+  const r=await apiFetch(`${API}/api/backtest/eval`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())},{btn,msg:'btMsg',busy:'评价中…'});
   const d=r.data||{};
+  if(r._fail){btMsg('评价失败');return;}
   if(d.error){btMsg(d.error);document.getElementById('btOut').innerHTML='';return;}
   const s=d.ic_summary||{};
   btMsg(`IC=${s.ic} IR=${s.ir} 胜率=${s.win_rate} 期数=${s.n}`);
@@ -604,13 +679,16 @@ document.getElementById('btEval').onclick=btEval;
 
 // ---------------- 候选池(观察清单·非推荐) ----------------
 async function candRun(){
-  document.getElementById('candMsg').textContent='生成中...';
+  const btn=document.getElementById('candRun');
+  document.getElementById('candMsg').textContent='生成中…';
   const u=document.getElementById('candUni').value,f=document.getElementById('candFactor').value;
   const p=new URLSearchParams({universe:u,factor:f,n:document.getElementById('candN').value,sort:document.getElementById('candSort').value,limit:document.getElementById('candLimit').value});
   if(document.getElementById('candTradable').checked){p.set('tradable','true');p.set('min_turnover',document.getElementById('candMinTO').value);}
   const codes=document.getElementById('candCodes').value.trim();
   if(codes) p.set('codes',codes);
-  const r=await fetch(`${API}/api/candidates?${p}`).then(r=>r.json());
+  _saveUI();
+  const r=await apiFetch(`${API}/api/candidates?${p}`,{},{btn,msg:'candMsg',busy:'生成中…'});
+  if(r._fail){document.getElementById('candOut').innerHTML='';return;}
   const d=r.data||[];
   document.getElementById('candMsg').textContent=`${r.mode||''} 因子 ${r.factor||f} 共 ${r.total??d.length} 条${r.error?(' | '+r.error):''}`;
   const wrap=document.getElementById('candOut');
@@ -624,10 +702,12 @@ document.getElementById('candRun').onclick=candRun;
 
 // ---------------- 信号扫描 ----------------
 async function sigRun(){
-  document.getElementById('sigMsg').textContent='扫描中...';
+  const btn=document.getElementById('sigRun');
+  document.getElementById('sigMsg').textContent='扫描中…';
   const codes=document.getElementById('sigCodes').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
   const min_hits=parseInt(document.getElementById('sigMinHits').value)||1;
-  const r=await fetch(`${API}/api/signals`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:document.getElementById('sigUni').value,codes,min_hits})}).then(r=>r.json());
+  const r=await apiFetch(`${API}/api/signals`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:document.getElementById('sigUni').value,codes,min_hits})},{btn,msg:'sigMsg',busy:'扫描中…'});
+  if(r._fail){document.getElementById('sigOut').innerHTML='';return;}
   const d=r.data||[];
   document.getElementById('sigMsg').textContent=`扫描 ${r.n_scanned} 只，触发 ${d.length} 只${r.error?(' | '+r.error):''}${min_hits>=2?(' | 共振≥'+min_hits):''}`;
   document.getElementById('sigOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>现价</th><th>共振</th><th>触发信号</th><th></th></tr></thead><tbody>${d.map(x=>`<tr class="clk" data-code="${x.code}"><td>${x.code}</td><td class="num">${x.close}</td><td class="num">${x.hits>=2?`<b style="color:var(--warn)">${x.hits}★</b>`:x.hits}</td><td>${x.signals.join('；')}</td><td><button class="btn ghost" style="font-size:11px;padding:2px 8px" onclick="event.stopPropagation();wlQuickAdd('${x.code}')" title="加入自选观察">＋自选</button></td></tr>`).join('')}</tbody></table>`:'<div class="empty">今日无触发</div>';
@@ -690,7 +770,8 @@ document.getElementById('sbtRun').onclick=sbtRun;
 
 // ---------------- 持仓跟踪 ----------------
 async function pfLoad(){
-  const r=await fetch(`${API}/api/portfolio`).then(r=>r.json());
+  const r=await apiFetch(`${API}/api/portfolio`);
+  if(r._fail){document.getElementById('pfOut').innerHTML='<div class="empty">加载失败</div>';return;}
   const d=r.data||[];
   document.getElementById('pfOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th class="num">买价</th><th class="num">股数</th><th class="num">最新</th><th class="num">浮盈</th><th class="num">收益率</th><th>备注</th><th>提醒</th><th></th></tr></thead><tbody>${d.map(p=>{
     const loss = p.pnl_pct!=null && p.pnl_pct<=-0.05;
@@ -702,8 +783,11 @@ async function pfLoad(){
   }).join('')}</tbody></table>`:'<div class="empty">暂无持仓</div>';
 }
 async function pfAdd(){
+  const btn=document.getElementById('pfAdd');
   const body={code:document.getElementById('pfCode').value,name:document.getElementById('pfName').value,buy_date:document.getElementById('pfDate').value,buy_price:+document.getElementById('pfPrice').value,shares:+document.getElementById('pfShares').value,note:document.getElementById('pfNote').value};
-  await fetch(`${API}/api/portfolio`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  const r=await apiFetch(`${API}/api/portfolio`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},{btn,busy:'记录中…'});
+  if(r._fail)return;
+  toast('已记录持仓 '+body.code,'ok');
   pfLoad();
 }
 window.pfClose=async function(id){await fetch(`${API}/api/portfolio/${id}`,{method:'DELETE'});pfLoad();};
@@ -715,47 +799,147 @@ window.pfEditAlert=function(id){
 window.pfSaveAlert=async function(id){
   const hi=document.getElementById('pfAHi-'+id).value;
   const lo=document.getElementById('pfALo-'+id).value;
-  await fetch(`${API}/api/portfolio/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_hi:hi===''?null:+hi,alert_lo:lo===''?null:+lo})}).then(r=>r.json());
+  const r=await apiFetch(`${API}/api/portfolio/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_hi:hi===''?null:+hi,alert_lo:lo===''?null:+lo})});
+  if(r._fail)return;
+  toast('提醒已保存','ok');
   pfLoad();
 };
 document.getElementById('pfAdd').onclick=pfAdd;
 document.getElementById('pfRefresh').onclick=pfLoad;
 
 // ---------------- 自选观察 ----------------
+let _wlTimer=null;
 async function wlLoad(){
-  const r=await fetch(`${API}/api/watchlist`).then(r=>r.json());
-  const d=r.data||[];
-  document.getElementById('wlOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th class="num">最新价</th><th>备注</th><th>加入</th><th></th></tr></thead><tbody>${d.map(p=>`<tr class="clk" data-code="${p.code}"><td>${p.code}</td><td>${p.name||''}</td><td class="num">${p.latest_price??'—'}</td><td>${p.note||''}</td><td style="color:var(--muted);font-size:11px">${(p.added_ts||'').slice(0,10)}</td><td><button class="del" onclick="wlClose(${p.id})" aria-label="移除自选">✕</button></td></tr>`).join('')}</tbody></table>`:'<div class="empty">暂无自选</div>';
+  const [liveR,sigR]=await Promise.all([
+    apiFetch(`${API}/api/watchlist/live`),
+    apiFetch(`${API}/api/watchlist/signals`),
+  ]);
+  if(liveR._fail||sigR._fail){document.getElementById('wlOut').innerHTML='<div class="empty">加载失败,稍后重试</div>';return;}
+  const live=liveR.data||{}, sigs=(sigR.data&&sigR.data.rows)||[];
+  const sigCnt={}; sigs.forEach(s=>{sigCnt[s.code]=(sigCnt[s.code]||0)+((s.signals||[]).length);});
+  const rows=live.rows||[];
+  document.getElementById('wlOut').innerHTML = rows.length? rows.map(r=>{
+    const pct=r.change_pct, col=pct==null?'':(pct>=0?'#E53935':'#16A34A');
+    const hit=r.alert_hit, bd=hit==='hi'?'2px solid #E53935':(hit==='lo'?'2px solid #F59E0B':'1px solid #e5e7eb');
+    const sc=sigCnt[r.code]||0, badge=sc?`<span style="color:#F59E0B;font-size:11px" title="今日触发信号数">⚡${sc}</span>`:'';
+    const hi=r.alert_hi==null?'':r.alert_hi, lo=r.alert_lo==null?'':r.alert_lo;
+    return `<div class="wl-row" style="border:${bd};padding:6px;margin:4px 0;border-radius:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="clk" style="color:#2563eb;cursor:pointer" data-code="${r.code}">${r.code}</span>
+      <span style="min-width:56px">${r.name||''}</span>
+      <span style="margin-left:auto;font-weight:600">${r.price==null?'—':(+r.price).toFixed(2)}</span>
+      <span style="color:${col};min-width:60px">${pct==null?'':(pct>=0?'+':'')+pct.toFixed(2)+'%'}</span>
+      ${badge}
+      <input type="number" step="0.01" placeholder="上限" value="${hi}" data-wid="${r.id}" data-k="hi" style="width:56px" onblur="wlSetAlert(this)">
+      <input type="number" step="0.01" placeholder="下限" value="${lo}" data-wid="${r.id}" data-k="lo" style="width:56px" onblur="wlSetAlert(this)">
+      <button class="del" onclick="wlClose(${r.id})" aria-label="移除自选" style="font-size:12px">✕</button>
+    </div>`;
+  }).join('') : '<div class="empty">暂无自选·先在信号/分析卡点＋自选</div>';
+  if(_wlTimer) clearInterval(_wlTimer);
+  _wlTimer=setInterval(async()=>{const lr=await apiFetch(`${API}/api/watchlist/live`);if(!lr._fail)_wlPatchLive(lr.data);}, live.in_session?30000:300000);
 }
+function _wlPatchLive(live){
+  if(!live||!live.rows)return;
+  const by={}; live.rows.forEach(r=>by[r.code]=r);
+  const af=document.activeElement;
+  document.querySelectorAll('#wlOut .wl-row').forEach(row=>{
+    const c=row.querySelector('[data-code]'); if(!c)return;
+    const r=by[c.dataset.code]; if(!r)return;
+    const pct=r.change_pct, col=pct==null?'':(pct>=0?'#E53935':'#16A34A');
+    row.style.border=r.alert_hit==='hi'?'2px solid #E53935':(r.alert_hit==='lo'?'2px solid #F59E0B':'1px solid #e5e7eb');
+    if(!af||af.tagName!=='INPUT'){
+      const spans=row.querySelectorAll('span');
+      if(spans[2]&&r.price!=null)spans[2].textContent=(+r.price).toFixed(2);
+      if(spans[3]){spans[3].style.color=col;spans[3].textContent=pct==null?'':(pct>=0?'+':'')+pct.toFixed(2)+'%';}
+    }
+  });
+}
+window.wlSetAlert=async function(inp){
+  const wid=inp.dataset.wid, k=inp.dataset.k;
+  const v=inp.value===''?null:parseFloat(inp.value);
+  const other=document.querySelector(`#wlOut input[data-wid="${wid}"][data-k="${k==='hi'?'lo':'hi'}"]`);
+  const ov=(other&&other.value==='')?null:parseFloat(other&&other.value);
+  const body=k==='hi'?{alert_hi:v,alert_lo:ov}:{alert_hi:ov,alert_lo:v};
+  const r=await apiFetch(`${API}/api/watchlist/${wid}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},{busy:''});
+  if(!r._fail)toast('提醒已更新','ok');
+};
 async function wlAdd(code,name,note){
+  const btn=code?null:document.getElementById('wlAdd');
   const body={code:code||document.getElementById('wlCode').value,name:name||document.getElementById('wlName').value,note:note||document.getElementById('wlNote').value};
-  if(!body.code)return;
-  await fetch(`${API}/api/watchlist`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if(!body.code){toast('请填代码','info');return;}
+  const r=await apiFetch(`${API}/api/watchlist`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},{btn,busy:'加入中…'});
+  if(r._fail)return;
   if(!code){document.getElementById('wlCode').value='';document.getElementById('wlName').value='';document.getElementById('wlNote').value='';}
+  toast('已加入自选 '+body.code,'ok');
   wlLoad();
 }
-window.wlClose=async function(id){await fetch(`${API}/api/watchlist/${id}`,{method:'DELETE'});wlLoad();};
-window.wlQuickAdd=async function(code,name){await wlAdd(code,name||'','');/*按钮快速加入不展开抽屉*/};
+window.wlClose=async function(id){await apiFetch(`${API}/api/watchlist/${id}`,{method:'DELETE'},{busy:''});wlLoad();};
+window.wlQuickAdd=async function(code,name){await wlAdd(code,name||'','');};
 document.getElementById('wlAdd').onclick=()=>wlAdd();
 document.getElementById('wlRefresh').onclick=wlLoad;
 
 // ---------------- 历史K线 ----------------
-function hkChart(dates, ohlc){
-  if(!dates||!dates.length) return '<div class="empty">无历史数据(先 /api/backtest/fetch 拉该code)</div>';
-  let closes=ohlc.map(x=>x.close); const [min,max]=_minmax(closes); closes=_downsample(closes,800);
-  const W=720,H=200,pad=8;
-  const X=i=>pad+i*(W-2*pad)/(closes.length-1), Y=v=>H-pad-(v-min)/(max-min||1)*(H-2*pad);
-  const pts=closes.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
-  return `<svg role="img" aria-label="价格折线" width="100%" viewBox="0 0 ${W} ${H}"><title>收盘价</title><polyline points="${pts}" fill="none" stroke="#3B82F6" stroke-width="1.5"/></svg>`;
+function hkChart(dates, ohlc, volume){
+  if(!dates||!dates.length||!ohlc||!ohlc.length) return '<div class="empty">无历史数据(先 /api/backtest/fetch 拉该code)</div>';
+  // 对齐降采样：超 400 根按 step 抽取，保留首末(ohlc/volume/dates 同步)
+  const MAX=400;
+  let d=dates, o=ohlc, v=volume||[];
+  if(o.length>MAX){
+    const step=Math.ceil(o.length/MAX);
+    const pick=arr=>{const out=[];for(let i=0;i<arr.length;i+=step)out.push(arr[i]);if(arr.length&&out[out.length-1]!==arr[arr.length-1])out.push(arr[arr.length-1]);return out;};
+    d=pick(dates);o=pick(ohlc);v=pick(volume||[]);
+  }
+  const n=o.length;
+  // MA20(本地算，收盘均值；<20 返 null)
+  const ma=[];for(let i=0;i<n;i++){if(i<19){ma.push(null);continue;}let s=0;for(let j=i-19;j<=i;j++)s+=o[j].close;ma.push(s/20);}
+  const W=760,padL=8,padR=8,padT=8,priceH=150,volH=42,gap=6;
+  const volTop=padT+priceH+gap, volBot=volTop+volH;
+  const xW=W-padL-padR;
+  const bw=Math.max(1,xW/(n||1)*0.7);
+  const X=i=>padL+i*xW/(n-1||1);
+  // 价格区间(含 MA)
+  let pMin=Infinity,pMax=-Infinity;
+  for(const b of o){if(b.high<pMin)pMin=b.high;if(b.low>pMax)pMax=b.low;}
+  for(const m of ma)if(m!=null){if(m<pMin)pMin=m;if(m>pMax)pMax=m;}
+  if(!isFinite(pMin)){pMin=0;pMax=1;}
+  const pY=vv=>padT+(priceH-(vv-pMin)/(pMax-pMin||1)*priceH);
+  // 量区间
+  let vMax=0;for(const vv of v)vMax=Math.max(vMax,Math.abs(vv)||0);vMax=vMax||1;
+  const vHh=vv=>(Math.abs(vv)||0)/vMax*volH;
+  // 蜡烛 + 量柱
+  let bodies='',vbars='';
+  for(let i=0;i<n;i++){
+    const b=o[i];const up=b.close>=b.open;const col=up?'#E53935':'#16A34A';const x=X(i);
+    const yO=pY(b.open),yC=pY(b.close);const top=Math.min(yO,yC),h=Math.max(1,Math.abs(yC-yO));
+    bodies+=`<line x1="${x.toFixed(1)}" y1="${pY(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${pY(b.low).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
+    bodies+=`<rect x="${(x-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${col}"/>`;
+    const vh=vHh(v[i]||0);vbars+=`<rect x="${(x-bw/2).toFixed(1)}" y="${(volBot-vh).toFixed(1)}" width="${bw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${col}" opacity="0.5"/>`;
+  }
+  // MA20 折线
+  let maPts='',started=false;for(let i=0;i<n;i++){if(ma[i]==null)continue;maPts+=(started?' ':'')+`${X(i).toFixed(1)},${pY(ma[i]).toFixed(1)}`;started=true;}
+  const maLine=started?`<polyline points="${maPts}" fill="none" stroke="#F59E0B" stroke-width="1.2"/>`:'';
+  // 稀疏日期(~5 个，MM-DD)
+  let xlabels='';const labelN=Math.min(5,n);for(let k=0;k<labelN;k++){const i=Math.floor(k*(n-1)/Math.max(1,labelN-1));xlabels+=`<text x="${X(i).toFixed(1)}" y="${(volBot+12).toFixed(1)}" fill="#5C6884" font-size="9" text-anchor="middle">${(d[i]||'').slice(5)}</text>`;}
+  // 最新价虚线
+  const lastY=pY(o[n-1].close);
+  const lastLine=`<line x1="${padL}" y1="${lastY.toFixed(1)}" x2="${(W-padR).toFixed(1)}" y2="${lastY.toFixed(1)}" stroke="#3B82F6" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.5"/>`;
+  return `<svg role="img" aria-label="日K蜡烛图" width="100%" viewBox="0 0 ${W} ${volBot+18}">
+    <title>日K蜡烛+成交量+MA20</title>${bodies}${maLine}${lastLine}
+    <line x1="${padL}" y1="${(padT+priceH).toFixed(1)}" x2="${(W-padR).toFixed(1)}" y2="${(padT+priceH).toFixed(1)}" stroke="#243049" stroke-width="0.5"/>${vbars}${xlabels}
+  </svg>`;
 }
 async function hkRun(code){
   code=code||document.getElementById('hkCode').value.trim();
   if(!code) return;
   document.getElementById('hkCode').value=code;
   const uni=document.getElementById('hkUni').value;
-  const r=await fetch(`${API}/api/history?code=${code}&universe=${uni}&start=20230101&end=20240601`).then(r=>r.json());
+  let start=document.getElementById('hkStart')?.value||'';
+  let end=document.getElementById('hkEnd')?.value||'';
+  if(!start||!end){const d=new Date();const f=x=>`${x.getFullYear()}${String(x.getMonth()+1).padStart(2,'0')}${String(x.getDate()).padStart(2,'0')}`;const d2=new Date(d);d2.setFullYear(d2.getFullYear()-1);start=start||f(d2);end=end||f(d);document.getElementById('hkStart').value=start;document.getElementById('hkEnd').value=end;_saveUI();}
+  const btn=document.getElementById('hkRun');
+  const r=await apiFetch(`${API}/api/history?code=${code}&universe=${uni}&start=${start}&end=${end}`,{},{btn,busy:'画图中…'});
+  if(r._fail){document.getElementById('hkOut').innerHTML='';return;}
   const d=r.data||{};
-  document.getElementById('hkOut').innerHTML=`<div>共 ${r.count??0} 根</div>${hkChart(d.dates,d.ohlc)}`;
+  document.getElementById('hkOut').innerHTML=`<div style="font-size:11px;color:var(--muted);margin-bottom:4px">${code} · ${uni} · 共 ${r.count??0} 根 · 涨红跌绿 · MA20(橙虚线为最新价)</div>${hkChart(d.dates,d.ohlc,d.volume)}`;
 }
 document.getElementById('hkRun').onclick=()=>hkRun();
 // 候选池/信号/优质/主力 表格行点击 → 跳历史回测 tab + 画历史
@@ -891,8 +1075,9 @@ function attachAc(id){
 async function bfRun(){
   const code=document.getElementById('bfCode').value.trim();
   if(!code){document.getElementById('bfMsg').textContent='填个股代码(如 sh600519)';return;}
-  document.getElementById('bfMsg').textContent='拉取财务摘要中...';
-  const r=await fetch(`${API}/api/buffett?code=${encodeURIComponent(code)}`).then(r=>r.json());
+  const btn=document.getElementById('bfRun');
+  const r=await apiFetch(`${API}/api/buffett?code=${encodeURIComponent(code)}`,{},{btn,msg:'bfMsg',busy:'拉取财务摘要中…'});
+  if(r._fail){document.getElementById('bfOut').innerHTML='';return;}
   const d=r.data||{};
   if(d.error){document.getElementById('bfMsg').textContent=d.error;document.getElementById('bfOut').innerHTML='';return;}
   const rt=d.ratios||{};
@@ -922,8 +1107,9 @@ document.getElementById('bfRun').onclick=bfRun;
 
 // 估值高+可买入 Top10
 async function bfTop(order='priority'){
-  document.getElementById('bfMsg').textContent='拉取 shortlist 并逐个财务分析中(约1-3分钟)...';
-  const r=await fetch(`${API}/api/buffett/top?n=10&order=${order}&min_turnover=500000000&shortlist_k=80`).then(r=>r.json());
+  const btn=document.getElementById('bfTop');
+  const r=await apiFetch(`${API}/api/buffett/top?n=10&order=${order}&min_turnover=500000000&shortlist_k=80`,{},{btn,msg:'bfMsg',busy:'逐个财务分析中(约1-3min)…'});
+  if(r._fail){document.getElementById('bfOut').innerHTML='';return;}
   const d=r.data||[];
   const label=order==='priority'?'最新选股池(巴菲特优先级)':order==='valuation_asc'?'估值低+可买入':'估值高+可买入';
   document.getElementById('bfMsg').textContent=`扫描 ${r.scanned} 只，返回 ${d.length} 只(${label})`;
@@ -955,7 +1141,8 @@ function smChannelsHtml(channels){
   }).join('');
 }
 async function smLoadChannels(){
-  const r=await fetch(`${API}/api/smart-money/channels`).then(r=>r.json());
+  const r=await apiFetch(`${API}/api/smart-money/channels`);
+  if(r._fail){document.getElementById('smChannels').innerHTML='';return;}
   document.getElementById('smChannels').innerHTML=smChannelsHtml(r.data);
   document.querySelectorAll('#smChannels [data-ch]').forEach(s=>s.onclick=()=>{
     smState.chip=s.dataset.ch; smRender();
@@ -997,10 +1184,11 @@ async function smRefreshChannel(ch){
   finally{ out.textContent=''; }
 }
 async function smLoad(){
-  document.getElementById('smLoading').textContent='加载中...';
+  document.getElementById('smLoading').textContent='加载中…';
   try{
     const days=(document.getElementById('smDays')||{}).value||7;
-    const r=await fetch(`${API}/api/smart-money/today?days=${days}`).then(r=>r.json());
+    const r=await apiFetch(`${API}/api/smart-money/today?days=${days}`,{},{msg:'smLoading',busy:'加载中…'});
+    if(r._fail){smState.raw=[];smState.chip='all';smState.q='';smRender();return;}
     smState.raw = r.data||[];
     const datestr = r.date?('数据日期 '+r.date+' · '):'';
     document.getElementById('ut').textContent=datestr+'更新于 '+(r.update_time||'');
@@ -1071,10 +1259,10 @@ function smRender(){
     const shown=sr.slice(0,CAP);
     const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
       ?"<span style='color:var(--muted);font-size:12px'>北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>":'';
-    const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额']];
+    const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额'],['net_intensity','强度']];
     ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
-    trs=shown.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${_amtUnit(x.channel,x.amount)}</td></tr>`).join('');
-    note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}，其余折叠防卡顿</div>`:'');
+    trs=shown.map(x=>{const ni=x.net_intensity;const niTxt=ni!=null?(ni*100).toFixed(2)+'%':'—';const niCol=ni==null?'var(--muted)':(ni>=0?'#16A34A':'#F59E0B');return `<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${_amtUnit(x.channel,x.amount)}</td><td class="num" style="color:${niCol}">${niTxt}</td></tr>`;}).join('');
+    note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}，其余折叠防卡顿</div>`:'')+'<div class="skipped">强度=主力净额/当日成交额(占当日成交比),操盘手跨市值可比维度,正绿负橙,机械归一化非买卖信号</div>';
   }
   document.getElementById('smOut').innerHTML = trs?(note+`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`):(note||'<div class="empty">无当日主力动向(先点"刷新主力动向"采集；东财被封通道显示未采集)</div>');
   document.querySelectorAll('#smOut th[data-sk]').forEach(th=>th.onclick=()=>{
@@ -1124,6 +1312,40 @@ async function smSeatsStocksLoad(){
   finally{ document.getElementById('smLoading').textContent=''; }
 }
 document.getElementById('smSeatsStocks').onclick=smSeatsStocksLoad;
+// 通达信个股主力深查(机构持股/融资融券/外内盘净流,文本表格预格式,非买卖信号)
+async function smTdxProbeLoad(){
+  const code=(document.getElementById('smTdxCode').value||'').trim();
+  const out=document.getElementById('smTdxOut');
+  if(!code){ out.innerHTML='<div class="empty">请输入代码</div>'; return; }
+  document.getElementById('smTdxLoading').textContent='深查中(主力追踪+融资融券+实时外内盘,约2-5s)...';
+  out.innerHTML='';
+  const esc=s=>String(s||'').replace(/</g,'&lt;');
+  try{
+    const [qr,mr,lr]=await Promise.all([
+      fetch(`${API}/api/tdx/quote?code=${encodeURIComponent(code)}`).then(r=>r.json()),
+      fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent('主力追踪')}`).then(r=>r.json()),
+      fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent('龙虎榜单')}`).then(r=>r.json()),
+    ]);
+    const q=(qr.data)||{}, mc=(mr.data)||{}, lc=(lr.data)||{};
+    let headHtml='';
+    if(q.price!=null){
+      const b=q.b_vol, s=q.s_vol;
+      const net=(b!=null&&s!=null)?(b-s)*(q.price):null;
+      const netCol=net==null?'var(--muted)':(net>=0?'#16A34A':'#F59E0B');
+      headHtml=`<div style="font-size:13px">现价 <b>${q.price}</b> · 外盘(主动买) ${fmtNum(b)} · 内盘(主动卖) ${fmtNum(s)} · 净流代理(外-内)×价 <b style="color:${netCol}">${net!=null?fmtNum(net)+'元':'—'}</b></div>
+        <div style="font-size:11px;color:var(--muted)">外内盘=当日主动买卖量代理,非大单主力资金流(后者见个股分析卡 behavior 序列)</div>`;
+    }else{ headHtml='<div class="empty">无实时行情(代码非法或服务器不可用)</div>'; }
+    out.innerHTML=`
+      <div class="card-t" style="font-size:13px">通达信主力深查 ${code}</div>
+      ${headHtml}
+      ${mc.ok?`<div class="card-t" style="margin-top:10px;font-size:13px">主力追踪(机构持股/北向/股东户数)</div><pre style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto">${esc(mc.content)}</pre>`:`<div class="skipped">主力追踪: ${esc(mc.err)||'无'}</div>`}
+      ${lc.ok?`<div class="card-t" style="margin-top:10px;font-size:13px">龙虎榜单(融资融券/资金流向/异动/大宗交易)</div><pre style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto">${esc(lc.content)}</pre>`:`<div class="skipped">龙虎榜单: ${esc(lc.err)||'无'}</div>`}
+      <div class="disc" style="margin-top:6px">通达信个股主力数据机械汇总,非买卖信号,盈亏自负</div>`;
+  }catch(e){ out.innerHTML='<div class="empty">深查失败: '+e+'</div>'; }
+  finally{ document.getElementById('smTdxLoading').textContent=''; }
+}
+document.getElementById('smTdxProbe').onclick=smTdxProbeLoad;
+document.getElementById('smTdxCode').onkeydown=e=>{if(e.key==='Enter')smTdxProbeLoad();};
 // smart tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------
@@ -1138,9 +1360,11 @@ async function qsLoad(){
   const board=document.getElementById('qsBoard').value;
   const corr=document.getElementById('qsCorr').value;
   const btn=document.getElementById('qsRun');
-  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett/历史/信号较慢，首次约几十秒；5分钟内重复会缓存秒回)...';
+  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett财报+历史+信号较慢，首次约几十秒；5分钟内重复缓存秒回)...';
+  const ctl=new AbortController();
+  const to=setTimeout(()=>ctl.abort(),75000);  // 75s硬超时:buffett财报网络阻塞或未拉历史时不再无限转
   try{
-    const r=await fetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`).then(r=>r.json());
+    const r=await fetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`,{signal:ctl.signal}).then(r=>r.json());
     const d=r.data||{};
     const dt=((Date.now()-t0)/1000).toFixed(1);
     document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
@@ -1150,8 +1374,8 @@ async function qsLoad(){
       Object.entries(ds).map(([k,v])=>{const ok=(v||'').startsWith('ok');return `<span style="color:${ok?'#16A34A':'#F59E0B'};font-size:12px;margin-right:8px" title="${v}">●口径${k}: ${(v||'').slice(0,30)}</span>`;}).join('');
     qsState.raw = d;
     qsRender();
-  }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时: '+e; }
-  finally{ btn.disabled=false; }
+  }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时(>75s，buffett财报网络阻塞或未拉历史，稍后重试5分钟内缓存命中秒回): '+e; }
+  finally{ clearTimeout(to); btn.disabled=false; }
 }
 function _qscmp(a,b,k,dir){
   const va=a[k],vb=b[k];
@@ -1202,6 +1426,75 @@ document.getElementById('qsCombo').onchange=qsLoad;
 // ---------------- 个股深度分析卡 ----------------
 function _badge(v,ok='#16A34A'){return `<span style="color:${ok};font-size:12px">${v}</span>`;}
 function _kv(k,v){return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed var(--border)"><span style="color:var(--muted)">${k}</span><span class="num">${v??'—'}</span></div>`;}
+function _renderChip(chip){
+  if(!chip||chip.need_history){
+    return `<div class="card-t" style="margin-top:12px;font-size:13px">筹码分布(移动成本·需历史)</div>
+      <div style="font-size:12px;color:var(--muted)">需先 /api/backtest/fetch 拉该股历史日线</div>`;
+  }
+  const dist=chip.distribution||[];
+  const maxPct=Math.max(...dist.map(x=>x.pct||0),0.001);
+  const spot=chip.spot;
+  const bars=dist.map(x=>{
+    const h=Math.round((x.pct/maxPct)*56);
+    const color=(x.price<spot)?'#16A34A':'#F59E0B';
+    return `<div title="${x.price} 占比${(x.pct*100).toFixed(1)}%" style="flex:1;min-width:6px;height:${h+2}px;background:${color};border-radius:2px 2px 0 0;align-self:flex-end"></div>`;
+  }).join('');
+  const srcTxt=chip.spot_source==='daily_close'?'现价取末日收盘':(chip.spot_source==='spot'?'现价取spot快照':'参数现价');
+  return `<div class="card-t" style="margin-top:12px;font-size:13px">筹码分布(移动成本·${chip.n_days}日)</div>
+    <div style="display:flex;align-items:flex-end;gap:1px;height:62px;border-bottom:1px solid var(--border);padding:2px 0">${bars}</div>
+    <div style="font-size:12px;margin-top:4px">
+      ${_kv('平均成本',chip.avg_cost!=null?(+chip.avg_cost).toFixed(2):'—')}
+      ${_kv('现价',chip.spot!=null?(+chip.spot).toFixed(2):'—')}
+      ${_kv('获利盘',chip.profit_ratio!=null?(chip.profit_ratio*100).toFixed(1)+'%':'—')}
+      ${_kv('套牢盘',chip.loss_ratio!=null?(chip.loss_ratio*100).toFixed(1)+'%':'—')}
+      ${_kv('集中度',chip.chip_concentration!=null?chip.chip_concentration.toFixed(3):'—')}
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:2px">绿=获利盘(低于现价) 橙=套牢盘 · ${srcTxt} · 移动成本机械统计非支撑压力预测</div>`;
+}
+function _renderBehavior(b){
+  if(!b||!b.channels||!Object.keys(b.channels).length){
+    return `<div class="card-t" style="margin-top:10px;font-size:13px">主力行为序列(连续流入/边际)</div><div style="font-size:12px;color:var(--muted)">${(b&&b.note)||'无主力动向记录(需先采集)'}</div>`;
+  }
+  // 每日净额时序 bar: 正(绿)向上·负(橙)向下,容器中线为零基线代理
+  const _bars=(daily)=>{
+    const vals=(daily||[]).map(x=>x.amount||0);
+    if(vals.length<2) return '<span style="color:var(--muted);font-size:11px">数据不足</span>';
+    const mx=Math.max(...vals.map(Math.abs),1);
+    return `<div style="display:inline-flex;align-items:center;gap:1px;height:22px;border-bottom:1px solid var(--border)">${vals.map(v=>{
+      const h=Math.round(Math.abs(v)/mx*9)+1;
+      const up=v>=0;
+      return `<div title="${v.toFixed(0)}元" style="width:3px;height:${h}px;background:${up?'#16A34A':'#F59E0B'};align-self:${up?'flex-end':'flex-start'}"></div>`;
+    }).join('')}</div>`;
+  };
+  const chRows=Object.entries(b.channels).map(([ch,x])=>{
+    const streak=x.streak_inflow>0?`<span style="color:#16A34A">连续净流入${x.streak_inflow}日</span>`:(x.streak_outflow>0?`<span style="color:#F59E0B">连续净流出${x.streak_outflow}日</span>`:'<span style="color:var(--muted)">无连续</span>');
+    const accel=x.margin_accel==null?'—':((+x.margin_accel)>0?'<span style="color:#16A34A">加速</span>':'<span style="color:#F59E0B">减速</span>');
+    const src=(x.source||'')?` <span style="color:var(--muted);font-size:10px">${x.source}</span>`:'';
+    return `<tr><td>${ch}${src}</td><td>${streak}</td><td class="num">${x.cum_inflow!=null?fmtNum(x.cum_inflow):'—'}</td><td class="num">${accel}</td><td class="num">${x.n_days||0}</td><td>${_bars(x.daily)}</td></tr>`;
+  }).join('');
+  return `<div class="card-t" style="margin-top:10px;font-size:13px">主力行为序列(近${b.days}日·连续/边际)</div>
+    <table><thead><tr><th>通道</th><th>连续性</th><th class="num">累计净额(元)</th><th class="num">边际</th><th class="num">天数</th><th>每日净额时序</th></tr></thead><tbody>${chRows}</tbody></table>
+    <div style="font-size:11px;color:var(--muted);margin-top:2px">绿=净流入·橙=净流出 · ${b.daily&&b.daily.length?'':(b.note||'')}主力行为序列机械统计,非买卖信号</div>`;
+}
+function _renderTdxInfo(d, code){
+  const cats=['龙虎榜单','主力追踪','股东研究','财务分析','股本结构','研究报告','业内点评','分红扩股','高层治理'];
+  const cur=(d&&d.category)||'龙虎榜单';
+  const opt=cats.map(c=>`<option ${c===cur?'selected':''}>${c}</option>`).join('');
+  const txt=((d&&d.content)||(d&&d.err)||'无').toString().replace(/</g,'&lt;');
+  return `<div class="card-t" style="margin-top:12px;font-size:13px">公司信息(通达信直取) <select id="tdxCat" class="btn ghost" style="font-size:12px;margin-left:8px">${opt}</select></div>
+    <div style="font-size:11px;color:var(--muted)">通达信"龙虎榜单"实含【融资融券/资金流向/异动/大宗交易】,非游资席位龙虎榜。机械汇总非买卖信号</div>
+    <pre id="tdxInfoPre" style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto;margin-top:6px">${txt}</pre>`;
+}
+async function _tdxInfoLoad(code, cat){
+  const el=document.getElementById('tdxInfoPre');
+  if(!el) return;
+  el.textContent='加载中...';
+  try{
+    const ti=await fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent(cat)}`).then(r=>r.json());
+    const d=ti.data||{};
+    el.textContent=((d.content)||(d.err)||'无').toString();
+  }catch(e){ el.textContent='加载失败: '+e; }
+}
 async function anRun(){
   const code=(document.getElementById('anCode').value||'').trim();
   if(!code){document.getElementById('anMsg').textContent='请输入代码';return;}
@@ -1250,8 +1543,21 @@ async function anRun(){
       <table style="margin-top:6px"><thead><tr><th>参考维度</th><th>方向</th><th>详情</th></tr></thead><tbody>${olRows}</tbody></table>
       <div style="font-size:11px;color:var(--muted);margin-top:6px">${ow.note||'多因子机械信号聚合预判,非买卖建议'}</div>
     </div>`;
+    // 筹码/行为/公司信息 三路并行(apiFetch 自带兜底返 _fail；渲染各自 try 保隔离)
+    const _chipFail='<div class="card-t" style="margin-top:12px;font-size:13px">筹码分布(移动成本)</div><div style="font-size:12px;color:var(--muted)">加载失败</div>';
+    const _behFail='<div class="card-t" style="margin-top:10px;font-size:13px">主力行为序列</div><div style="font-size:12px;color:var(--muted)">加载失败</div>';
+    const _tdxFail='<div class="card-t" style="margin-top:12px;font-size:13px">公司信息(通达信)</div><div style="font-size:12px;color:var(--muted)">加载失败</div>';
+    const [chipR, behR, tdxR] = await Promise.all([
+      apiFetch(`${API}/api/chip?code=${encodeURIComponent(code)}&window=60`),
+      apiFetch(`${API}/api/smart-money/behavior?code=${encodeURIComponent(code)}&days=30`),
+      apiFetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent('龙虎榜单')}`),
+    ]);
+    let chipHtml,behaviorHtml,tdxInfoHtml;
+    try{ chipHtml=(chipR&&!chipR._fail)?_renderChip(chipR.data):_chipFail; }catch(e){ chipHtml=_chipFail; }
+    try{ behaviorHtml=(behR&&!behR._fail)?_renderBehavior(behR.data):_behFail; }catch(e){ behaviorHtml=_behFail; }
+    try{ tdxInfoHtml=(tdxR&&!tdxR._fail)?_renderTdxInfo(tdxR.data,code):_tdxFail; }catch(e){ tdxInfoHtml=_tdxFail; }
     out.innerHTML=`
-      <div class="card-t">${cardName} ${code} <span style="margin-left:12px">综合评分: <b style="color:${scoreColor}">${score??'—'}</b>/100 | 研究优先级: ${_badge(priority)} | 估值: ${_badge(val,'#3B82F6')}</span></div>
+      <div class="card-t">${cardName} ${code} ${d.latest_price!=null?`<span style="margin-left:8px;color:#1E3A5F">现价 <b>${d.latest_price}</b></span>`:''} <span style="margin-left:12px">综合评分: <b style="color:${scoreColor}">${score??'—'}</b>/100 | 研究优先级: ${_badge(priority)} | 估值: ${_badge(val,'#3B82F6')}</span></div>
       ${olHtml}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">
         <div><div class="card-t" style="font-size:13px">基本面质量</div>
@@ -1280,7 +1586,13 @@ async function anRun(){
       <table><thead><tr><th>日期</th><th>评级</th><th>标题</th></tr></thead><tbody>${repRows}</tbody></table>
       <div class="card-t" style="margin-top:12px;font-size:13px">技术信号(需先 /api/backtest/fetch 拉该股历史)</div>
       <table><thead><tr><th>代码</th><th>触发信号</th></tr></thead><tbody>${sigHtml}</tbody></table>
+      ${chipHtml}
+      ${behaviorHtml}
+      ${tdxInfoHtml}
     `;
+    // 公司信息类别切换(重取该类别文本)
+    const _tdxCat=document.getElementById('tdxCat');
+    if(_tdxCat) _tdxCat.onchange=(e)=>_tdxInfoLoad(code,e.target.value);
   }catch(e){ msg.textContent='加载失败: '+e; }
 }
 document.getElementById('anRun').onclick=anRun;

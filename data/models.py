@@ -222,7 +222,9 @@ CREATE TABLE IF NOT EXISTS watchlist (
     code TEXT,
     name TEXT,
     note TEXT,
-    added_ts TEXT
+    added_ts TEXT,
+    alert_hi REAL,
+    alert_lo REAL
 );
 
 -- 历史日线(前复权 qfq)，供回测/因子评价
