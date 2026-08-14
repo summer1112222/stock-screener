@@ -20,7 +20,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uvicorn api.server:app --reload --port 8000
 
 # Docker（推荐；Dockerfile 配了清华 PyPI 镜像，否则国内 pip 下载仅 17kB/s）
-docker compose up --build -d            # 重建并后台启动
+#   部署优先用 deploy.sh(跑测试→重建→健康检查→模块自检,抓镜像漂移)而非手动 docker cp:
+#   bash deploy.sh            # 测试+重建+启动+健康检查
+#   bash deploy.sh --skip-test # 跳过测试(快)
+docker compose up --build -d            # 重建并后台启动(deploy.sh 内部即此+校验)
 docker compose down                     # 停止(保留数据卷)
 docker compose down -v                  # 连同 SQLite 卷一起清
 
