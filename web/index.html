@@ -790,7 +790,7 @@ async function pfAdd(){
   toast('已记录持仓 '+body.code,'ok');
   pfLoad();
 }
-window.pfClose=async function(id){await fetch(`${API}/api/portfolio/${id}`,{method:'DELETE'});pfLoad();};
+window.pfClose=async function(id){await fetch(`${API}/api/portfolio/${id}`,{method:'DELETE',signal:AbortSignal.timeout(10000)});pfLoad();};
 window.pfEditAlert=function(id){
   const cell=document.getElementById('pfAlert-'+id);
   if(!cell)return;
@@ -973,7 +973,7 @@ document.addEventListener('click',async e=>{
   exp.innerHTML='<td colspan="99" class="bd-card">加载板块详情...</td>';
   tr.after(exp); tr.classList.add('open');
   const cat=document.getElementById('category').value;
-  let r; try{ r=await fetch(`${API}/api/board-stocks?board=${encodeURIComponent(board)}&category=${encodeURIComponent(cat)}`).then(r=>r.json()); }
+  let r; try{ r=await fetch(`${API}/api/board-stocks?board=${encodeURIComponent(board)}&category=${encodeURIComponent(cat)}`,{signal:AbortSignal.timeout(30000)}).then(r=>r.json()); }
   catch(err){ exp.querySelector('.bd-card').innerHTML='<span style="color:var(--warn)">请求失败</span>'; return; }
   renderBoardCard(exp.querySelector('.bd-card'), r.data||{}, board);
 });
@@ -1037,7 +1037,7 @@ function attachAc(id){
     if(q.length<1){hide();return;}
     t=setTimeout(async()=>{
       try{
-        const r=await fetch(`${API}/api/stock-search?q=${encodeURIComponent(q)}&limit=10`).then(r=>r.json());
+        const r=await fetch(`${API}/api/stock-search?q=${encodeURIComponent(q)}&limit=10`,{signal:AbortSignal.timeout(8000)}).then(r=>r.json());
         const rows=(r.data||{}).rows||[]; if(!rows.length){hide();return;}
         hide();
         box=document.createElement('div'); box.className='ac-box';
@@ -1175,7 +1175,7 @@ async function smRefreshChannel(ch){
   const out=document.getElementById('smLoading');
   out.textContent=`刷新 ${ch} 中...`;
   try{
-    const r=await fetch(`${API}/api/smart-money/refresh?channel=${encodeURIComponent(ch)}`,{method:'POST'}).then(r=>r.json());
+    const r=await fetch(`${API}/api/smart-money/refresh?channel=${encodeURIComponent(ch)}`,{method:'POST',signal:AbortSignal.timeout(60000)}).then(r=>r.json());
     const d=(r&&r.data)||{};
     const chRep=d.channels&&d.channels[ch];
     document.getElementById('smMsg').textContent=`${ch}: ${chRep?(chRep.rows+'行'+(chRep.ok?'':(chRep.skipped?'跳过':'失败'))):'无响应'}`+(d.partial?' (单通道,未更全局时间)':'');
@@ -1282,7 +1282,7 @@ async function smSeatsLoad(){
   const out=document.getElementById('smOut');
   document.getElementById('smLoading').textContent='游资营业部统计加载中...';
   try{
-    const r=await fetch(`${API}/api/smart-money/seats?period=${encodeURIComponent(period)}`).then(r=>r.json());
+    const r=await fetch(`${API}/api/smart-money/seats?period=${encodeURIComponent(period)}`,{signal:AbortSignal.timeout(30000)}).then(r=>r.json());
     const rows=r.data||[];
     document.getElementById('ut').textContent='游资统计 '+period+' · 更新于 '+(r.update_time||'');
     if(r.error||!rows.length){ out.innerHTML='<div class="empty">'+(r.error||('无游资营业部数据('+period+')'))+'</div>'; return; }
@@ -1300,7 +1300,7 @@ async function smSeatsStocksLoad(){
   const out=document.getElementById('smOut');
   document.getElementById('smLoading').textContent='游资追逐个股加载中(逐股取席位,约10-30s)...';
   try{
-    const r=await fetch(`${API}/api/smart-money/seats-stocks`).then(r=>r.json());
+    const r=await fetch(`${API}/api/smart-money/seats-stocks`,{signal:AbortSignal.timeout(90000)}).then(r=>r.json());
     const rows=r.data||[];
     document.getElementById('ut').textContent='游资追逐个股 '+(r.date||'')+' · 更新于 '+(r.update_time||'');
     if(r.error||!rows.length){ out.innerHTML='<div class="empty">'+(r.error||('无数据'))+'</div>'; return; }
@@ -1490,7 +1490,7 @@ async function _tdxInfoLoad(code, cat){
   if(!el) return;
   el.textContent='加载中...';
   try{
-    const ti=await fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent(cat)}`).then(r=>r.json());
+    const ti=await fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent(cat)}`,{signal:AbortSignal.timeout(15000)}).then(r=>r.json());
     const d=ti.data||{};
     el.textContent=((d.content)||(d.err)||'无').toString();
   }catch(e){ el.textContent='加载失败: '+e; }
@@ -1501,7 +1501,7 @@ async function anRun(){
   const out=document.getElementById('anOut'); const msg=document.getElementById('anMsg');
   msg.textContent='分析中(buffett财报/研报/信号较慢,约10-30s)...'; out.innerHTML='';
   try{
-    const r=await fetch(`${API}/api/stock-analysis?code=${encodeURIComponent(code)}`).then(r=>r.json());
+    const r=await fetch(`${API}/api/stock-analysis?code=${encodeURIComponent(code)}`,{signal:AbortSignal.timeout(60000)}).then(r=>r.json());
     const d=r.data||{}; msg.textContent='更新于 '+(r.update_time||'');
     const f=d.fundamentals||{}; const fr=f.ratios||{};
     const sm=d.smart_money||{}; const rs=d.research||{}; const cm=d.comments||{}; const sig=d.signals;
@@ -1607,7 +1607,7 @@ document.getElementById('anWatch').onclick=async function(){
 const _HCOLOR={green:'#16A34A',yellow:'#F59E0B',red:'#5C6884'};
 async function healthLoad(){
   try{
-    const r=await fetch(`${API}/api/health`).then(r=>r.json());
+    const r=await fetch(`${API}/api/health`,{signal:AbortSignal.timeout(8000)}).then(r=>r.json());
     const d=r.data||{};
     document.getElementById('hbTime').textContent='数据 '+(r.update_time||'…');
     const ov=d.overall||'red';
@@ -1645,7 +1645,8 @@ function toggleHealth(){
 document.getElementById('hbDetail').onclick=toggleHealth;
 document.getElementById('hbRefresh').onclick=async function(){
   const btn=this; btn.disabled=true; btn.textContent='采集中…';
-  try{ await fetch(`${API}/api/smart-money/refresh`,{method:'POST'}); await fetch(`${API}/api/refresh`,{method:'POST'}); }
+  try{ await fetch(`${API}/api/smart-money/refresh`,{method:'POST',signal:AbortSignal.timeout(180000)}); await fetch(`${API}/api/refresh`,{method:'POST',signal:AbortSignal.timeout(180000)}); }
+  catch(e){ toast('采集超时(>180s),部分通道可能未完成,查看健康面板','err'); }
   finally{ btn.disabled=false; btn.textContent='手动刷新采集'; await healthLoad(); }
 };
 setInterval(healthLoad,60000);
@@ -1663,7 +1664,7 @@ function miniSpark(vals,color='#3B82F6'){
 }
 async function marketLoad(){
   try{
-    const r=await fetch(`${API}/api/market`).then(r=>r.json());
+    const r=await fetch(`${API}/api/market`,{signal:AbortSignal.timeout(10000)}).then(r=>r.json());
     const d=(r&&r.data)||{};
     const lat=d.latest;
     if(!lat){
