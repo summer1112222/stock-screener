@@ -270,6 +270,41 @@ def test_refine_quote_empty_no_crash():
     assert out[0]["code"] == "000001"  # pool 不变
 
 
+def test_refine_nan_fields_to_none():
+    # 盘口字段 NaN 经 _to_float→None，防 allow_nan=False 500
+    pool = [{"code": "000001", "name": "x", "resonance": 20.0, "hits": 2, "dim_scores": {}}]
+    import pandas as pd
+    df = pd.DataFrame([{"code": "000001"}])
+    nan = float("nan")
+
+    def fake_get_quote(codes):
+        return [{"code": "000001", "bid_vol1": nan, "bid_vol2": nan, "bid_vol3": nan,
+                 "bid_vol4": nan, "bid_vol5": nan, "ask_vol1": nan, "ask_vol2": nan,
+                 "ask_vol3": nan, "ask_vol4": nan, "ask_vol5": nan,
+                 "b_vol": nan, "s_vol": nan}]
+
+    def _assert_no_nan(d, keys):
+        for k in keys:
+            v = d[k]
+            assert v is None or (isinstance(v, (int, float)) and not (isinstance(v, float) and v != v)), \
+                f"{k}={v} is NaN"
+
+    with patch("data.pytdx_client.get_quote", side_effect=fake_get_quote), \
+         patch("backtest.quality._is_in_session", return_value=True):
+        out, status, qmap = quality._refine_by_quote(list(pool), df, in_session=True)
+    # bid_sum: sum((nan or 0)...) → nan is truthy so nan or 0 = nan → bid_sum=nan
+    # tot=nan → tot>0 is False → depths[c]=None, brs[c]=None
+    # b_vol=nan,s_vol=nan: nan and nan and (nan!=0=True)→True → iors[c]=nan/nan=nan
+    # _to_float(nan)→None (pd.isna 守护)；_to_float(None)→None
+    # lpct: depths 全 None→排除→lpct.get(c,0.0)=0.0→liquidity_pct=0.0
+    q = out[0]["quote"]
+    assert q["liquidity_depth"] is None   # tot>0 False→None
+    assert q["bid_ask_ratio"] is None      # tot>0 False→None
+    assert q["inner_outer_ratio"] is None  # nan→_to_float None
+    _assert_no_nan(q, ["liquidity_depth", "bid_ask_ratio", "inner_outer_ratio",
+                       "liquidity_pct"])
+
+
 def test_api_quality_passes_refine_params():
     from fastapi.testclient import TestClient
     from api import server

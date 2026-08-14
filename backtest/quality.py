@@ -578,15 +578,18 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     main.sort(key=lambda x: x["resonance"] or 0, reverse=True)
 
     # 盘口精排阶段（仅个股 + refine）
-    refine_status = "skip(refine=False)"
+    if not refine:
+        refine_status = "skip(refine=False)"
+    elif universe != "stock":
+        refine_status = "skip(ETF不精排)"
+    else:
+        refine_status = "skip(无可精排候选)"  # stock+refine 但 main 空
     quote_by_code = {}
     if universe == "stock" and refine and main:
         pool = main[:refine_pool]
         pool, refine_status, quote_by_code = _refine_by_quote(
             pool, df, in_session=in_session)
         main = pool  # 精排重排后的 top refine_pool 直接作为组合层输入
-    elif universe != "stock":
-        refine_status = "skip(ETF不精排)"
 
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)
