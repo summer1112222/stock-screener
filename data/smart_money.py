@@ -9,7 +9,11 @@ NaN→None：出口统一经 _clean/_to_float 处理，确保 float NaN→None�
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, date as _date
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -261,12 +265,20 @@ def _parse_cn_amount(v) -> float | None:
     return -f if neg else f
 
 
+# hexin-v token 模块级缓存(10min 有效,实测期内对全分页有效;akshare 每页重算是保守)
+_THS_TOKEN = {"v": None, "ts": 0.0}
+_THS_TOKEN_TTL = 600
+
+
 def _fetch_ths_individual_fund_flow(max_pages: int = 120) -> tuple[list[dict], bool, str]:
     """同花顺个股资金流(即时净额)。绕过 akshare stock_fund_flow_individual 的列名
     bug（akshare 硬编 10 列，THS 即时表列数/表头已变致 ValueError）。直接取 THS ajax
     分页，read_html 按表头取 '股票代码'/'股票简称'/'净额(元)'。hexin-v token 复用
-    akshare 内部 ths.js + py_mini_racer（每页重算，与 akshare 一致）。东财被封时本路
-    是资金流通道的唯一可靠源。"""
+    akshare 内部 ths.js + py_mini_racer。
+
+    性能:token 模块级缓存(TTL 10min,失效 HTTP 非 200 时 force 重算重试),分页
+    ThreadPool 8 并发——120 页串行+每页重算 token ~70s → 并发+缓存 ~5-8s。
+    东财被封时本路是资金流通道的唯一可靠源。"""
     if not _AK_OK:
         return [], False, _AK_ERR
     try:
@@ -278,17 +290,24 @@ def _fetch_ths_individual_fund_flow(max_pages: int = 120) -> tuple[list[dict], b
         return [], False, f"资金流: THS 依赖缺失 {e}"
     base = ("http://data.10jqka.com.cn/funds/ggzjl/field/zdf/"
             "order/desc/page/{}/ajax/1/free/1/")
+    _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+           "AppleWebKit/537.36 (KHTML, like Gecko) "
+           "Chrome/90.0.4430.85 Safari/537.36")
 
-    def _token() -> str:
+    def _token(force: bool = False) -> str:
+        now = time.time()
+        if not force and _THS_TOKEN["v"] and now - _THS_TOKEN["ts"] < _THS_TOKEN_TTL:
+            return _THS_TOKEN["v"]
         js = py_mini_racer.MiniRacer()
         js.eval(_get_file_content_ths("ths.js"))
-        return js.call("v")
+        v = js.call("v")
+        _THS_TOKEN["v"] = v
+        _THS_TOKEN["ts"] = now
+        return v
 
-    def _headers():
-        return {"hexin-v": _token(),
-                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                               "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/90.0.4430.85 Safari/537.36"),
+    def _headers(force: bool = False):
+        return {"hexin-v": _token(force),
+                "User-Agent": _UA,
                 "Referer": "http://data.10jqka.com.cn/funds/hyzjl/",
                 "X-Requested-With": "XMLHttpRequest"}
     try:
@@ -296,7 +315,13 @@ def _fetch_ths_individual_fund_flow(max_pages: int = 120) -> tuple[list[dict], b
     except Exception as e:
         return [], False, f"资金流: THS 首页请求失败 {e}"
     if r0.status_code != 200:
-        return [], False, f"资金流: THS 首页 HTTP {r0.status_code}"
+        # token 可能失效,force 重算重试一次
+        try:
+            r0 = requests.get(base.format(1), headers=_headers(force=True), timeout=15)
+        except Exception:
+            pass
+        if r0.status_code != 200:
+            return [], False, f"资金流: THS 首页 HTTP {r0.status_code}"
     import re
     m = re.search(r'class="page_info"[^>]*>(\d+)/(\d+)', r0.text)
     total_pages = int(m.group(2)) if m else 1
@@ -304,7 +329,9 @@ def _fetch_ths_individual_fund_flow(max_pages: int = 120) -> tuple[list[dict], b
 
     def _rows(text):
         try:
-            t = pd.read_html(StringIO(text))[0]
+            # pandas 3.0 默认 read_html flavor 走 bs4→html5lib(未装即 ImportError)，
+            # 显式 flavor='lxml'(lxml 已 pin requirements)。否则资金流通道静默返回[]。
+            t = pd.read_html(StringIO(text), flavor='lxml')[0]
         except Exception:
             return []
         cols = set(t.columns)
@@ -333,14 +360,18 @@ def _fetch_ths_individual_fund_flow(max_pages: int = 120) -> tuple[list[dict], b
         return out
 
     recs = _rows(r0.text)
-    for page in range(2, total_pages + 1):
-        try:
-            rp = requests.get(base.format(page), headers=_headers(), timeout=15)
-            if rp.status_code != 200:
-                break
-            recs.extend(_rows(rp.text))
-        except Exception:
-            break   # 单页失败不丢全量
+    # 分页并发(8 worker):单页失败返空不丢全量(与原串行 break 等价容错)
+    if total_pages >= 2:
+        def _fetch_page(p):
+            try:
+                rp = requests.get(base.format(p), headers=_headers(), timeout=15)
+                return _rows(rp.text) if rp.status_code == 200 else []
+            except Exception:
+                return []
+        pages = list(range(2, total_pages + 1))
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for batch in ex.map(_fetch_page, pages):
+                recs.extend(batch)
     if not recs:
         return [], False, "资金流: THS 解析为空(表头/结构再变?)"
     return recs, True, ""
@@ -482,37 +513,100 @@ def collect_northbound(date: str) -> tuple[list[dict], bool, str]:
 # ------------------------------------------------------------------
 # 龙虎榜（逐股×每席位）
 # ------------------------------------------------------------------
-def collect_dragon_tiger(date: str) -> tuple[list[dict], bool, str]:
-    """龙虎榜（个股级，东财 stock_lhdetail_em）。
-
-    akshare 1.18 起 start_date/end_date 要无破折号 YYYYMMDD（旧版带破折号会
-    内部 NoneType 崩）。席位明细 stock_lhb_stock_detail_em 现需 date+flag 逐股
-    2 次请求×近百股，东财反爬下太慢且易失败；改用主榜单"龙虎榜净买额"出个股级
-    记录（上榜即主力动向），可靠且快。当日无上榜票不算错。"""
-    if not _AK_OK:
-        return [], False, _AK_ERR
-    dash = date.replace("-", "")
+def _fs_code_norm(c) -> str:
+    """finshare fs_code '000004.SZ'/'SH600519'/'sz000004' → 6 位纯代码
+    （与 stock_spot 一致，read_html 不丢前导零）。"""
+    c = str(c or "").strip()
+    if "." in c:
+        c = c.split(".")[0]
+    if c[:2].lower() in ("sh", "sz", "bj"):
+        c = c[2:]
     try:
-        stocks = ak.stock_lhb_detail_em(start_date=dash, end_date=dash)
+        return str(int(float(c))).zfill(6)
+    except (ValueError, TypeError):
+        return c.zfill(6) if c else ""
+
+
+def _fetch_finshare_lhb(date: str) -> tuple[list[dict], bool, str]:
+    """finshare 龙虎榜备援：fs.get_lhb() 取近期多日榜单，按 trade_date 过滤当日。
+
+    不走东财 push2 被封端点（实测可用），净买/买/卖额拆分比东财主榜单更全。
+    finshare 未装或失败→优雅失败标灰不崩；name 列缺失→留空，下游 stock_spot
+    按 code 补。返回 (records, ok, err)，ok=True 且空=当日无上榜不算错。"""
+    try:
+        import finshare as fs
     except Exception as e:
-        _set_status("龙虎榜", False, "", _friendly_err("龙虎榜", e))
-        return [], False, _friendly_err("龙虎榜", e)
-    if stocks is None or stocks.empty:
+        return [], False, f"龙虎榜: finshare 未安装 {e}"
+    try:
+        df = fs.get_lhb()
+    except Exception as e:
+        return [], False, f"龙虎榜: finshare get_lhb 失败 {_friendly_err('龙虎榜', e)}"
+    if df is None or getattr(df, "empty", True):
+        return [], True, ""   # 无数据当无上榜
+    want = _norm_date(date) or date.replace("-", "")
+    if "trade_date" in df.columns:
+        df = df[df["trade_date"].apply(lambda v: _norm_date(v) == want)]
+    if df.empty:
+        return [], True, ""   # 当日无上榜
+    out = []
+    for _, s in df.iterrows():
+        code = _fs_code_norm(s.get("fs_code"))
+        amt = _to_float(s.get("net_buy_amount"))
+        out.append(_rec(date, code, None, "股票", "龙虎榜",
+                        s.get("reason") or "龙虎榜", "上榜", amt,
+                        raw={k: _clean(v) for k, v in s.items()
+                             if k in ("fs_code", "trade_date", "close_price",
+                                      "change_rate", "net_buy_amount",
+                                      "buy_amount", "sell_amount",
+                                      "turnover_rate", "reason")}))
+    return out, True, ""
+
+
+def collect_dragon_tiger(date: str) -> tuple[list[dict], bool, str]:
+    """龙虎榜（个股级）。东财 stock_lhb_detail_em 主源 → finshare get_lhb 备援。
+
+    finshare 不走东财 push2 被封端点（实测可用），净买/买/卖额拆分更全。东财
+    空或异常（被封）→ finshare 多日榜单按 trade_date 过滤当日补。当日两边皆无
+    上榜票不算错。akshare 1.18 起 start_date/end_date 要无破折号 YYYYMMDD；
+    席位明细 stock_lhb_stock_detail_em 现需 date+flag 逐股 2 次请求×近百股，
+    东财反爬下太慢且易失败，故主源与备援均用主榜单"净买额"出个股级记录。"""
+    dash = date.replace("-", "")
+    em_err = ""
+    # 主源：东财
+    if _AK_OK:
+        try:
+            stocks = ak.stock_lhb_detail_em(start_date=dash, end_date=dash)
+            if stocks is not None and not stocks.empty:
+                col_code = _first_col(stocks, ["代码", "code"])
+                col_name = _first_col(stocks, ["名称", "name"])
+                col_amt = _first_col(stocks, ["龙虎榜净买额", "净买额", "龙虎榜买入额"])
+                col_reason = _first_col(stocks, ["上榜原因", "解读"])
+                recs = []
+                for _, s in stocks.iterrows():
+                    code, name = s.get(col_code), s.get(col_name)
+                    amt = _to_float(s.get(col_amt))
+                    recs.append(_rec(date, code, name, "股票", "龙虎榜",
+                                    s.get(col_reason) or "龙虎榜", "上榜", amt,
+                                    raw={k: _clean(v) for k, v in s.items()}))
+                _set_status("龙虎榜", True, "东财", "")
+                return recs, True, ""
+            em_err = "东财当日无上榜"   # 空→试 finshare 补（可能东财当日未更新）
+        except Exception as e:
+            em_err = _friendly_err("龙虎榜", e)
+    else:
+        em_err = _AK_ERR
+    # 备援：finshare get_lhb（不走东财被封端点）
+    recs_fs, ok_fs, err_fs = _fetch_finshare_lhb(date)
+    if ok_fs and recs_fs:
+        _set_status("龙虎榜", True, "finshare", em_err)
+        return recs_fs, True, ""
+    if ok_fs:
+        # finshare 也无当日上榜 → 当日真无上榜，不算错
         _set_status("龙虎榜", True, "", "当日无上榜票")
-        return [], True, ""   # 当日无上榜票不算错
-    col_code = _first_col(stocks, ["代码", "code"])
-    col_name = _first_col(stocks, ["名称", "name"])
-    col_amt = _first_col(stocks, ["龙虎榜净买额", "净买额", "龙虎榜买入额"])
-    col_reason = _first_col(stocks, ["上榜原因", "解读"])
-    recs = []
-    for _, s in stocks.iterrows():
-        code, name = s.get(col_code), s.get(col_name)
-        amt = _to_float(s.get(col_amt))
-        recs.append(_rec(date, code, name, "股票", "龙虎榜",
-                        s.get(col_reason) or "龙虎榜", "上榜", amt,
-                        raw={k: _clean(v) for k, v in s.items()}))
-    _set_status("龙虎榜", True, "东财", "")
-    return recs, True, ""
+        return [], True, ""
+    # finshare 失败 → 主源+备援均败
+    _set_status("龙虎榜", False, "", em_err or err_fs)
+    return [], False, (em_err or err_fs)
 
 
 # ------------------------------------------------------------------
@@ -676,7 +770,11 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
             return [], False, f"十大股东: 试{tried}股全失败(东财被封/接口异常)"
         _set_status("十大股东", True, "", "无候选股")
         return [], True, "十大股东: 无候选股"
-    db.set_meta("holders_last_as_of", as_of)
+    # 并行采集下 set_meta 可能撞 SQLite 写锁,try 容错(失败仅丢该 meta,数据已 upsert)
+    try:
+        db.set_meta("holders_last_as_of", as_of)
+    except Exception:
+        pass
     # 学习式扩充：命中国家队关键字的 code 并入种子
     hit_codes = {str(rec["code"]) for rec in recs
                  if rec.get("actor") and any(k in rec["actor"] for k in NATIONAL_TEAM)}
@@ -689,19 +787,64 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
 # ------------------------------------------------------------------
 # 高管增减持(按日期全市场)
 # ------------------------------------------------------------------
+def _cache_dir() -> str:
+    """缓存目录:优先 env SCREENER_CACHE_DIR,其次容器卷 /app/var(Docker 持久),
+    最后 data/cache(本地,容器重建丢)。高管 17 万行 df pickle 落此地 7 日复用。"""
+    d = os.environ.get("SCREENER_CACHE_DIR")
+    if d:
+        try:
+            os.makedirs(d, exist_ok=True)
+            return d
+        except Exception:
+            pass
+    for cand in ("/app/var",):
+        try:
+            os.makedirs(cand, exist_ok=True)
+            return cand
+        except Exception:
+            pass
+    local = str(Path(__file__).parent / "cache")
+    try:
+        os.makedirs(local, exist_ok=True)
+    except Exception:
+        pass
+    return local
+
+
 def collect_management_hold(date: str) -> tuple[list[dict], bool, str]:
     """高管增减持(东财 stock_hold_management_detail_em,全市场全历史)。
 
     akshare 1.18：旧 stock_hold_management_em 改名 stock_hold_management_detail_em，
     无参、返回 17 万行全历史(拉取约 4-5 分钟)。本地按'日期'列过滤近 7 日真实变动，
-    记录 date 取行内变动日期(非刷新日)，保今日仍有近期动作可查。"""
+    记录 date 取行内变动日期(非刷新日)，保今日仍有近期动作可查。
+
+    性能:7 日 pickle 缓存(_cache_dir/mgmt.pkl),7 日内复用全量 df 只 filter 近 7 日
+    不重拉 17 万行(高管低频,日新增几十-几百条);缓存命中 4-5min→0。"""
     if not _AK_OK:
         return [], False, _AK_ERR
-    try:
-        df = ak.stock_hold_management_detail_em()
-    except Exception as e:
-        _set_status("高管增减持", False, "", _friendly_err("高管增减持", e))
-        return [], False, _friendly_err("高管增减持", e)
+    import pickle
+    cache_path = Path(_cache_dir()) / "mgmt.pkl"
+    df = None
+    src = "东财"
+    if cache_path.exists():
+        try:
+            age = time.time() - cache_path.stat().st_mtime
+            if age < 7 * 86400:
+                df = pd.read_pickle(cache_path)
+                src = f"东财(7日内缓存,{int(age // 86400)}天前拉取)"
+        except Exception:
+            df = None
+    if df is None:
+        try:
+            df = ak.stock_hold_management_detail_em()
+        except Exception as e:
+            _set_status("高管增减持", False, "", _friendly_err("高管增减持", e))
+            return [], False, _friendly_err("高管增减持", e)
+        if df is not None and not df.empty:
+            try:
+                df.to_pickle(cache_path)
+            except Exception:
+                pass
     if df is None or df.empty:
         _set_status("高管增减持", True, "", "无增减持")
         return [], True, ""
@@ -721,7 +864,7 @@ def collect_management_hold(date: str) -> tuple[list[dict], bool, str]:
                         "高管增减持", r.get(col_actor), action,
                         r.get(col_amt),
                         raw={k: _clean(v) for k, v in r.items()}))
-    _set_status("高管增减持", True, "东财", "")
+    _set_status("高管增减持", True, src, "")
     return recs, True, ""
 
 
@@ -815,8 +958,24 @@ def refresh_today(date: str | None = None,
             ("龙虎榜", collect_dragon_tiger), ("十大股东", collect_holders),
             ("高管增减持", collect_management_hold),
             ("限售解禁", collect_share_unlock)]
-    for ch, fn in plan:
+    # 并行采集(各通道独立网络 IO),收齐后串行 upsert/stale/后处理——避 SQLite
+    # 并发写锁(upsert/set_meta 串行);_set_status 写 CHANNEL_STATUS 不同 key(GIL 下安全)。
+    # 单通道模式(channels 非空)只跑指定通道,其余标 skipped 不采。
+    def _run(item):
+        ch, fn = item
         if channels and ch not in channels:
+            return (ch, None, None, None, True)
+        try:
+            recs, ok, err = fn(date)
+        except Exception as e:
+            recs, ok, err = [], False, f"{ch}: 未捕获异常 {e}"
+            _set_status(ch, False, "", str(e))
+        return (ch, recs, ok, err, False)
+    with ThreadPoolExecutor(max_workers=min(6, len(plan))) as ex:
+        raw = list(ex.map(_run, plan))
+    # 串行后处理:stale 降级 + upsert + report(所有 db 写在此,无并发)
+    for ch, recs, ok, err, skipped in raw:
+        if skipped:
             st = CHANNEL_STATUS.get(ch, {})
             report["counts"][ch] = 0
             report["channels"][ch] = {
@@ -825,11 +984,6 @@ def refresh_today(date: str | None = None,
                 "last_ok_date": _last_ok_date(ch),
                 "err": "本次未刷新(单通道)", "at": st.get("at", "")}
             continue
-        try:
-            recs, ok, err = fn(date)
-        except Exception as e:
-            recs, ok, err = [], False, f"{ch}: 未捕获异常 {e}"
-            _set_status(ch, False, "", str(e))
         if not ok:
             old, stale_flag, note = _stale_fallback(ch, err)
             if stale_flag:

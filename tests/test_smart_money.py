@@ -232,7 +232,15 @@ def test_today_list_filters_by_channel(sm_db):
     assert all(r["date"] == "2026-07-14" for r in res["rows"])
 
 
-def test_by_actor_national_team_keyword(sm_db):
+def test_by_actor_national_team_keyword(sm_db, monkeypatch):
+    # by_actor 用 datetime.now() 相对窗口；固定"今"=2026-07-17，使 SM_ROWS
+    # 的 2026-07-13(中央汇金) 落 days=30 窗口内，防真实时钟漂移致该行被排除。
+    import datetime as _dt
+    class _FixedDt:
+        @staticmethod
+        def now():
+            return _dt.datetime(2026, 7, 17)
+    monkeypatch.setattr(smq, "datetime", _FixedDt)
     res = smq.by_actor("国家队", days=30)
     assert "中央汇金" in {r["actor"] for r in res["rows"]}
     assert res["summary"]["出现次数"] >= 1
@@ -432,6 +440,61 @@ def test_today_list_days_window(sm_db):
     """days=1 仅最新日;days=7 含近7日(SM_ROWS 全4行)。"""
     assert smq.today_list(days=1)["total"] == 2  # 仅 2026-07-14 2行
     assert smq.today_list(days=7)["total"] == 4  # 07-13+07-14 共4行
+
+
+def test_today_list_excludes_future_unlock_dates(monkeypatch):
+    """解禁通道把未来解禁日写进 date 列;today_list 省略 date 时必须封顶 today
+    取最新实盘日,不能让 max(date)=未来解禁日把今日真实资金流/龙虎榜全过滤掉
+    (回归"深查主力没效果":数据在库里但 today 视图只剩未来解禁行)。"""
+    import datetime as _dt
+    class _FixedDt:
+        @staticmethod
+        def now(): return _dt.datetime(2026, 8, 13)
+        @staticmethod
+        def strptime(s, f): return _dt.datetime.strptime(s, f)
+    monkeypatch.setattr(smq, "datetime", _FixedDt)
+    rows = [
+        {"date": "2026-08-31", "code": "000001", "name": "甲", "market": "股票",
+         "channel": "限售解禁", "actor": "首次原股东", "action": "解禁",
+         "amount": 3e9, "as_of": "2026-08-31"},
+        {"date": "2026-08-13", "code": "000002", "name": "乙", "market": "股票",
+         "channel": "资金流", "actor": None, "action": "净买入",
+         "amount": 2e7, "as_of": None},
+        {"date": "2026-08-13", "code": "000001", "name": "甲", "market": "股票",
+         "channel": "龙虎榜", "actor": "机构专用", "action": "上榜",
+         "amount": 1e7, "as_of": None},
+    ]
+    def _q(table, where="", params=(), order_by="", limit=0):
+        if table == "stock_spot":
+            return []
+        out = list(rows)
+        if where and "date <= ?" in where:
+            cap = params[0] if params else "9999"
+            out = [r for r in out if r["date"] <= cap]
+        if where and "date >= ?" in where:
+            lo = None; hi = None
+            import re
+            m = re.findall(r"date\s*(>=|<=)\s*\?", where)
+            pi = 0
+            for op in [x[0] for x in m]:
+                v = params[pi]; pi += 1
+                if op == ">=": lo = v
+                elif op == "<=": hi = v
+            out = [r for r in out
+                   if (lo is None or r["date"] >= lo)
+                   and (hi is None or r["date"] <= hi)]
+        if order_by == "date DESC":
+            out = sorted(out, key=lambda r: r["date"], reverse=True)
+        if order_by == "amount DESC":
+            out = sorted(out, key=lambda r: r["amount"], reverse=True)
+        if limit:
+            out = out[:limit]
+        return out
+    monkeypatch.setattr(db, "query_rows", _q)
+    res = smq.today_list()
+    assert res["date"] == "2026-08-13"            # 封顶 today,不取未来 08-31
+    assert all(r["date"] == "2026-08-13" for r in res["rows"])  # 今日真实数据
+    assert "限售解禁" not in {r["channel"] for r in res["rows"]}  # 未来解禁排除
 
 
 def test_refresh_single_channel_skips_others(monkeypatch, tmp_path):

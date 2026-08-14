@@ -33,8 +33,9 @@ def _unlock_df():
     ])
 
 
-def test_collect_management_hold(monkeypatch):
+def test_collect_management_hold(monkeypatch, tmp_path):
     monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "_cache_dir", lambda: str(tmp_path))  # 缓存隔离防跨测试污染
     monkeypatch.setattr(sm, "ak", _mock_ak(lambda: _mgmt_df(),
                                            lambda **kw: pd.DataFrame()))
     recs, ok, err = sm.collect_management_hold("2026-07-19")
@@ -48,16 +49,18 @@ def test_collect_management_hold(monkeypatch):
     assert sm.CHANNEL_STATUS["高管增减持"]["ok"] is True
 
 
-def test_collect_management_hold_empty_ok(monkeypatch):
+def test_collect_management_hold_empty_ok(monkeypatch, tmp_path):
     monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "_cache_dir", lambda: str(tmp_path))  # 缓存隔离:读到空
     monkeypatch.setattr(sm, "ak", _mock_ak(lambda: pd.DataFrame(),
                                            lambda s: pd.DataFrame()))
     recs, ok, err = sm.collect_management_hold("2026-07-19")
     assert ok and recs == []
 
 
-def test_collect_management_hold_fail(monkeypatch):
+def test_collect_management_hold_fail(monkeypatch, tmp_path):
     monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "_cache_dir", lambda: str(tmp_path))  # 缓存隔离:不读旧缓存绕过 fail
 
     def _err():
         raise RuntimeError("remotedisconnected")
