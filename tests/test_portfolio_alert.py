@@ -66,9 +66,11 @@ def test_alert_none_when_no_rule(monkeypatch):
 
 
 def test_alert_none_when_no_spot(monkeypatch):
-    """无最新价时不触发。"""
+    """无最新价(spot 缺 + pytdx 兜底也无)时不触发。"""
     r = _row("600519", 100.0, alert_hi=9.0)
     monkeypatch.setattr(portfolio.db, "get_conn", lambda: _Conn([r], {}))
+    # pytdx 兜底也返空,模拟行情服务器全不可用
+    monkeypatch.setattr(portfolio.pytdx_client, "get_quote", lambda codes: [])
     out = portfolio.list_positions()
     assert out[0]["alert_triggered"] is None
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from . import db
+from . import pytdx_client
 
 
 def add_position(code: str, name: str, buy_date: str, buy_price: float,
@@ -54,6 +55,15 @@ def list_positions() -> list[dict]:
                 for x in sr:
                     if x["latest_price"] is not None and x["code"] not in spot:
                         spot[x["code"]] = x["latest_price"]
+    # spot 缺价的 code 用通达信实时行情兜底(持仓通常几只,一次调用)
+    missing = [c for c in codes if c not in spot]
+    if missing:
+        try:
+            for q in pytdx_client.get_quote(missing):
+                if q.get("price") is not None:
+                    spot[q["code"]] = q["price"]
+        except Exception:
+            pass
     out = []
     for r in rows:
         lp = spot.get(r["code"])

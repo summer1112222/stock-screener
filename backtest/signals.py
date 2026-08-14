@@ -57,6 +57,31 @@ def _uni_panels(universe: str, codes: list[str], with_ohlc: bool = False):
     return close, amount, high, low
 
 
+def _forward_returns(close: pd.DataFrame, k: int,
+                     stop_loss: float | None = None,
+                     fee_bps: float = 0,
+                     low: pd.DataFrame | None = None) -> pd.DataFrame:
+    """前视 k 日收益矩阵(close 列对齐)。
+    默认 close[t+k]/close[t]-1；stop_loss 非 None 且 low 给定时，前视 k 日 low
+    触及 close*(1-stop_loss) 则截断为 -stop_loss；fee_bps 单边费率(bp)，双边扣 2×。
+    抽出供 backtest_signals 与游资席位胜率(screener/smart_money.seat_winrate)复用。"""
+    normal = close.shift(-k) / close - 1
+    if stop_loss is not None and low is not None:
+        arr = None
+        for d in range(1, k + 1):
+            sv = low.shift(-d).values
+            arr = sv if arr is None else np.fmin(arr, sv)
+        fwd_min_low = pd.DataFrame(arr, index=close.index, columns=close.columns)
+        stopped = (fwd_min_low <= close * (1 - stop_loss)) & fwd_min_low.notna()
+        fwd = pd.DataFrame(np.where(stopped.values, -stop_loss, normal.values),
+                           index=close.index, columns=close.columns)
+    else:
+        fwd = normal
+    if fee_bps:
+        fwd = fwd - 2 * fee_bps / 1e4  # 双边费率
+    return fwd
+
+
 def scan_signals(universe: str, codes: list[str],
                  signal_types: list[str] | None = None,
                  min_hits: int = 1) -> dict:
@@ -153,20 +178,7 @@ def backtest_signals(universe: str, codes: list[str],
     vol_avg5 = amount.rolling(5).mean() if amount is not None else None
     mom20 = close.pct_change(20)
     # 前视收益：默认 close[t+k]/close[t]-1；stop_loss 时用前视 k 日 low 判止损截断
-    normal = close.shift(-k_days) / close - 1
-    if stop_loss is not None and low is not None:
-        arr = None
-        for d in range(1, k_days + 1):
-            sv = low.shift(-d).values
-            arr = sv if arr is None else np.fmin(arr, sv)
-        fwd_min_low = pd.DataFrame(arr, index=close.index, columns=close.columns)
-        stopped = (fwd_min_low <= close * (1 - stop_loss)) & fwd_min_low.notna()
-        fwd = pd.DataFrame(np.where(stopped.values, -stop_loss, normal.values),
-                           index=close.index, columns=close.columns)
-    else:
-        fwd = normal
-    if fee_bps:
-        fwd = fwd - 2 * fee_bps / 1e4  # 双边费率
+    fwd = _forward_returns(close, k_days, stop_loss, fee_bps, low)
 
     bench_fwd = None
     if benchmark:

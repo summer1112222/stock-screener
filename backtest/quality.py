@@ -193,7 +193,7 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                     sl_codes = [c for c in codes if c in sl]
                 except Exception:
                     sl_codes = codes
-                results = bt_buf.analyze_many(sl_codes)
+                results = bt_buf.analyze_many(sl_codes, deadline_s=40.0)  # 总体40s:akshare慢时返部分分位而非150s挂起;首次<75s前端超时,5min内重算走财报7天缓存秒回
 
                 def _bad(r):
                     rt = r.get("ratios", {})
