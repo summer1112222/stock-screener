@@ -702,3 +702,58 @@ def main_force_phase(code: str, days: int = 30) -> dict:
         out["note"] = "数据不足"
     _PHASE_CACHE[key] = (now, out)
     return out
+
+
+def board_money_link(code: str) -> dict:
+    """板块-个股资金联动: 该股所属板块在 sector_fund_flow 的净流入排名,
+    及该股在板块内 net_intensity(主力净额/成交额) 的横截位置。
+    只读 stock_spot/sector_fund_flow, 不触网。"""
+    code = str(code)
+    base = {"code": code, "board": None, "board_main_net_inflow": None,
+            "board_rank": None, "board_pct": None,
+            "intra_board_rank": None, "intra_board_pct": None,
+            "board_5d_trend": [], "note": ""}
+    spots = db.query_rows("stock_spot", limit=0)
+    if not spots:
+        base["note"] = "stock_spot 为空,先 /api/refresh"
+        return base
+    board = None
+    for s in spots:
+        if str(s.get("code")) == code:
+            board = s.get("board")
+            break
+    if not board:
+        base["note"] = "该股无 board 字段"
+        return base
+    base["board"] = board
+    # 板块净流入排名
+    sff = db.query_rows("sector_fund_flow",
+                        where="sector_type = ? AND indicator = ?",
+                        params=("行业", "今日"), limit=0)
+    if sff:
+        ranked = sorted(sff, key=lambda x: _nan(x.get("main_net_inflow")) or 0, reverse=True)
+        names = [r.get("name") for r in ranked]
+        if board in names:
+            idx = names.index(board)
+            base["board_rank"] = idx + 1
+            base["board_pct"] = round(1 - idx / max(len(names), 1), 4)
+            base["board_main_net_inflow"] = _nan(ranked[idx].get("main_net_inflow"))
+    # 板块内个股 net_intensity 横截(主力净额/成交额占比)
+    # 注意:stock_spot 行的净额字段是 main_net_inflow,与 smart_money_action 的 amount 不同,
+    # 故不复用 _attach_intensity(它读 amount 且会再查 stock_spot),直接内联算。
+    intra = [s for s in spots if s.get("board") == board]
+    def _ni(s):
+        m = _nan(s.get("main_net_inflow")); t = _nan(s.get("turnover_amount"))
+        return round(m / t, 4) if (m is not None and t and t != 0) else None
+    intra_sorted = sorted(intra, key=lambda x: (_ni(x) if _ni(x) is not None else -1e18), reverse=True)
+    codes_in = [str(x.get("code")) for x in intra_sorted]
+    if code in codes_in:
+        ix = codes_in.index(code)
+        base["intra_board_rank"] = ix + 1
+        base["intra_board_pct"] = round(1 - ix / max(len(codes_in), 1), 4)
+    # 板块5日趋势
+    sff5 = db.query_rows("sector_fund_flow",
+                         where="sector_type = ? AND indicator = ? AND name = ?",
+                         params=("行业", "5日", board), limit=0)
+    base["board_5d_trend"] = [_nan(r.get("main_net_inflow")) for r in sff5]
+    return base
