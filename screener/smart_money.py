@@ -525,3 +525,129 @@ def _behavior_batch(codes: list[str], days: int = 30) -> dict[str, dict]:
         if nb:
             out[c]["north_cum"] = round(float(sum(nb.values())), 2)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 主力阶段判定 main_force_phase (计分制4阶段+观望)
+# 复用 behavior_series + chip_distribution + spot + _uni_panels, 零新数据源。
+# 进程缓存30s(依赖日级数据, 避免高频重算 chip)。
+# ---------------------------------------------------------------------------
+import time as _time_mod
+_PHASE_CACHE: dict = {}
+_PHASE_TTL = 30.0
+
+def _high60_pct(code: str) -> float | None:
+    """latest_price 在近60日 close 的 [min,max] 区间分位(0-1)。无历史→None。"""
+    try:
+        from backtest.signals import _uni_panels
+        close, _ = _uni_panels("stock", [code])
+        if close is None or close.empty or code not in close.columns:
+            return None
+        s = close[code].dropna().iloc[-60:]
+        if len(s) < 5:
+            return None
+        lo, hi = float(s.min()), float(s.max())
+        sp = db.query_rows("stock_spot", where="code = ?", params=(code,), limit=1)
+        lp = None
+        if sp:
+            lp = _nan(sp[0].get("latest_price"))
+        if lp is None:
+            lp = float(s.iloc[-1])
+        if hi == lo:
+            return 0.5
+        return round(min(max((lp - lo) / (hi - lo), 0.0), 1.0), 4)
+    except Exception:
+        return None
+
+def _turnover5_avg(code: str) -> float | None:
+    """近5日成交额均值(元)。无历史→None。"""
+    try:
+        from backtest.signals import _uni_panels
+        _, amount = _uni_panels("stock", [code])
+        if amount is None or amount.empty or code not in amount.columns:
+            return None
+        s = amount[code].dropna().iloc[-5:]
+        if s.empty:
+            return None
+        return float(s.mean())
+    except Exception:
+        return None
+
+_PHASE_COND = {
+    "出货": lambda i: [
+        (i["streak_outflow"] or 0) >= 2,
+        (i["profit_ratio"] is not None and i["profit_ratio"] > 0.8),
+        (i["margin_accel"] is not None and i["margin_accel"] < 0),
+        (i["high60_pct"] is not None and i["high60_pct"] > 0.8),
+    ],
+    "拉升": lambda i: [
+        (i["streak_inflow"] or 0) >= 2,
+        (i["change_pct"] is not None and i["change_pct"] > 3),
+        i["_vol_surge"],
+        (i["latest_price"] is not None and i["avg_cost"] is not None and i["latest_price"] > i["avg_cost"]),
+    ],
+    "吸筹": lambda i: [
+        (i["streak_inflow"] or 0) >= 3,
+        (i["cum_inflow"] is not None and i["cum_inflow"] > 0),
+        (i["change_pct"] is not None and i["change_pct"] < 3),
+        (i["profit_ratio"] is not None and i["profit_ratio"] < 0.85),
+    ],
+    "洗盘": lambda i: [
+        (i["cum_inflow"] is not None and i["cum_inflow"] > 0),
+        (i["margin_accel"] is not None and i["margin_accel"] < 0),
+        (i["change_pct"] is not None and -5 < i["change_pct"] < -1),
+    ],
+}
+_PHASE_RISK_ORDER = ["出货", "拉升", "洗盘", "吸筹"]  # 并列时保守优先
+
+def main_force_phase(code: str, days: int = 30) -> dict:
+    """主力阶段判定(计分制): 出货/拉升/吸筹/洗盘/观望。
+    confidence=命中条件数/该阶段总条件数, 并列按风险优先级取保守。
+    复用 behavior_series + chip_distribution + spot, 零新数据源。
+    进程缓存30s(依赖日级数据, 避免高频重算 chip)。"""
+    key = (str(code), days)
+    now = _time_mod.time()
+    hit = _PHASE_CACHE.get(key)
+    if hit and now - hit[0] < _PHASE_TTL:
+        return hit[1]
+    bs = behavior_series(code, days)
+    chip = chip_distribution(code, window=60)
+    spot = db.query_rows("stock_spot", where="code = ?", params=(code,), limit=1)
+    srow = spot[0] if spot else {}
+    tnv5 = _turnover5_avg(code)
+    tnv = _nan(srow.get("turnover_amount"))
+    ind = {
+        "streak_inflow": bs.get("streak_inflow"),
+        "streak_outflow": bs.get("streak_outflow"),
+        "cum_inflow": bs.get("cum_inflow"),
+        "margin_accel": bs.get("margin_accel"),
+        "profit_ratio": chip.get("profit_ratio"),
+        "chip_concentration": chip.get("chip_concentration"),
+        "avg_cost": chip.get("avg_cost"),
+        "spot": chip.get("spot"),
+        "change_pct": _nan(srow.get("change_pct")),
+        "turnover_amount": tnv,
+        "latest_price": _nan(srow.get("latest_price")),
+        "high60_pct": _high60_pct(code),
+        "tnv5_avg": tnv5,
+        "_vol_surge": (tnv is not None and tnv5 is not None and tnv5 > 0 and tnv > tnv5 * 1.5),
+    }
+    best_phase, best_conf, best_trig = "观望", 0.0, []
+    for ph in _PHASE_RISK_ORDER:  # 出货>拉升>洗盘>吸筹,并列时先迭代者胜=保守优先
+        flags = _PHASE_COND[ph](ind)
+        hits = sum(1 for f in flags if f)
+        conf = hits / len(flags)
+        trig = [f"条件{i+1}={'命中' if f else '未'}" for i, f in enumerate(flags)]
+        if conf > best_conf:   # 严格大于:并列(==)保留先迭代者(出货),实现风险优先级
+            best_conf, best_phase, best_trig = conf, ph, trig
+    if best_conf <= 0.5:   # 需>50%置信度才出阶段,否则观望(低置信=观望)
+        best_phase, best_conf, best_trig = "观望", 0.0, []
+    name = srow.get("name") or code
+    out = {"code": str(code), "name": name, "phase": best_phase,
+           "confidence": round(best_conf, 4), "triggers": best_trig,
+           "indicators": {k: _nan(v) for k, v in ind.items() if not k.startswith("_")},
+           "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
+    if best_phase == "观望" and best_conf == 0 and not any(ind.values()):
+        out["note"] = "数据不足"
+    _PHASE_CACHE[key] = (now, out)
+    return out
