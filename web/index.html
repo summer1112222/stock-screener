@@ -308,7 +308,8 @@
         <div class="f"><label>数量</label><select id="qsLimit" class="btn ghost"><option>10</option><option selected>20</option><option>30</option></select></div>
         <div class="f"><label>最少口径</label><select id="qsMinDims" class="btn ghost"><option>1</option><option selected>2</option><option>3</option></select></div>
         <div class="f"><label>组合</label><select id="qsCombo" class="btn ghost" title="贪心=等权+行业≤上限+相关性≤上限；最小方差=风险预算机械分配(非推荐仓位)"><option value="greedy">贪心(等权)</option><option value="min_var">最小方差</option></select></div>
-        <div class="f"><label>共振阈值</label><select id="qsThresh" class="btn ghost" title="口径分位≥此值才算命中(共振)"><option>0.4</option><option>0.5</option><option selected>0.6</option><option>0.7</option><option>0.8</option></select></div>
+        <div class="f"><label>共振模式</label><select id="qsResMode" class="btn ghost" title="贪心=hits×10+加权均值(数量偏好,共识优先)；短板惩罚=几何均值(某口径极低拉低总分)。权重为经验先验非IC校准"><option value="greedy" selected>贪心(共识)</option><option value="penalize">短板惩罚</option></select></div>
+        <div class="f"><label>共振阈值</label><select id="qsThresh" class="btn ghost" title="口径分位≥此值才算命中(共振)"><option>0.4</option><option>0.5</option><option>0.6</option><option selected>0.7</option><option>0.8</option></select></div>
         <div class="f"><label>行业≤</label><select id="qsBoard" class="btn ghost" title="组合内同行业最多N只(分散)"><option>1</option><option>2</option><option selected>3</option><option>4</option></select></div>
         <div class="f"><label>相关性≤</label><select id="qsCorr" class="btn ghost" title="组合内两两相关≤此值(去冗余)"><option>0.7</option><option>0.8</option><option selected>0.85</option><option>0.9</option><option>0.95</option></select></div>
         <button class="btn ghost" id="qsRun" type="button">筛选优质清单</button>
@@ -1367,13 +1368,14 @@ async function qsLoad(){
   const limit=document.getElementById('qsLimit').value;
   const min_dims=document.getElementById('qsMinDims').value;
   const combo=document.getElementById('qsCombo').value;
+  const rmode=document.getElementById('qsResMode').value;
   const thresh=document.getElementById('qsThresh').value;
   const board=document.getElementById('qsBoard').value;
   const corr=document.getElementById('qsCorr').value;
   const btn=document.getElementById('qsRun');
   btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett财报+历史+信号较慢，首次约几十秒；超时自动重试一次，5分钟内重复缓存秒回)...';
   try{
-    const r=await _qsFetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`);
+    const r=await _qsFetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&resonance_mode=${rmode}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`);
     const d=r.data||{};
     const dt=((Date.now()-t0)/1000).toFixed(1);
     document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
@@ -1430,6 +1432,7 @@ document.getElementById('qsThresh').onchange=qsLoad;
 document.getElementById('qsBoard').onchange=qsLoad;
 document.getElementById('qsCorr').onchange=qsLoad;
 document.getElementById('qsCombo').onchange=qsLoad;
+document.getElementById('qsResMode').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
 // ---------------- 个股深度分析卡 ----------------

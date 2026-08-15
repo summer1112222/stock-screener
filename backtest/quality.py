@@ -22,6 +22,10 @@ _CAND_DISCLAIMER = ("多口径共振机械排序观察清单，非荐股非买�
 # 结果级缓存(5min TTL)：quality_rank 计算重(历史+buffett+signals)，避免短时重复重算
 _RESULT_CACHE: dict = {}
 _RESULT_TTL = 300.0  # 秒
+# 共振默认经验权重(因子有效性先验,非 IC 校准,可被 weights/resonance_mode 覆盖)：
+# 口径2 价值质量/5 景气(高持久) > 口径1 风险调整 > 口径4 多信号 > 口径3 资金流(最噪声)。
+# 加权均值不要求和归一(wsum/wtot 已处理)。
+_DEFAULT_DIM_WEIGHTS = {1: 1.0, 2: 1.3, 3: 0.6, 4: 0.7, 5: 1.3}
 
 ETF_BENCHMARK_MAP = {
     "510300": "sh000300", "510310": "sh000300", "510160": "sh000300",
@@ -397,21 +401,48 @@ def _dim_scores(df, universe, days, min_signals, close=None):
     return scores, dims_avail, status
 
 
-def _resonance(dim_scores, dim_thresh, weights=None):
-    """resonance = hits×10 + 命中口径加权平均分位。返回 (resonance, hits)。
-    dim_scores: {dim: pct}，pct 可能 None（None 不算命中不计分母）。"""
-    w = weights or {}
-    hits, wsum, wtot = 0, 0.0, 0.0
+def _resonance(dim_scores, dim_thresh, weights=None, mode="greedy"):
+    """resonance = 多口径共振机械分。返回 (resonance, hits)。
+    dim_scores: {dim: pct}，pct 可能 None（None 不算命中不计分母）。
+    weights 默认 _DEFAULT_DIM_WEIGHTS(经验有效性,非 IC 校准)。
+    mode='greedy'(默认): hits×10 + 命中口径加权平均分位(数量偏好,共识优先)。
+    mode='penalize': 命中口径加权几何均值(短板惩罚,某口径极低会拉低总分;
+                     pct 裁剪 [0.01,1] 防 log0)。hits 仍独立返回供 min_dims 门槛。
+    合规:resonance 是"多口径同靠前"机械事实陈述,非收益预测/推荐强度。"""
+    w = _DEFAULT_DIM_WEIGHTS if weights is None else weights
+    present, hit_pcts = [], []   # present=非 None; hit_pcts=≥thresh
+    hits = 0
     for d, pct in dim_scores.items():
         if pct is None:
             continue
+        present.append((d, float(pct)))
         if pct >= dim_thresh:
             hits += 1
+            hit_pcts.append((d, float(pct)))
+    if not present:
+        return 0.0, hits
+    if mode == "penalize":
+        # 加权几何均值(over 所有 present 非None 口径):某口径极低会拉低总分;
+        # pct 裁剪 [0.01,1] 防 log0。hits 独立返回供 min_dims 门槛。
+        import math as _math
+        num, den = 0.0, 0.0
+        for d, p in present:
+            pc = min(max(p, 0.01), 1.0)
             wi = w.get(d, 1.0)
-            wsum += pct * wi
-            wtot += wi
+            num += wi * _math.log(pc)
+            den += wi
+        geo = _math.exp(num / den) if den > 0 else 0.0
+        return round(geo, 6), hits
+    # greedy(默认):hits×10 + 命中口径(≥thresh)加权平均分位(数量偏好,共识优先)
+    if not hit_pcts:
+        return round(float(hits) * 10, 6), hits
+    wsum, wtot = 0.0, 0.0
+    for d, p in hit_pcts:
+        wi = w.get(d, 1.0)
+        wsum += p * wi
+        wtot += wi
     avg = (wsum / wtot) if wtot > 0 else 0.0
-    return hits * 10 + avg, hits
+    return round(hits * 10 + avg, 6), hits
 
 
 def _board_of(code, universe, df_spot, board_map=None):
@@ -552,14 +583,17 @@ def _build_reasons(item):
 
 
 def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
-                 dim_thresh=0.6, min_turnover=5e7, max_per_board=3,
+                 dim_thresh=0.7, min_turnover=5e7, max_per_board=3,
                  max_corr=0.85, limit=20, min_signals=2, limit_pct=9.9,
                  combo_method: str = "greedy",
+                 resonance_mode: str = "greedy",
                  refine: bool = True, refine_pool: int = 50) -> dict:
     """优质筛选主入口。返回 {main, by_dim, dims_available, dim_status,
     min_dims, refine_status, cand_disclaimer, error}。口径分位见 _dim_scores；
     共振/组合见 _resonance/_apply_combo。combo_method: "greedy" 等权（默认），
     "min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。
+    resonance_mode: "greedy"(默认,hits×10+加权均值,数量偏好) / "penalize"(几何均值,短板惩罚)。
+    dim_thresh 默认 0.7(提区分度)。weights 默认 _DEFAULT_DIM_WEIGHTS(经验,非IC校准)。
     refine: 仅个股，盘口精排（盘中按流动性+共振重排 refine_pool 只，盘后仅附 quote 不重排）。"""
     table = _SPOT_TABLE.get(universe)
     if not table:
@@ -580,8 +614,8 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     import time as _time
     in_session = _is_in_session()
     _key = (universe, days, min_dims, dim_thresh, min_turnover, max_per_board,
-            max_corr, limit, min_signals, limit_pct, combo_method, refine, refine_pool,
-            in_session)
+            max_corr, limit, min_signals, limit_pct, combo_method, resonance_mode,
+            refine, refine_pool, in_session)
     _now = _time.time()
     _ttl = 30.0 if in_session else _RESULT_TTL
     _hit = _RESULT_CACHE.get(_key)
@@ -610,7 +644,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4)}
     for c in codes:
         ds = scores.get(c, {})
-        res, hits = _resonance(ds, dim_thresh, weights)
+        res, hits = _resonance(ds, dim_thresh, weights, resonance_mode)
         name = df.loc[df["code"].astype(str) == c, "name"].iloc[0] \
             if "name" in df.columns else c
         item = {"code": c, "name": name, "resonance": _to_float(res),

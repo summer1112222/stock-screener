@@ -175,3 +175,47 @@ def test_dim3_uses_behavior():
     d2 = (main.get("600519", {}).get("dim_scores") or {}).get("3")
     if d1 is not None and d2 is not None:
         assert d1 > d2, "000001 资金流口径应更高"
+
+
+# ---------- Phase 3: 共振层改进(C) ----------
+
+def test_resonance_penalize_punishes_low():
+    """penalize 几何均值:某口径极低(短板)拉低总分,低于均衡两口径。"""
+    # [0.9, 0.1] 有短板 vs [0.5, 0.5] 均衡 → penalize 下前者更低
+    r_low, _ = quality._resonance({1: 0.9, 2: 0.1}, dim_thresh=0.0,
+                                  weights={}, mode="penalize")
+    r_bal, _ = quality._resonance({1: 0.5, 2: 0.5}, dim_thresh=0.0,
+                                  weights={}, mode="penalize")
+    assert r_low < r_bal, f"短板应被惩罚:{r_low} < {r_bal}"
+    # greedy 下无惩罚:两者均值相近,0.9+0.1 与 0.5+0.5 均为 0.5 → 相等(数量偏好)
+    g_low, _ = quality._resonance({1: 0.9, 2: 0.1}, 0.0, weights={}, mode="greedy")
+    g_bal, _ = quality._resonance({1: 0.5, 2: 0.5}, 0.0, weights={}, mode="greedy")
+    assert g_low == g_bal, "greedy 等权不惩罚短板(数量偏好)"
+
+
+def test_resonance_greedy_unchanged():
+    """greedy 默认行为不变:hits×10 + 命中口径加权均值(数量优先)。"""
+    # 多口径命中 >> 单口径高分(greedy 数量偏好)
+    a, ha = quality._resonance({1: 0.5, 2: 0.5, 3: 0.5}, 0.4, weights={})
+    b, hb = quality._resonance({1: 0.99}, 0.4, weights={})
+    assert ha == 3 and hb == 1
+    assert a > b  # 3 命中(30+) > 1 命中(10+)
+
+
+def test_dim_thresh_default_0p7():
+    """quality_rank 默认 dim_thresh=0.7(提区分度)。"""
+    import inspect
+    sig = inspect.signature(quality.quality_rank)
+    assert sig.parameters["dim_thresh"].default == 0.7
+    assert sig.parameters["resonance_mode"].default == "greedy"
+
+
+def test_default_dim_weights():
+    """不传 weights → 用 _DEFAULT_DIM_WEIGHTS:高分(1.0)落在口径2(w=1.3)比落在
+    口径3(w=0.6)对共振分贡献更大(同 hits 下,加权均值权重起作用需两命中口径分位不同)。"""
+    # 两标的均 2 命中,高分 1.0 落在不同口径:甲在口径2,乙在口径3,另一口径 0.0
+    ra, _ = quality._resonance({2: 1.0, 3: 0.0}, dim_thresh=0.0)  # 高分在口径2(w=1.3)
+    rb, _ = quality._resonance({2: 0.0, 3: 1.0}, dim_thresh=0.0)  # 高分在口径3(w=0.6)
+    assert ra > rb, f"口径2 权重高→高分落口径2 共振分应更高:{ra} > {rb}"
+    # 默认权重:口径2/5=1.3 > 口径1=1.0 > 口径4=0.7 > 口径3=0.6
+    assert quality._DEFAULT_DIM_WEIGHTS == {1: 1.0, 2: 1.3, 3: 0.6, 4: 0.7, 5: 1.3}

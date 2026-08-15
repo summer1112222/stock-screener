@@ -73,9 +73,9 @@ def test_dim_scores_percentile(monkeypatch):
 
 
 def test_resonance_hits_formula():
-    """resonance = hits×10 + 命中口径平均分位，命中数为主键。"""
-    a, ha = quality._resonance({1: 0.9, 2: 0.8, 3: 0.7}, 0.6)   # hits=3
-    b, hb = quality._resonance({1: 0.99}, 0.6)                   # hits=1
+    """resonance = hits×10 + 命中口径平均分位，命中数为主键(greedy 等权)。"""
+    a, ha = quality._resonance({1: 0.9, 2: 0.8, 3: 0.7}, 0.6, weights={})   # hits=3
+    b, hb = quality._resonance({1: 0.99}, 0.6, weights={})                   # hits=1
     assert a > b
     assert ha == 3 and hb == 1
     assert a == 3 * 10 + (0.9 + 0.8 + 0.7) / 3

@@ -355,7 +355,7 @@ def _warm_quality_cache():
         # 预填默认参数 quality 结果缓存(与前端 qLoad 默认下拉一致,refine 默认 True)
         quality.quality_rank(universe="stock", days=20, min_dims=2, min_turnover=5e7,
                              max_per_board=3, max_corr=0.85, limit=20, combo_method="greedy",
-                             dim_thresh=0.6, refine=True, refine_pool=50)
+                             resonance_mode="greedy", dim_thresh=0.7, refine=True, refine_pool=50)
     except Exception:
         return False
     return True
@@ -853,13 +853,15 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
                    min_dims: int = Query(2), min_turnover: float = Query(5e7),
                    max_per_board: int = Query(3), max_corr: float = Query(0.85),
                    limit: int = Query(20), combo_method: str = Query("greedy"),
-                   dim_thresh: float = Query(0.6, ge=0.0, le=1.0),
+                   resonance_mode: str = Query("greedy"),
+                   dim_thresh: float = Query(0.7, ge=0.0, le=1.0),
                    refine: bool = Query(True), refine_pool: int = Query(50)):
     from backtest import quality
     res = quality.quality_rank(
         universe=universe, days=days, min_dims=min_dims,
         min_turnover=min_turnover, max_per_board=max_per_board,
         max_corr=max_corr, limit=limit, combo_method=combo_method,
+        resonance_mode=resonance_mode,
         dim_thresh=dim_thresh, refine=refine, refine_pool=refine_pool)
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
