@@ -398,6 +398,59 @@ def _dim_scores(df, universe, days, min_signals, close=None):
     except Exception as e:
         status["4"] = f"err:{e}"
 
+    # 口径5 景气成长(仅个股,shortlist 限定,研报覆盖/评级偏多/目标价上行空间)
+    if universe == "stock":
+        try:
+            from data.research import query_reports
+            # shortlist 限定(与口径2/3 一致):非 shortlist 口径5=None
+            try:
+                import backtest.buffett as bt_buf
+                sl5 = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
+                sl5_codes = [c for c in codes if c in sl5]
+            except Exception:
+                sl5_codes = codes
+            spot_price = {}
+            if "latest_price" in df.columns:
+                lp = pd.to_numeric(df["latest_price"], errors="coerce")
+                spot_price = dict(zip(df["code"].astype(str), lp))
+            cov, bull, upside = {}, {}, {}
+            any_rows = False
+            for c in sl5_codes:
+                rpt = query_reports(c, days=days)["rows"]
+                if not rpt:
+                    continue
+                any_rows = True
+                cov[c] = len(rpt)
+                nbull = sum(1 for r in rpt
+                            if (r.get("rating") or "") in ("买入", "增持", "推荐", "强推"))
+                bull[c] = nbull / max(len(rpt), 1)
+                # 目标价上行空间 = mean(tp/spot - 1)
+                ups = []
+                for r in rpt:
+                    tp = r.get("target_price")
+                    sp = spot_price.get(c)
+                    try:
+                        tp = float(tp); sp = float(sp)
+                        if tp > 0 and sp > 0:
+                            ups.append(tp / sp - 1.0)
+                    except (TypeError, ValueError):
+                        continue
+                if ups:
+                    upside[c] = float(np.mean(ups))
+            if any_rows:
+                cov_s = pd.Series(cov)
+                bull_s = pd.Series(bull)
+                up_s = pd.Series(upside)
+                comp = _avg_rank_pct([cov_s, bull_s, up_s], codes)
+                for c in codes:
+                    scores[c][5] = _to_float(comp.get(c)) if c in comp.index else None
+                dims_avail.append(5)
+                status["5"] = "ok(景气:覆盖/评级/目标价)"
+            else:
+                status["5"] = "ok(降级:无研报)"
+        except Exception as e:
+            status["5"] = f"err:{e}"
+
     return scores, dims_avail, status
 
 
@@ -641,7 +694,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
             pass
     scores, dims_avail, dim_status = _dim_scores(df, universe, days, min_signals, close=close)
     eff_min_dims = min(min_dims, len(dims_avail)) if dims_avail else 0
-    enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4)}
+    enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4, 5)}
     for c in codes:
         ds = scores.get(c, {})
         res, hits = _resonance(ds, dim_thresh, weights, resonance_mode)
@@ -650,7 +703,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         item = {"code": c, "name": name, "resonance": _to_float(res),
                 "hits": hits, "dim_scores": ds, "reasons": []}
         enriched.append(item)
-        for d in (1, 2, 3, 4):
+        for d in (1, 2, 3, 4, 5):
             if ds.get(d) is not None:
                 by_dim[d].append({**item, "_pct": ds[d]})
     for d in by_dim:
@@ -688,7 +741,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     result = {"main": main, "by_dim": by_dim, "dims_available": dims_avail,
               "dim_status": dim_status, "min_dims": eff_min_dims,
               "refine_status": refine_status,
-              "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4)},
+              "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4, 5)},
               "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
     _RESULT_CACHE[_key] = (_now, result)
     return result
