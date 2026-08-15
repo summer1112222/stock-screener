@@ -70,4 +70,19 @@ m=['quality._is_in_session' if hasattr(quality,'_is_in_session') else 'MISSING q
 print(' | '.join(m))" 2>/dev/null || echo "exec 失败(容器可能未就绪)")
 echo "  $SELF"
 
+echo "=== 7. 路由冒烟(快路由断言非5xx,抓运行时崩溃;quality 慢路由不在此列) ==="
+smoke_ok=1
+for path in /api/health /api/fields /api/boards /api/market; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "http://localhost:${PORT}${path}" 2>/dev/null || echo 000)
+  if [ "$code" = 200 ]; then
+    echo "  ✓ $path 200"
+  else
+    echo "  ✗ $path $code(非200,可能有运行时错误)"
+    smoke_ok=0
+  fi
+done
+if [ "$smoke_ok" != 1 ]; then
+  echo "✗ 路由冒烟有非200,查: docker logs a-screener --tail 80"
+fi
+
 echo "=== 部署完成: http://localhost:${PORT}/web/index.html ==="

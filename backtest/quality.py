@@ -185,6 +185,10 @@ def _dim_scores(df, universe, days, min_signals, close=None):
             import backtest.buffett as bt_buf
             if not getattr(bt_buf, "_AK_OK", False):
                 status["2"] = "err:_AK_OK=False"
+            elif bt_buf.akshare_blocked():
+                # akshare 财报接口熔断(连续失败):跳 analyze_many 省 40s 白烧,
+                # 下方 spot估值代理块接管(status 非 "ok" 且无 scores[2]→进降级)
+                status["2"] = "skip(akshare熔断→spot估值代理)"
             else:
                 # 性能：不全市场逐股拉 buffett，先 shortlist 缩到 ≤80 只
                 # （spec §7.5）。非 shortlist 标的口径2 分位=None。

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import pandas as pd
 from typing import Any
 
@@ -42,6 +43,17 @@ app.add_middleware(
 )
 
 DISCLAIMER = "仅公开数据筛选结果，不构成投资建议，不承诺收益，不输出买卖点。市场有风险，决策请独立判断。"
+
+
+@app.on_event("startup")
+def _startup_warm():
+    """容器启动即后台预热 quality 缓存(用卷内已有 spot,不依赖 /api/refresh 完成)。
+
+    refresh_all 在 akshare 被封时重试退避可>150s,若 warm 须等 refresh 完成则
+    迟迟不触发。改为启动即用持久化 spot 预热:daemon 线程不阻塞启动,akshare 被封
+    时 deadline 内填部分 buffett 缓存(落盘7天)也优于无;之后用户首次开"优质筛选"
+    tab 命中缓存秒开。spot 为空(首次部署)则 shortlist 空→no-op,下次 refresh 后补。"""
+    _warm_quality_cache_background()
 
 # 启动即建表，避免首次访问 /api/* (未经 /api/refresh) 时 "no such table" 500
 db.init_db()
@@ -318,13 +330,58 @@ def screen(category: str = Query("行业"),
                                "total": res["total"], "skipped": res["skipped"]})
 
 
+_warm_lock = threading.Lock()
+
+
+def _warm_quality_cache():
+    """refresh 后同步预热 quality 缓存(供后台线程调用)。
+
+    填两层缓存:
+    1) buffett fundamentals_cache(7天TTL):对 shortlist 80 只(非全市场5200,
+       CLAUDE.md"不进refresh"口径是对全市场,80只已在 quality 口径2用)调
+       analyze_many 填财报缓存——之后用户开 tab 时 buffett 各只命中7天缓存秒回,
+       不再每只耗15-20s拉 akshare。
+    2) quality 结果缓存(默认参数,对齐前端 qLoad 下拉默认值):用户用默认设置
+       开 tab 直接命中5min缓存秒回。
+    预热失败不影响 refresh(用户开 tab 时按需重算,有 buffett 缓存兜底已快很多)。
+    """
+    if not getattr(bt_buf, "_AK_OK", False):
+        return False
+    try:
+        from backtest import quality
+        sl = bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80)
+        if sl:
+            bt_buf.analyze_many(sl, deadline_s=120.0)  # 后台预热:deadline 更宽(120s)求更全缓存
+        # 预填默认参数 quality 结果缓存(与前端 qLoad 默认下拉一致,refine 默认 True)
+        quality.quality_rank(universe="stock", days=20, min_dims=2, min_turnover=5e7,
+                             max_per_board=3, max_corr=0.85, limit=20, combo_method="greedy",
+                             dim_thresh=0.6, refine=True, refine_pool=50)
+    except Exception:
+        return False
+    return True
+
+
+def _warm_quality_cache_background():
+    """后台 daemon 线程预热,不阻塞 refresh 响应;已在跑则跳过(非阻塞锁)。"""
+    if not _warm_lock.acquire(blocking=False):
+        return  # 上次预热仍在跑,跳过避免叠加
+    def _run():
+        try:
+            _warm_quality_cache()
+        finally:
+            _warm_lock.release()
+    threading.Thread(target=_run, daemon=True, name="warm-quality").start()
+
+
 @app.api_route("/api/refresh", methods=["GET", "POST"])
 def refresh():
     """手动触发全量采集刷新。
 
     兼容 GET(浏览器地址栏直接触发) 与 POST(脚本/curl)，本地原型刷新幂等。
+    refresh 后后台预热 quality 缓存(不阻塞响应),使首次开"优质筛选"tab 秒开。
     """
     report = collector.refresh_all()
+    _warm_quality_cache_background()
     return _wrap(report)
 
 

@@ -106,6 +106,31 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 # 单只 akshare 财务摘要拉取超时秒，防 quality(stock) 口径2 逐只拉取卡死
 _AK_TIMEOUT = 20
 
+# 运行时熔断:akshare 财报接口连续失败(超时/异常)≥3 次→熔断30min。
+# 期间 quality 口径2 跳过 analyze_many 直奔 spot估值代理,省掉 80只×20s deadline 白烧
+# (akshare 被封是常态,见 CLAUDE.md;熔断后30min自动重试恢复)。模块级单例,多线程读写近似值。
+import time as _btime
+_CONSEC_FAIL = 0          # 连续失败计数(成功即归零)
+_BLOCKED_UNTIL = 0.0      # 熔断到期时间戳;0=未熔断
+_BLOCK_WINDOW = 1800.0    # 熔断窗口(秒)
+
+
+def _note_fetch(ok: bool) -> None:
+    """记录单次拉取结果,维护熔断状态(供 fetch_abstract 调,亦可测试直调)。"""
+    global _CONSEC_FAIL, _BLOCKED_UNTIL
+    if ok:
+        _CONSEC_FAIL = 0
+        _BLOCKED_UNTIL = 0.0
+    else:
+        _CONSEC_FAIL += 1
+        if _CONSEC_FAIL >= 3:
+            _BLOCKED_UNTIL = _btime.time() + _BLOCK_WINDOW
+
+
+def akshare_blocked() -> bool:
+    """akshare 财报接口是否处于熔断(连续失败)。quality 口径2 调:True→跳 buffett。"""
+    return _btime.time() < _BLOCKED_UNTIL
+
 
 def _fetch_net(code: str):
     """实际拉取调用，单独抽出便于线程超时包装。"""
@@ -114,19 +139,26 @@ def _fetch_net(code: str):
 
 def fetch_abstract(code: str) -> tuple[pd.DataFrame | None, bool]:
     """返回 (df, stale)。缓存7天TTL；_AK_OK=False 或单只超时(20s)时降级返回过期缓存(stale=True)。
-    超时包装防 akshare hang 导致 quality(stock) 卡死。"""
+    超时包装防 akshare hang 导致 quality(stock) 卡死。熔断:_note_fetch 记每次网络结果,
+    akshare 被封常快速返回空 DataFrame(非 20s 超时),空结果亦计失败——否则熔断永不触发,
+    quality 口径2 仍每只白烧 deadline。连续≥3次→akshare_blocked() 熔断30min。"""
     df, status = _cache_get(code, allow_stale=False)
     if status == "hit":
         return df, False
     if _AK_OK:
+        ok = False
+        net = None
         try:
             with ThreadPoolExecutor(max_workers=1) as ex:
                 net = ex.submit(_fetch_net, code).result(timeout=_AK_TIMEOUT)
             if net is not None and not net.empty:
                 _cache_set(code, net)
-                return net, False
+                ok = True
         except (FuturesTimeout, Exception):
-            pass
+            ok = False
+        _note_fetch(ok)  # 成功重置;超时/异常/空结果均计失败,≥3次熔断
+        if ok:
+            return net, False
     df_s, _ = _cache_get(code, allow_stale=True)
     if df_s is not None:
         return df_s, True

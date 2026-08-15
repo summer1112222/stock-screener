@@ -304,3 +304,68 @@ def test_analyze_many_no_deadline_waits_all(monkeypatch):
     out = buffett.analyze_many(["a", "b", "c"])  # 默认 None
     assert {r["code"] for r in out} == {"a", "b", "c"}
     assert len(seen) == 3
+
+
+def test_akshare_blocked_circuit(monkeypatch):
+    """连续失败≥3次→熔断;成功→重置;熔断窗口内 akshare_blocked()=True。
+    quality 口径2据此跳 buffett 省 40s 白烧(akshare 被封常态)。"""
+    buffett = sys.modules.get("backtest.buffett") or __import__("backtest.buffett", fromlist=["x"])
+    buffett._CONSEC_FAIL = 0
+    buffett._BLOCKED_UNTIL = 0.0
+    assert buffett.akshare_blocked() is False
+    buffett._note_fetch(False)
+    buffett._note_fetch(False)
+    assert buffett.akshare_blocked() is False, "2次失败未达熔断阈值3"
+    buffett._note_fetch(False)  # 第3次→熔断
+    assert buffett.akshare_blocked() is True, "3次连续失败应熔断"
+    # 成功拉取→重置熔断
+    buffett._note_fetch(True)
+    assert buffett.akshare_blocked() is False, "成功应解除熔断"
+
+
+def test_fetch_abstract_records_fail_on_timeout(monkeypatch):
+    """fetch_abstract 网络超时时调 _note_fetch(False)(驱动熔断)。"""
+    buffett = sys.modules.get("backtest.buffett") or __import__("backtest.buffett", fromlist=["x"])
+    monkeypatch.setattr(buffett, "_AK_OK", True)
+    monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    calls = []
+    monkeypatch.setattr(buffett, "_note_fetch", lambda ok: calls.append(ok))
+    # _fetch_net hang 致 ThreadPoolExecutor 超时
+    import time
+    monkeypatch.setattr(buffett, "_fetch_net", lambda code: time.sleep(5))
+    monkeypatch.setattr(buffett, "_AK_TIMEOUT", 0.2)
+    df, stale = buffett.fetch_abstract("000001")
+    assert df is None
+    assert False in calls, "超时应调 _note_fetch(False)"
+
+
+def test_fetch_abstract_records_fail_on_empty_result(monkeypatch):
+    """_fetch_net 快速返回空 DataFrame(akshare 被封常态,非 20s 超时)亦计失败驱动熔断。
+    旧实现空结果走 fallthrough 不调 _note_fetch,熔断永不触发,quality 口径2 每只白烧 deadline。"""
+    buffett = sys.modules.get("backtest.buffett") or __import__("backtest.buffett", fromlist=["x"])
+    import pandas as pd
+    monkeypatch.setattr(buffett, "_AK_OK", True)
+    monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    calls = []
+    monkeypatch.setattr(buffett, "_note_fetch", lambda ok: calls.append(ok))
+    monkeypatch.setattr(buffett, "_fetch_net", lambda code: pd.DataFrame())  # 空 df 快速返回
+    monkeypatch.setattr(buffett, "_cache_set", lambda code, df: None)
+    df, stale = buffett.fetch_abstract("000001")
+    assert df is None, "空结果应降级 stale 缓存/None"
+    assert False in calls, "空结果应调 _note_fetch(False) 驱动熔断"
+
+
+def test_fetch_abstract_records_success_resets_circuit(monkeypatch):
+    """成功拉取调 _note_fetch(True) 重置熔断(回归守卫:重构勿漏成功路径)。"""
+    buffett = sys.modules.get("backtest.buffett") or __import__("backtest.buffett", fromlist=["x"])
+    import pandas as pd
+    monkeypatch.setattr(buffett, "_AK_OK", True)
+    monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    calls = []
+    monkeypatch.setattr(buffett, "_note_fetch", lambda ok: calls.append(ok))
+    fake_df = pd.DataFrame({"指标": ["每股收益"], "2024-12-31": [1.0]})
+    monkeypatch.setattr(buffett, "_fetch_net", lambda code: fake_df)
+    monkeypatch.setattr(buffett, "_cache_set", lambda code, df: None)
+    df, stale = buffett.fetch_abstract("000001")
+    assert df is fake_df and stale is False
+    assert True in calls, "成功应调 _note_fetch(True) 重置熔断"

@@ -1350,6 +1350,17 @@ document.getElementById('smTdxCode').onkeydown=e=>{if(e.key==='Enter')smTdxProbe
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------
 const qsState={raw:[],sortKey:'resonance',sortDir:'desc',dimSortKey:'resonance',dimSortDir:'desc'};
+// 首次超时自动重试一次:容器刚重启 warmup 后台预热(~55s)期间与首次请求争抢可能>75s,
+// 重试时 warmup 多半已完→缓存命中秒回。二次仍败才报错。
+async function _qsFetch(url){
+  for(let attempt=1;attempt<=2;attempt++){
+    const ctl=new AbortController();
+    const ms=attempt===1?75000:90000;
+    const to=setTimeout(()=>ctl.abort(),ms);
+    try{ const r=await fetch(url,{signal:ctl.signal}).then(r=>r.json()); clearTimeout(to); return r; }
+    catch(e){ clearTimeout(to); if(attempt===2) throw e; }
+  }
+}
 async function qsLoad(){
   const uni=document.getElementById('qsUniverse').value;
   const days=document.getElementById('qsDays').value;
@@ -1360,11 +1371,9 @@ async function qsLoad(){
   const board=document.getElementById('qsBoard').value;
   const corr=document.getElementById('qsCorr').value;
   const btn=document.getElementById('qsRun');
-  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett财报+历史+信号较慢，首次约几十秒；5分钟内重复缓存秒回)...';
-  const ctl=new AbortController();
-  const to=setTimeout(()=>ctl.abort(),75000);  // 75s硬超时:buffett财报网络阻塞或未拉历史时不再无限转
+  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett财报+历史+信号较慢，首次约几十秒；超时自动重试一次，5分钟内重复缓存秒回)...';
   try{
-    const r=await fetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`,{signal:ctl.signal}).then(r=>r.json());
+    const r=await _qsFetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`);
     const d=r.data||{};
     const dt=((Date.now()-t0)/1000).toFixed(1);
     document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
@@ -1374,8 +1383,8 @@ async function qsLoad(){
       Object.entries(ds).map(([k,v])=>{const ok=(v||'').startsWith('ok');return `<span style="color:${ok?'#16A34A':'#F59E0B'};font-size:12px;margin-right:8px" title="${v}">●口径${k}: ${(v||'').slice(0,30)}</span>`;}).join('');
     qsState.raw = d;
     qsRender();
-  }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时(>75s，buffett财报网络阻塞或未拉历史，稍后重试5分钟内缓存命中秒回): '+e; }
-  finally{ clearTimeout(to); btn.disabled=false; }
+  }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时(已重试1次仍败，buffett财报网络阻塞或未拉历史，稍后重试5分钟内缓存命中秒回): '+e; }
+  finally{ btn.disabled=false; }
 }
 function _qscmp(a,b,k,dir){
   const va=a[k],vb=b[k];
