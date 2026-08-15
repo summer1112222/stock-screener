@@ -780,7 +780,11 @@ def _fwd_ret(close_s, date_str: str, k: int) -> float | None:
             return None
         c0 = float(close_s.iloc[pos])
         c1 = float(close_s.iloc[pos + k])
-        return round(c1 / c0 - 1, 4) if c0 else None
+        # c0==0 除零; NaN(停牌日 reindex 产生)经 isfinite 拦截——float('nan')
+        # truthy 致旧 `if c0` 失守,NaN 传至 np.median/JSONResponse(allow_nan=False)→500
+        if not c0 or not np.isfinite(c0) or not np.isfinite(c1):
+            return None
+        return round(c1 / c0 - 1, 4)
     except Exception:
         return None
 
