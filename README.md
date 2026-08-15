@@ -16,7 +16,7 @@
 
 - **实时筛选**：板块/ETF/个股 spot 快照，按字段+运算符条件筛选排序；板块成分股按需实时拉取（东财优先，THS 备援）。
 - **历史回测**：IC/分档/topN 回测、walk-forward/bootstrap 风控、机械信号扫描（ma_breakout/golden_cross/volume_surge 等）+ 信号历史胜率（多 k 矩阵）。
-- **主力动向**：6 通道观察清单（龙虎榜/十大股东/北向/资金流/高管增减持/限售解禁），通道状态三态灯（绿 ok/黄 stale/灰 从未成功），席位/股东聚合、主力行为序列，表头可点击排序。
+- **主力动向**：6 通道观察清单（龙虎榜/十大股东/北向/资金流/高管增减持/限售解禁），通道状态三态灯（绿 ok/黄 stale/灰 从未成功），席位/股东聚合、主力行为序列、主力阶段判定（吸筹/洗盘/拉升/出货计分制+观望）、席位历史胜率、板块-个股资金联动，表头可点击排序。
 - **优质筛选**：四口径（风险调整/价值质量/资金流向/多信号）横截分位 → 共振排序 → 组合层（行业分散+相关性+最小方差权重）+ 盘口精排（盘中流动性深度）。
 - **个股分析**：单股深度卡聚合基本面+评分+主力动向+研报评级+千股千评+技术信号+多因子机械预判 outlook。
 - **持仓跟踪**：本地记录买入，按 spot 最新价算浮盈，到价提醒（浮窗抽屉）。
@@ -53,7 +53,7 @@ docker compose down -v       # 连同数据卷清除
 | 采集 | `GET\|POST /api/refresh` | 手动全量采集 |
 | 历史/回测 | `POST /api/backtest/fetch` `/api/backtest/eval` `/api/backtest/run` `/api/backtest/walkforward` `GET /api/history` | 拉历史日线 / IC分档 / topN回测 / walk-forward / 历史查询 |
 | 候选/信号 | `GET /api/candidates` `POST /api/signals` `/api/signals/backtest` | 候选池排序 / 机械信号扫描 / 信号历史胜率 |
-| 主力动向 | `GET /api/smart-money/today` `POST /api/smart-money/refresh` `/api/smart-money/channels` `/api/smart-money/seats` `/api/smart-money/seats-stocks` `/api/smart-money/behavior` `/api/management` `/api/share-unlock` `/api/st-list` | 当日清单 / 采集 / 通道状态 / 游资席位统计 / 席位逐股 / 主力行为序列 / 高管增减持 / 限售解禁 / ST名单 |
+| 主力动向 | `GET /api/smart-money/today` `POST /api/smart-money/refresh` `/api/smart-money/channels` `/api/smart-money/seats` `/api/smart-money/seats-stocks` `/api/smart-money/behavior` `/api/smart-money/phase` `/api/smart-money/seat-winrate` `/api/smart-money/board-link` `/api/management` `/api/share-unlock` `/api/st-list` | 当日清单 / 采集 / 通道状态 / 游资席位统计 / 席位逐股 / 主力行为序列 / 主力阶段判定 / 席位胜率 / 板块联动 / 高管增减持 / 限售解禁 / ST名单 |
 | 优质/基本面 | `GET /api/quality` `/api/buffett` `/api/buffett/top` `/api/chip` `/api/tdx/quote` `/api/tdx/company-info` | 多口径共振 / 巴菲特式基本面评分 / 筹码分布 / 通达信实时五档 / 公司信息文本 |
 | 研报 | `GET /api/research` `/api/comments` | 研报评级 / 千股千评 |
 | 个股分析 | `GET /api/stock-analysis?code=` | 单股深度卡（聚合基本面+主力+研报+信号+预判） |
