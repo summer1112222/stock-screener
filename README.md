@@ -12,13 +12,15 @@
 - "候选池/优质筛选/主力动向"是按因子机械排序的观察清单，措辞用"筛选/排序/观察清单"，不得用"推荐/买入/卖出"。
 - 市场有风险，投资决策请独立判断，盈亏自负。
 
-## 功能（4 tab + 持仓 + 数据健康）
+## 功能（5 tab + 持仓 + 自选 + 数据健康）
 
-- **实时筛选**：板块/ETF/个股 spot 快照，按字段+运算符条件筛选排序。
-- **历史回测**：IC/分档/topN 回测、walk-forward/bootstrap 风控、机械信号扫描（ma_breakout/golden_cross/volume_surge 等）+ 信号历史胜率。
-- **主力动向**：6 通道观察清单（龙虎榜/十大股东/北向/资金流/高管增减持/限售解禁），通道状态三态灯（绿 ok/黄 stale/灰 从未成功），席位/股东聚合，表头可点击排序。
-- **优质筛选**：四口径（风险调整/价值质量/资金流向/多信号）横截分位 → 共振排序 → 组合层（行业分散+相关性+最小方差权重）。
-- **持仓跟踪**：本地记录买入，按 spot 最新价算浮盈（浮窗抽屉）。
+- **实时筛选**：板块/ETF/个股 spot 快照，按字段+运算符条件筛选排序；板块成分股按需实时拉取（东财优先，THS 备援）。
+- **历史回测**：IC/分档/topN 回测、walk-forward/bootstrap 风控、机械信号扫描（ma_breakout/golden_cross/volume_surge 等）+ 信号历史胜率（多 k 矩阵）。
+- **主力动向**：6 通道观察清单（龙虎榜/十大股东/北向/资金流/高管增减持/限售解禁），通道状态三态灯（绿 ok/黄 stale/灰 从未成功），席位/股东聚合、主力行为序列，表头可点击排序。
+- **优质筛选**：四口径（风险调整/价值质量/资金流向/多信号）横截分位 → 共振排序 → 组合层（行业分散+相关性+最小方差权重）+ 盘口精排（盘中流动性深度）。
+- **个股分析**：单股深度卡聚合基本面+评分+主力动向+研报评级+千股千评+技术信号+多因子机械预判 outlook。
+- **持仓跟踪**：本地记录买入，按 spot 最新价算浮盈，到价提醒（浮窗抽屉）。
+- **自选股**：未买入跟踪观察清单（独立抽屉），信号/分析卡一键"＋自选"。
 - **数据健康**：顶部 banner + 抽屉，全局数据新鲜度三态总览（7 域 + overall），60s 轮询，手动刷新采集。
 
 ## 快速开始
@@ -46,36 +48,40 @@ docker compose down -v       # 连同数据卷清除
 
 | 域 | 路由 | 说明 |
 |---|---|---|
-| 元 | `GET /api/meta`、`/api/health` | 最近更新时间 / 数据健康聚合(7域三态+overall) |
-| 筛选 | `GET /api/fields` `/api/boards` `/api/etfs` `/api/screen` | 字段目录 / 板块·ETF·个股排名 / 条件筛选 |
-| 采集 | `GET|POST /api/refresh` | 手动全量采集 |
+| 元 | `GET /api/meta`、`/api/health`、`/api/market` | 最近更新时间 / 数据健康聚合(7域三态+overall) / 市场温度快照+趋势 |
+| 筛选 | `GET /api/fields` `/api/boards` `/api/etfs` `/api/board-stocks` `/api/screen` `/api/stock-search` | 字段目录 / 板块·ETF·个股排名 / 板块成分股 / 条件筛选 / 代码·名称搜索 |
+| 采集 | `GET\|POST /api/refresh` | 手动全量采集 |
 | 历史/回测 | `POST /api/backtest/fetch` `/api/backtest/eval` `/api/backtest/run` `/api/backtest/walkforward` `GET /api/history` | 拉历史日线 / IC分档 / topN回测 / walk-forward / 历史查询 |
 | 候选/信号 | `GET /api/candidates` `POST /api/signals` `/api/signals/backtest` | 候选池排序 / 机械信号扫描 / 信号历史胜率 |
-| 主力动向 | `GET /api/smart-money/today` `POST /api/smart-money/refresh` `/api/smart-money/channels` `/api/management` `/api/share-unlock` `/api/st-list` | 当日清单 / 采集 / 通道状态 / 高管增减持 / 限售解禁 / ST名单 |
-| 优质/基本面 | `GET /api/quality` `/api/buffett` `/api/buffett/top` | 多口径共振 / 巴菲特式基本面评分 |
+| 主力动向 | `GET /api/smart-money/today` `POST /api/smart-money/refresh` `/api/smart-money/channels` `/api/smart-money/seats` `/api/smart-money/seats-stocks` `/api/smart-money/behavior` `/api/management` `/api/share-unlock` `/api/st-list` | 当日清单 / 采集 / 通道状态 / 游资席位统计 / 席位逐股 / 主力行为序列 / 高管增减持 / 限售解禁 / ST名单 |
+| 优质/基本面 | `GET /api/quality` `/api/buffett` `/api/buffett/top` `/api/chip` `/api/tdx/quote` `/api/tdx/company-info` | 多口径共振 / 巴菲特式基本面评分 / 筹码分布 / 通达信实时五档 / 公司信息文本 |
 | 研报 | `GET /api/research` `/api/comments` | 研报评级 / 千股千评 |
-| 持仓 | `GET|POST /api/portfolio` `/api/portfolio/close` | 本地持仓跟踪 |
+| 个股分析 | `GET /api/stock-analysis?code=` | 单股深度卡（聚合基本面+主力+研报+信号+预判） |
+| 持仓 | `GET\|POST /api/portfolio` `DELETE /api/portfolio/{pid}` `PATCH /api/portfolio/{pid}` | 本地持仓 / 平仓 / 到价提醒 |
+| 自选 | `GET\|POST /api/watchlist` `DELETE /api/watchlist/{wid}` | 自选股观察清单 |
 
 ## 架构
 
 ```
 data/        采集与存储
   models.py(规范字段/AKShare别名/SQLite schema) db.py(连接/建表/迁移/upsert/query/meta)
-  collector.py(spot快照:板块/ETF/ST) history.py(历史日线)
+  collector.py(spot快照:板块/ETF/ST) history.py(历史日线,通达信主源+本地qfq)
+  adjust.py(前复权本地计算:pytdx xdxr归一化) pytdx_client.py(通达信直连薄客户端:实时五档/日K/公司信息)
+  board_stocks.py(板块成分股按需,东财优先THS备援) market.py(市场温度:涨跌家数/估值/两融)
   fundamentals.py(三大财报按需+缓存7天TTL) research.py(研报+千股千评)
-  portfolio.py(本地持仓) smart_money.py(主力动向6通道+stale降级+北向多级备援)
+  portfolio.py(本地持仓) watchlist.py(自选股观察清单) smart_money.py(主力动向6通道+stale降级)
 screener/    实时筛选
   conditions.py(因子目录/运算符) engine.py(快照过滤排序/派生因子)
-  smart_money.py(主力动向查询/聚合,只读)
+  smart_money.py(主力动向查询/聚合+筹码分布+行为序列,只读不触网)
 backtest/    历史研究
   eval.py(IC/IR/分档) engine.py(topN回测) risk.py robust.py(风控/walk-forward/bootstrap)
-  candidates.py(候选池) buffett.py(巴菲特基本面v2) signals.py(机械信号)
+  candidates.py(候选池) buffett.py(巴菲特基本面v2+剩余收益估值) signals.py(机械信号)
   quality.py(四口径共振优质筛选编排层,只读因子源不新增表)
-api/server.py  FastAPI 单文件入口(所有路由 + _wrap)
-web/index.html 单页前端(原生JS,4 tab + 持仓抽屉 + 数据健康banner,从/api/fields动态渲染)
+api/server.py  FastAPI 单文件入口(所有路由 + _wrap；个股分析卡逻辑inline在此)
+web/index.html 单页前端(原生JS,5 tab + 持仓/自选抽屉 + 数据健康banner,从/api/fields动态渲染)
 ```
 
-**四层 + 两个领域模块**：采集层只取数入库；筛选/查询层只读库不触网；回测层只读历史；`api/server.py` 入口经 `_wrap` 统一附 disclaimer。`quality.py` 是编排层，复用 buffett/signals/smart_money/candidates 结果，不新增表。
+**四层 + 两个领域模块**：采集层只取数入库；筛选/查询层只读库不触网；回测层只读历史；`api/server.py` 入口经 `_wrap` 统一附 disclaimer。`quality.py` 是编排层，复用 buffett/signals/smart_money/candidates 结果，不新增表。`adjust.py`+`pytdx_client.py` 使通达信成历史日 K 自洽主源（不再依赖新浪/东财 qfq 接口）。
 
 ## 数据源与已知限制
 
