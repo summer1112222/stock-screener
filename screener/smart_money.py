@@ -231,6 +231,28 @@ def _histogram(values, weights, bins=20):
     return out
 
 
+def _chip_series(close_s, amount_s, window: int, spot: float):
+    """滚动算近 len(close_s)-window 日每日的 (avg_cost, profit_ratio, chip_concentration)。
+    返回 dict 列表按日期升序。close_s/amount_s 已对齐升序 Series。"""
+    out = []
+    arr_c = close_s.values.astype(float)
+    arr_w = amount_s.reindex(close_s.index).values.astype(float) if amount_s is not None else None
+    n = len(arr_c)
+    for end in range(window, n + 1):
+        c = arr_c[end - window:end]
+        w = (arr_w[end - window:end] if arr_w is not None else np.ones(window))
+        w = np.where(np.isnan(w) | (w < 0), 0.0, w)
+        tot = float(w.sum())
+        if tot <= 0:
+            w = np.ones(window); tot = float(window)
+        avg = float((c * w).sum() / tot)
+        pr = float(w[c < spot].sum() / tot) if spot else None
+        var = float((w * (c - avg) ** 2).sum() / tot)
+        conc = (math.sqrt(var) / avg) if avg else None
+        out.append({"avg_cost": avg, "profit_ratio": pr, "chip_concentration": conc})
+    return out
+
+
 def chip_distribution(code: str, window: int = 60,
                       spot_price: float | None = None) -> dict:
     """移动成交量加权成本分布（收盘价代理成交价）。
@@ -246,7 +268,8 @@ def chip_distribution(code: str, window: int = 60,
     base = {"code": code, "window": window, "need_history": False,
             "avg_cost": None, "profit_ratio": None, "loss_ratio": None,
             "chip_concentration": None, "chip_range_90": None,
-            "distribution": [], "n_days": 0, "spot": None, "spot_source": None}
+            "distribution": [], "n_days": 0, "spot": None,
+            "trend": {}, "spot_source": None}
     close, amount = _uni_panels("stock", [code])
     if close is None or close.empty or code not in close.columns:
         base["need_history"] = True
@@ -299,6 +322,33 @@ def chip_distribution(code: str, window: int = 60,
     if avg_cost and p05 is not None and p95 is not None:
         chip_range_90 = (p95 - p05) / avg_cost
     dist = _histogram(c, w, bins=20)
+    # 筹码迁移趋势: 近20日每日 chip 指标序列
+    trend = {}
+    try:
+        full_c = close[code].dropna()
+        full_a = amount[code].dropna() if (amount is not None and code in amount.columns) else None
+        common = full_c.index
+        if full_a is not None:
+            common = full_c.index.intersection(full_a.index)
+            full_c = full_c.loc[common]; full_a = full_a.loc[common]
+        if len(full_c) > window + 5:
+            ser = _chip_series(full_c, full_a, window, spot)
+            if len(ser) >= 5:
+                pr5 = [x["profit_ratio"] for x in ser[-5:] if x["profit_ratio"] is not None]
+                pr20 = [x["profit_ratio"] for x in ser[-20:] if x["profit_ratio"] is not None]
+                co5 = [x["chip_concentration"] for x in ser[-5:] if x["chip_concentration"] is not None]
+                co20 = [x["chip_concentration"] for x in ser[-20:] if x["chip_concentration"] is not None]
+                ac5 = [x["avg_cost"] for x in ser[-5:]]
+                ac20 = [x["avg_cost"] for x in ser[-20:]]
+                trend = {
+                    "profit_ratio_5d": [round(v, 4) for v in pr5],
+                    "profit_ratio_20d": [round(v, 4) for v in pr20],
+                    "profit_ratio_delta": round(float(np.mean(pr5) - np.mean(pr20)), 4) if pr5 and pr20 else None,
+                    "chip_concentration_delta": round(float(np.mean(co5) - np.mean(co20)), 4) if co5 and co20 else None,
+                    "avg_cost_delta": round(float(np.mean(ac5) - np.mean(ac20)), 4) if ac5 and ac20 else None,
+                }
+    except Exception:
+        pass
     return {**base,
             "avg_cost": round(avg_cost, 4),
             "profit_ratio": round(profit_ratio, 4),
@@ -306,6 +356,7 @@ def chip_distribution(code: str, window: int = 60,
             "chip_concentration": round(chip_conc, 4) if chip_conc is not None else None,
             "chip_range_90": round(chip_range_90, 4) if chip_range_90 is not None else None,
             "distribution": dist,
+            "trend": trend,
             "spot": round(spot, 4), "spot_source": src}
 
 
