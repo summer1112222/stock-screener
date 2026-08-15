@@ -801,6 +801,28 @@ def sm_seats_stocks(date: str | None = Query(None)):
         "cand_disclaimer": SM_CAND_DISCLAIMER})
 
 
+@app.get("/api/smart-money/phase")
+def smart_money_phase(code: str = Query(..., description="股票代码")):
+    from screener.smart_money import main_force_phase
+    return _wrap(main_force_phase(code),
+                 {"cand_disclaimer": "主力阶段机械判定(计分制),研究观察非买卖信号,盈亏自负。"})
+
+
+@app.get("/api/smart-money/seat-winrate")
+def smart_money_seat_winrate(actor: str = Query(..., description="席位/游资名"),
+                             k: int = Query(5), days: int = Query(180)):
+    from screener.smart_money import seat_winrate
+    return _wrap(seat_winrate(actor, k=k, days=days),
+                 {"cand_disclaimer": "席位历史胜率统计事实,非预测,盈亏自负。"})
+
+
+@app.get("/api/smart-money/board-link")
+def smart_money_board_link(code: str = Query(..., description="股票代码")):
+    from screener.smart_money import board_money_link
+    return _wrap(board_money_link(code),
+                 {"cand_disclaimer": "板块-个股资金联动机械统计,非买卖信号,盈亏自负。"})
+
+
 # ------------------------------------------------------------------
 # ST名单 / 高管增减持 / 限售解禁 / 研报评级 / 千股千评（观察清单口径）
 # ------------------------------------------------------------------

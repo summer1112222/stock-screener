@@ -156,3 +156,30 @@ def test_sm_refresh_multi_channel(monkeypatch):
     r = client.post("/api/smart-money/refresh?channel=资金流,龙虎榜")
     assert r.status_code == 200
     assert captured["channels"] == ["资金流", "龙虎榜"]
+
+
+def test_smart_money_phase_route(monkeypatch):
+    import screener.smart_money as sm
+    monkeypatch.setattr(sm, "main_force_phase",
+        lambda c, days=30: {"code":c,"phase":"吸筹","confidence":0.75,"triggers":[],"indicators":{}})
+    r = client.get("/api/smart-money/phase?code=000001")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"]["phase"] == "吸筹"   # _wrap 把数据放 data 键
+    assert "cand_disclaimer" in body
+
+
+def test_smart_money_seat_winrate_route(monkeypatch):
+    import screener.smart_money as sm
+    monkeypatch.setattr(sm, "seat_winrate", lambda a, k=5, days=180: {"actor":a,"samples":0,"by_k":{}})
+    r = client.get("/api/smart-money/seat-winrate?actor=testseat&k=5")  # ascii 避编码问题
+    assert r.status_code == 200
+    assert "cand_disclaimer" in r.json()
+
+
+def test_smart_money_board_link_route(monkeypatch):
+    import screener.smart_money as sm
+    monkeypatch.setattr(sm, "board_money_link", lambda c: {"code":c,"board":"银行","board_rank":1})
+    r = client.get("/api/smart-money/board-link?code=000001")
+    assert r.status_code == 200
+    assert r.json()["data"]["board"] == "银行"
