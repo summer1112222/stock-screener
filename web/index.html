@@ -1461,6 +1461,10 @@ function _renderChip(chip){
       ${_kv('套牢盘',chip.loss_ratio!=null?(chip.loss_ratio*100).toFixed(1)+'%':'—')}
       ${_kv('集中度',chip.chip_concentration!=null?chip.chip_concentration.toFixed(3):'—')}
     </div>
+    ${chip.trend && chip.trend.profit_ratio_delta!=null ? (()=>{
+      const up = chip.trend.profit_ratio_delta>=0;
+      return `<div style="font-size:11px;margin-top:2px">迁移: 获利盘5/20日Δ <span style="color:${up?'#dc2626':'#16a34a'}">${(chip.trend.profit_ratio_delta*100).toFixed(1)}%</span> · 集中度Δ ${chip.trend.chip_concentration_delta!=null?(chip.trend.chip_concentration_delta*100).toFixed(1)+'%':'—'}</div>`;
+    })():''}
     <div style="font-size:11px;color:var(--muted);margin-top:2px">绿=获利盘(低于现价) 橙=套牢盘 · ${srcTxt} · 移动成本机械统计非支撑压力预测</div>`;
 }
 function _renderBehavior(b){
@@ -1506,6 +1510,15 @@ async function _tdxInfoLoad(code, cat){
     const d=ti.data||{};
     el.textContent=((d.content)||(d.err)||'无').toString();
   }catch(e){ el.textContent='加载失败: '+e; }
+}
+const PHASE_COLOR = {吸筹:"#dc2626", 洗盘:"#ca8a04", 拉升:"#ea580c", 出货:"#16a34a", 观望:"#6b7280"};
+async function fetchPhase(code){
+  const r=await fetch(`${API}/api/smart-money/phase?code=${encodeURIComponent(code)}`,{signal:AbortSignal.timeout(15000)}).then(r=>r.json()).catch(()=>null);
+  const p=r&&r.data;
+  if(!p||!p.phase) return;
+  const el=document.getElementById('saPhase'); if(!el) return;
+  el.innerHTML=`<span style="background:${PHASE_COLOR[p.phase]||'#6b7280'};color:#fff;padding:2px 10px;border-radius:8px;font-size:13px">${p.phase} ${(p.confidence*100|0)}%</span>`
+    +`<div style="font-size:12px;color:var(--muted);margin-top:4px">${(p.triggers||[]).join(' · ')}</div>`;
 }
 async function anRun(){
   const code=(document.getElementById('anCode').value||'').trim();
@@ -1587,6 +1600,7 @@ async function anRun(){
           ${_kv('数据陈旧',f.stale_data?'是':'否')}
         </div>
         <div><div class="card-t" style="font-size:13px">主力动向(近${sm.total_rows||0}行)</div>
+          <div id="saPhase"></div>
           ${daily.length>1?`<div style="font-size:11px;color:var(--muted);margin-bottom:2px">每日主力净额时序</div>${sparkline(dailyCurve,'#3B82F6')}`:''}
           <table><thead><tr><th>通道</th><th class="num">净额(元)</th><th class="num">次数</th></tr></thead><tbody>${smRows}</tbody></table>
           <div style="margin-top:8px">${flagHtml}</div>
@@ -1602,6 +1616,7 @@ async function anRun(){
       ${behaviorHtml}
       ${tdxInfoHtml}
     `;
+    fetchPhase(code);
     // 公司信息类别切换(重取该类别文本)
     const _tdxCat=document.getElementById('tdxCat');
     if(_tdxCat) _tdxCat.onchange=(e)=>_tdxInfoLoad(code,e.target.value);
