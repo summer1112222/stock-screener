@@ -132,6 +132,22 @@ def _to_pct(s: pd.Series) -> pd.Series:
     return s.rank(pct=True, method="average")
 
 
+def _avg_rank_pct(factors: list, codes: list) -> pd.Series:
+    """每个因子先转横截 rank-pct(_to_pct)，再按 code 取可用因子的均值。
+
+    缺失(None/NaN)因子跳过、不拖累该 code。比 zscore 等权更抗异常值
+    （涨停极端动量不再主导，rank 天然夹在 [0,1]），且支持异质缺失
+    （不同 code 命中不同因子集时仍可比较）。返回 code->pct Series（index=codes）。
+    全因子缺失的 code → NaN（_to_float 转 None，不计命中）。"""
+    if not factors:
+        return pd.Series(dtype=float, index=codes)
+    pct = pd.DataFrame({
+        f"_{i}": _to_pct(pd.to_numeric(f, errors="coerce")).reindex(codes)
+        for i, f in enumerate(factors)
+    })
+    return pct.mean(axis=1, skipna=True)
+
+
 def _tradable(df: pd.DataFrame, min_turnover: float, limit_pct: float) -> pd.DataFrame:
     """可交易性预筛：排除 ST/停牌/涨停/低成交额。复用 candidates 风格。"""
     if df is None or df.empty:
@@ -214,10 +230,14 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                 moat = pd.Series({r["code"]: r.get("moat_score") for r in results}).dropna()
                 lroe = pd.Series({r["code"]: (r.get("ratios") or {}).get("leverage_adj_roe")
                                   for r in results}).dropna()
-                comp = (_zscore(ey) + _zscore(moat) + _zscore(lroe)) / 3
-                pct = _to_pct(comp)
+                # 丰富因子(B):纳 buffett 已算的 ROIC/安全边际/盈利含金量,不增网络调用
+                roic = pd.Series({r["code"]: (r.get("ratios") or {}).get("roic") for r in results}).dropna()
+                mos = pd.Series({r["code"]: r.get("margin_of_safety") for r in results}).dropna()
+                oet = pd.Series({r["code"]: (r.get("ratios") or {}).get("owner_earnings_to_ni")
+                                 for r in results}).dropna()
+                comp = _avg_rank_pct([ey, moat, lroe, roic, mos, oet], codes)
                 for c in codes:
-                    scores[c][2] = _to_float(pct.get(c)) if c in pct.index else None
+                    scores[c][2] = _to_float(comp.get(c)) if c in comp.index else None
                 dims_avail.append(2)
                 status["2"] = "ok"
         except Exception as e:
