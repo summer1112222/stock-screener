@@ -12,6 +12,7 @@ import math
 from datetime import datetime, timedelta
 
 import numpy as np
+import pandas as pd
 
 from data import db, smart_money as sm_data
 
@@ -757,3 +758,84 @@ def board_money_link(code: str) -> dict:
                          params=("行业", "5日", board), limit=0)
     base["board_5d_trend"] = [_nan(r.get("main_net_inflow")) for r in sff5]
     return base
+
+
+# ------------------------------------------------------------------
+# 席位胜率（Task 4）
+# ------------------------------------------------------------------
+
+def _fwd_ret(close_s, date_str: str, k: int) -> float | None:
+    """date_str 当日 close -> k 日后 close 收益率。不足→None。close_s 升序 Series。"""
+    try:
+        idx = pd.to_datetime(close_s.index)
+        target = pd.to_datetime(date_str)
+        pos = idx.get_loc(target) if target in idx else None
+        if pos is None:
+            # 最近一天
+            mask = idx <= target
+            if not mask.any():
+                return None
+            pos = int(mask.sum()) - 1
+        if pos + k >= len(close_s):
+            return None
+        c0 = float(close_s.iloc[pos])
+        c1 = float(close_s.iloc[pos + k])
+        return round(c1 / c0 - 1, 4) if c0 else None
+    except Exception:
+        return None
+
+
+def seat_winrate(actor: str, k: int = 5, days: int = 180) -> dict:
+    """席位胜率: 该 actor(或'国家队'展开) 近 days 日龙虎榜上榜个股,
+    前视 k 日收益的中位数+胜率(正占比)。多 k(5/10/20)。
+    依赖 smart_money_action 历史龙虎榜(需先跑 scripts/backfill_lhb_history.py)
+    + stock_daily 前视(需先 /api/backtest/fetch)。历史统计事实非预测。"""
+    actor = actor or ""
+    out = {"actor": actor, "samples": 0, "by_k": {}, "recent": [], "note": ""}
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    if actor == _NATIONAL_TEAM_KEYWORD:
+        keys = _expand_national_team() or [actor]
+    else:
+        keys = [actor]
+    rows = []
+    for key in keys:
+        rows += db.query_rows("smart_money_action",
+                              where="channel = ? AND actor LIKE ? AND date >= ?",
+                              params=("龙虎榜", f"%{key}%", since),
+                              order_by="date DESC", limit=0)
+    # 去重 (code,date)
+    seen = set()
+    pairs = []
+    for r in rows:
+        key = (str(r.get("code")), str(r.get("date")))
+        if key in seen or not r.get("code"):
+            continue
+        seen.add(key)
+        pairs.append({"code": str(r["code"]), "date": str(r.get("date")),
+                      "name": r.get("name"), "amount": _nan(r.get("amount"))})
+    if not pairs:
+        out["note"] = "无龙虎榜历史(先跑 scripts/backfill_lhb_history.py)"
+        return out
+    from backtest.signals import _uni_panels
+    close, _ = _uni_panels("stock", list({p["code"] for p in pairs}))
+    for kx in (5, 10, 20):
+        rets = []
+        for p in pairs:
+            if close is None or p["code"] not in close.columns:
+                continue
+            r = _fwd_ret(close[p["code"]], p["date"], kx)
+            if r is not None:
+                rets.append(r)
+        if rets:
+            out["by_k"][str(kx)] = {
+                "median_ret": round(float(np.median(rets)), 4),
+                "win_rate": round(sum(1 for x in rets if x > 0) / len(rets), 4),
+                "n": len(rets)}
+    out["samples"] = max((v.get("n", 0) for v in out["by_k"].values()), default=0)
+    # 近5次明细(k=5)
+    for p in pairs[:5]:
+        if close is not None and p["code"] in close.columns:
+            r = _fwd_ret(close[p["code"]], p["date"], 5)
+            out["recent"].append({**p, "ret_k5": r})
+    return out
+
