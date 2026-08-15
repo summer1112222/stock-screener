@@ -469,3 +469,59 @@ def behavior_series(code: str, days: int = 30) -> dict:
     if not base["channels"]:   # 表空 + finshare 皆无 → 诚实提示
         base["note"] = "无主力动向记录(需先 /api/smart-money/refresh 采集,或该股无finshare资金流历史)"
     return base
+
+
+def _behavior_batch(codes: list[str], days: int = 30) -> dict[str, dict]:
+    """批量行为序列(供 quality 口径3)：**一次**查 smart_money_action since days 前，
+    按 code×channel 聚合算 streak_inflow/outflow/margin_accel/北向cum。
+
+    与 behavior_series 的区别：① 一次 DB 查询服务多个 code(批量)；② 不调 finshare
+    回退(批量场景，缺记录→对应字段 None，不触网)；③ 不返 daily/顶层 channels，仅返
+    口径3 所需 4 个标量。
+
+    合规:主力行为序列机械统计，非买卖信号，盈亏自负。
+    """
+    out: dict[str, dict] = {c: {
+        "streak_inflow": None, "streak_outflow": None,
+        "margin_accel": None, "north_cum": None,
+    } for c in codes}
+    if not codes:
+        return out
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = db.query_rows("smart_money_action",
+                        where="date >= ?",
+                        params=(since,),
+                        order_by="date ASC", limit=0)
+    # code×channel→{date: amount}
+    grid: dict[str, dict[str, dict[str, float]]] = {}
+    for r in rows:
+        c = r.get("code")
+        if c not in out:
+            continue
+        ch = r.get("channel")
+        d = r.get("date")
+        if not ch or not d:
+            continue
+        a = r.get("amount") or 0.0
+        grid.setdefault(c, {}).setdefault(ch, {})
+        grid[c][ch][d] = grid[c][ch].get(d, 0.0) + float(a)
+    for c in codes:
+        chans = grid.get(c, {})
+        # 资金流口径:连续性 + 边际加速
+        ff = chans.get("资金流")
+        if ff:
+            dates_sorted = sorted(ff.keys())
+            amounts = [ff[d] for d in dates_sorted]
+            si, so = _streak(amounts)
+            out[c]["streak_inflow"] = si
+            out[c]["streak_outflow"] = so
+            if len(amounts) >= 5:
+                recent5 = float(np.mean(amounts[-5:]))
+                base_avg = (float(np.mean(amounts[-20:]))
+                            if len(amounts) >= 20 else float(np.mean(amounts)))
+                out[c]["margin_accel"] = round(recent5 - base_avg, 2)
+        # 北向口径:累计净额(聪明资金代理)
+        nb = chans.get("北向")
+        if nb:
+            out[c]["north_cum"] = round(float(sum(nb.values())), 2)
+    return out

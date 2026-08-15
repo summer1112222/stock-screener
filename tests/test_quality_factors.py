@@ -8,6 +8,7 @@ import pandas as pd
 from unittest.mock import patch
 
 from backtest import quality
+from screener import smart_money as sm_q
 
 
 # ---------- Phase 1: _avg_rank_pct helper + 口径2 丰富 ----------
@@ -88,3 +89,89 @@ def test_dim2_enriched_six_factors():
         d1 = (main_codes["000001"].get("dim_scores") or {}).get("2")
         if d5 is not None and d1 is not None:
             assert d5 > d1, "600519 价值质量分位应更高"
+
+
+# ---------- Phase 2: _behavior_batch + 口径3 改造 ----------
+
+def test_behavior_batch_one_query():
+    """一次 DB 查询服务多 code×多 channel,按 code 聚合 streak/cum 正确。"""
+    calls = {"n": 0}
+    rows = [
+        # 000001 资金流:6 日全正(升序)→streak_inflow=6,outflow=0;margin_accel 需≥5
+        {"code": "000001", "channel": "资金流", "date": "2026-08-09", "amount": 1e7},
+        {"code": "000001", "channel": "资金流", "date": "2026-08-10", "amount": 2e7},
+        {"code": "000001", "channel": "资金流", "date": "2026-08-11", "amount": 3e7},
+        {"code": "000001", "channel": "资金流", "date": "2026-08-12", "amount": 4e7},
+        {"code": "000001", "channel": "资金流", "date": "2026-08-13", "amount": 5e7},
+        {"code": "000001", "channel": "资金流", "date": "2026-08-14", "amount": 6e7},
+        # 600519 北向:累计净额
+        {"code": "600519", "channel": "北向", "date": "2026-08-10", "amount": 5e6},
+        {"code": "600519", "channel": "北向", "date": "2026-08-12", "amount": 1e7},
+    ]
+
+    def _qr(table, **kw):
+        calls["n"] += 1
+        return rows
+
+    with patch("data.db.query_rows", side_effect=_qr):
+        bb = sm_q._behavior_batch(["000001", "600519"], days=30)
+    assert calls["n"] == 1, "应仅 1 次 DB 查询(批量)"
+    assert bb["000001"]["streak_inflow"] == 6
+    assert bb["000001"]["streak_outflow"] == 0
+    assert bb["000001"]["margin_accel"] is not None  # 6 日≥5
+    assert bb["600519"]["north_cum"] == round(5e6 + 1e7, 2)
+    # 交叉:600519 无资金流→None;000001 无北向→None
+    assert bb["600519"]["streak_inflow"] is None
+    assert bb["000001"]["north_cum"] is None
+
+
+def test_behavior_batch_no_finshare():
+    """资金流通道空→字段 None,且不触网调 finshare(批量场景不回退)。"""
+    with patch("data.db.query_rows", return_value=[]), \
+         patch("screener.smart_money._finshare_fund_flow_series") as ff:
+        bb = sm_q._behavior_batch(["000001"], days=30)
+    assert bb["000001"]["streak_inflow"] is None
+    assert bb["000001"]["north_cum"] is None
+    assert bb["000001"]["margin_accel"] is None
+    ff.assert_not_called()  # 批量场景不调 finshare 回退
+
+
+def test_dim3_uses_behavior():
+    """口径3 用 _behavior_batch 的 streak/north/marginal,status ok(连续性+北向+边际)。"""
+    quality._RESULT_CACHE.clear()
+    rows = [
+        {"code": "000001", "name": "平A", "latest_price": 10.0, "turnover_amount": 1e8,
+         "change_pct": 2.0, "main_net_inflow": 1e7, "turnover_rate": 3.0,
+         "pe": 15.0, "pb": 1.5, "amplitude": 3.0, "board": "银行"},
+        {"code": "600519", "name": "贵C", "latest_price": 1500.0, "turnover_amount": 2e8,
+         "change_pct": 1.0, "main_net_inflow": 3e7, "turnover_rate": 2.0,
+         "pe": 30.0, "pb": 8.0, "amplitude": 2.0, "board": "白酒"},
+    ]
+    qr = {"stock_spot": rows, "industry_board": []}
+    bb = {
+        "000001": {"streak_inflow": 5, "streak_outflow": 0,
+                   "margin_accel": 1e6, "north_cum": 2e7},
+        "600519": {"streak_inflow": 1, "streak_outflow": 0,
+                   "margin_accel": -5e5, "north_cum": 5e6},
+    }
+
+    with patch("data.db.query_rows", side_effect=lambda t, **k: qr.get(t, [])), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", True), \
+         patch("backtest.buffett.akshare_blocked", return_value=False), \
+         patch("backtest.buffett.shortlist_by_turnover",
+               return_value=["000001", "600519"]), \
+         patch("backtest.buffett.analyze_many", return_value=[]), \
+         patch("screener.smart_money._behavior_batch", return_value=bb), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=False):
+        res = quality.quality_rank(universe="stock", refine=False, min_turnover=0,
+                                   dim_thresh=0.0, min_dims=1)
+    assert res["dim_status"]["3"] == "ok(连续性+北向+边际)", res["dim_status"]
+    main = {m["code"]: m for m in res["main"]}
+    # 000001 streak/north/marginal 均优于 600519 → 口径3 分位更高
+    d1 = (main.get("000001", {}).get("dim_scores") or {}).get("3")
+    d2 = (main.get("600519", {}).get("dim_scores") or {}).get("3")
+    if d1 is not None and d2 is not None:
+        assert d1 > d2, "000001 资金流口径应更高"

@@ -316,26 +316,50 @@ def _dim_scores(df, universe, days, min_signals, close=None):
         except Exception as e:
             status["2"] = f"err:{e}"
 
-    # 口径3 资金流向(smart_money 累计 + spot 当日 + 换手)
+    # 口径3 资金流向(改造A:资金流连续性+北向累计+边际加速,低相关替代高相关三因子;
+    #               限 shortlist,非 shortlist 口径3=None;降级旧 spot 路径)
     try:
         import screener.smart_money as sm_q
-        sm = sm_q.top_by_amount(days=days, market=None, channel=None, limit=10000)
-        sm_amt = {r.get("code"): r.get("amount") for r in sm.get("rows", [])}
-        spot_amt = pd.to_numeric(df.get("main_net_inflow"), errors="coerce").values \
-            if "main_net_inflow" in df.columns else None
-        spot_tr = pd.to_numeric(df.get("turnover_rate"), errors="coerce").values \
-            if "turnover_rate" in df.columns else None
-        sm_s = pd.Series([sm_amt.get(c) for c in codes], index=codes, dtype=float)
-        sa = pd.Series(spot_amt, index=codes, dtype=float) if spot_amt is not None \
-            else pd.Series(dtype=float, index=codes)
-        st = pd.Series(spot_tr, index=codes, dtype=float) if spot_tr is not None \
-            else pd.Series(dtype=float, index=codes)
-        comp = (_zscore(sm_s) + _zscore(sa) + _zscore(st)) / 3
-        pct = _to_pct(comp)
-        for c in codes:
-            scores[c][3] = _to_float(pct.get(c)) if c in pct.index else None
-        dims_avail.append(3)
-        status["3"] = "ok(仅spot)" if not sm.get("rows") else "ok"
+        used_new = False
+        if universe == "stock":
+            try:
+                import backtest.buffett as bt_buf
+                sl = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
+                sl_codes = [c for c in codes if c in sl]
+            except Exception:
+                sl_codes = codes
+            bb = sm_q._behavior_batch(sl_codes, days=days)
+            # 任一 shortlist 标的有行为序列 → 用新口径(连续性+北向+边际)
+            if any(bb[c]["streak_inflow"] is not None or bb[c]["north_cum"] is not None
+                   or bb[c]["margin_accel"] is not None for c in sl_codes):
+                f1 = pd.Series({c: (bb[c]["streak_inflow"] or 0) for c in sl_codes})   # 资金流连续性
+                f2 = pd.Series({c: bb[c]["north_cum"] for c in sl_codes})            # 北向累计(聪明资金)
+                f3 = pd.Series({c: bb[c]["margin_accel"] for c in sl_codes})         # 边际加速
+                comp = _avg_rank_pct([f1, f2, f3], codes)
+                for c in codes:
+                    scores[c][3] = _to_float(comp.get(c)) if c in comp.index else None
+                dims_avail.append(3)
+                status["3"] = "ok(连续性+北向+边际)"
+                used_new = True
+        if not used_new:
+            # 降级旧路径:top_by_amount累计+spot当日净额+换手(ETF/无行为序列,高相关)
+            sm = sm_q.top_by_amount(days=days, market=None, channel=None, limit=10000)
+            sm_amt = {r.get("code"): r.get("amount") for r in sm.get("rows", [])}
+            spot_amt = pd.to_numeric(df.get("main_net_inflow"), errors="coerce").values \
+                if "main_net_inflow" in df.columns else None
+            spot_tr = pd.to_numeric(df.get("turnover_rate"), errors="coerce").values \
+                if "turnover_rate" in df.columns else None
+            sm_s = pd.Series([sm_amt.get(c) for c in codes], index=codes, dtype=float)
+            sa = pd.Series(spot_amt, index=codes, dtype=float) if spot_amt is not None \
+                else pd.Series(dtype=float, index=codes)
+            st = pd.Series(spot_tr, index=codes, dtype=float) if spot_tr is not None \
+                else pd.Series(dtype=float, index=codes)
+            comp = (_zscore(sm_s) + _zscore(sa) + _zscore(st)) / 3
+            pct = _to_pct(comp)
+            for c in codes:
+                scores[c][3] = _to_float(pct.get(c)) if c in pct.index else None
+            dims_avail.append(3)
+            status["3"] = "ok(降级spot)" if sm.get("rows") else "ok(仅spot)"
     except Exception as e:
         status["3"] = f"err:{e}"
 
