@@ -149,10 +149,9 @@ def fetch_abstract(code: str) -> tuple[pd.DataFrame | None, bool]:
         # 空 df 哨兵(prefetch 预填的"tdx 无 abstract"标记)→返 None 秒回,不重 parse
         return (df if (df is not None and not df.empty) else None), False
     # tdx 主源:一次解析含 abstract+三大表,分解缓存
-    try:
-        parsed = fundamentals.parse_tdx_financial(code)
-    except Exception:
-        parsed = None
+    # _parse_tdx_with_timeout 超时守卫:tdx 全挂时单只上限 _TDX_PARSE_TIMEOUT(20s),
+    # 超→None→`if parsed:` False→_note_fetch(False) 计熔断 + akshare 备援,不无限阻塞
+    parsed = fundamentals._parse_tdx_with_timeout(code)
     if parsed:
         abs_df = parsed.get("abstract")
         if abs_df is not None and not abs_df.empty:
@@ -686,10 +685,7 @@ def prefetch_financial(codes: list[str]) -> None:
         _, st = _cache_get(c, allow_stale=False)
         if st == "hit":
             continue  # 新鲜 abstract 缓存→跳过(暖跑秒回)
-        try:
-            parsed = fundamentals.parse_tdx_financial(c)
-        except Exception:
-            parsed = None
+        parsed = fundamentals._parse_tdx_with_timeout(c)
         if not parsed:
             continue
         abs_df = parsed.get("abstract")

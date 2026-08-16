@@ -30,6 +30,7 @@ from . import pytdx_client
 get_company_info = pytdx_client.get_company_info  # 模块级别名,便于测试 monkeypatch
 
 _AK_TIMEOUT = 20
+_TDX_PARSE_TIMEOUT = 20.0  # pytdx 单连接 _get_api 最坏 5服务器×8s≈40s;tdx 全挂时无此守卫会致 prefetch/fetch 长卡死,20s 上限+超时返 None 触发熔断/akshare 备援
 _CACHE_TTL_DAYS = 7
 
 _TDX_FIN_CATEGORY = "财务分析"
@@ -140,19 +141,22 @@ def _transpose_three_table(rows: list[list[str]]):
     return pd.DataFrame(recs)
 
 
-def parse_tdx_financial(code: str) -> dict:
-    """解析 tdx '财务分析' 文本。返 {abstract, balance, cashflow, profit}。
+def parse_tdx_financial(code: str) -> dict | None:
+    """解析 tdx '财务分析' 文本。返 {abstract, balance, cashflow, profit} 或 None。
     abstract=摘要宽表(行=指标列=报告期,兼容 buffett._row_pairs);
     balance/cashflow/profit=三大表(行=报告期列=科目含'报告期',兼容 _pick_col_sum/_pick_row_fields)。
-    tdx 取失败/空→全 None,不抛崩。"""
+    **连接级失败**(get_company_info 异常/ok=False/空 content)→返 None,使上游
+    fetch/fetch_abstract 的 `if parsed:` 为 False → akshare 备援 + _note_fetch(False) 熔断 live。
+    **解析成功但某源缺**(数据缺口,如个股无资产负债表摘要)→返 dict(缺源键 None,truthy),
+    上游 `if parsed:` True → 各 source 缺则返 None 不烧 akshare(akshare 多半也无)。"""
     base = {"abstract": None, "balance": None, "cashflow": None, "profit": None}
     c = _strip_prefix(str(code).strip())
     try:
         info = get_company_info(c, _TDX_FIN_CATEGORY)
     except Exception:
-        return base
+        return None
     if not isinstance(info, dict) or not info.get("ok") or not info.get("content"):
-        return base
+        return None
     content = info["content"]
     # abstract: 合并财务指标各子表(主要/盈利/偿债/运营/发展)为单宽表
     abs_frames = []
@@ -173,6 +177,19 @@ def parse_tdx_financial(code: str) -> dict:
     c_rows = _split_table_rows(content, "【现金流量表摘要】")
     base["cashflow"] = _transpose_three_table(c_rows)
     return base
+
+
+def _parse_tdx_with_timeout(code: str) -> dict | None:
+    """parse_tdx_financial 的超时守卫:ThreadPoolExecutor 包装,超 _TDX_PARSE_TIMEOUT 返 None。
+    pytdx 单 TCP 连接 _get_api 最坏 5 服务器×8s≈40s/次,tdx 全挂时无此守卫会致
+    prefetch_financial(80 只)×40s≈53min 长卡死(analyze_many 的 deadline_s 计时在 prefetch 之后,
+    约束不到 prefetch)。超时→None→上游 fetch/fetch_abstract 走 akshare 备援或计熔断
+    (_note_fetch(False)),不无限阻塞。正常 tdx 可用时 parse ~0.6s/只,新建/销毁单 worker 池开销可忽略。"""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(parse_tdx_financial, code).result(timeout=_TDX_PARSE_TIMEOUT)
+    except (FuturesTimeout, Exception):
+        return None
 
 
 def _strip_prefix(code: str) -> str:
@@ -241,10 +258,8 @@ def fetch(code: str, source: str) -> tuple[pd.DataFrame | None, bool]:
         # 空 df 哨兵(fetch_abstract 预填的"tdx 缺本源"标记)→返 None 秒回,不重 parse
         return (df if (df is not None and not df.empty) else None), False
     # tdx 主源:一次解析含全部 source,命中本 source 缓存后返
-    try:
-        parsed = parse_tdx_financial(c)
-    except Exception:
-        parsed = None
+    # _parse_tdx_with_timeout 超时守卫:tdx 全挂时单只上限 _TDX_PARSE_TIMEOUT,超→None 走 akshare
+    parsed = _parse_tdx_with_timeout(c)
     if parsed:
         tdf = parsed.get(source)
         if tdf is not None and not tdf.empty:

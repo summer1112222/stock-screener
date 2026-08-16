@@ -78,11 +78,14 @@ def test_parse_tdx_financial_golden(monkeypatch):
 
 
 def test_parse_tdx_financial_fail_returns_none(monkeypatch):
+    """连接级失败(ok=False/空 content)→返 None(非 truthy base dict),
+    使上游 fetch/fetch_abstract 的 `if parsed:` 为 False → akshare 备援 + 熔断 live。
+    (解析成功但缺源仍返 truthy dict,走"不烧 akshare"路径,见 golden test)"""
     monkeypatch.setattr(fundamentals, "get_company_info",
                         lambda code, category: {"code": code, "category": category,
                                                 "content": "", "ok": False, "err": "连不上"})
     r = fundamentals.parse_tdx_financial("600519")
-    assert r == {"abstract": None, "balance": None, "cashflow": None, "profit": None}
+    assert r is None
 
 
 # ---- Task 3: buffett.fetch_abstract 改 tdx 主源 ----
