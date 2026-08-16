@@ -83,3 +83,45 @@ def test_parse_tdx_financial_fail_returns_none(monkeypatch):
                                                 "content": "", "ok": False, "err": "连不上"})
     r = fundamentals.parse_tdx_financial("600519")
     assert r == {"abstract": None, "balance": None, "cashflow": None, "profit": None}
+
+
+# ---- Task 3: buffett.fetch_abstract 改 tdx 主源 ----
+import backtest.buffett as buffett
+
+
+def test_fetch_abstract_tdx_primary(monkeypatch):
+    """tdx 解析成功→走 tdx,不调 akshare;abstract+三大表缓存被预填。"""
+    abs_df = pd.DataFrame({"指标": ["净利润"], "2025-12-31": [82320000000.0]})
+    bal_df = pd.DataFrame({"报告期": ["2025-12-31"], "资产总额": [3e11]})
+    parsed = {"abstract": abs_df, "balance": bal_df,
+              "cashflow": None, "profit": None}
+    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial",
+                        lambda code: dict(parsed))
+    monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    set_calls = []
+    monkeypatch.setattr(buffett, "_cache_set", lambda code, df: set_calls.append(("abstract", code)))
+    fset_calls = []
+    monkeypatch.setattr(buffett.fundamentals, "_cache_set",
+                        lambda code, source, df: fset_calls.append((source, code)))
+    monkeypatch.setattr(buffett, "_fetch_net",
+                        lambda code: (_ for _ in ()).throw(AssertionError("不应调 akshare")))
+    df, stale = buffett.fetch_abstract("600519")
+    assert stale is False
+    assert df is abs_df
+    assert ("abstract", "600519") in set_calls  # abstract 缓存
+    assert ("balance", "600519") in fset_calls  # 三大表预填
+
+
+def test_fetch_abstract_akshare_fallback(monkeypatch):
+    """tdx 返全 None→走 akshare 备援。"""
+    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial",
+                        lambda code: {"abstract": None, "balance": None,
+                                      "cashflow": None, "profit": None})
+    monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    monkeypatch.setattr(buffett, "_AK_OK", True)  # 宿主无 akshare 时强制走备援块
+    ak_df = pd.DataFrame({"指标": ["净利润"], "2024-12-31": [1.0]})
+    monkeypatch.setattr(buffett, "_fetch_net", lambda code: ak_df)
+    monkeypatch.setattr(buffett, "_cache_set", lambda code, df: None)
+    df, stale = buffett.fetch_abstract("600519")
+    assert df is ak_df
+    assert stale is False

@@ -138,13 +138,39 @@ def _fetch_net(code: str):
 
 
 def fetch_abstract(code: str) -> tuple[pd.DataFrame | None, bool]:
-    """返回 (df, stale)。缓存7天TTL；_AK_OK=False 或单只超时(20s)时降级返回过期缓存(stale=True)。
-    超时包装防 akshare hang 导致 quality(stock) 卡死。熔断:_note_fetch 记每次网络结果,
-    akshare 被封常快速返回空 DataFrame(非 20s 超时),空结果亦计失败——否则熔断永不触发,
-    quality 口径2 仍每只白烧 deadline。连续≥3次→akshare_blocked() 熔断30min。"""
+    """返回 (df, stale)。缓存7天TTL;tdx 主源(parse_tdx_financial 解析财务分析文本)
+    →akshare 备援。tdx 解析成功时 abstract 缓存本表(financial_abstract_cache)+三大表
+    预填 fundamentals_cache(供 fundamentals.fetch 命中秒回)。熔断:_note_fetch 记 tdx/akshare
+    结果,连续≥3失败→akshare_blocked() 熔断30min(quality 口径2 跳 buffett 省 deadline)。
+    _AK_OK=False 或单只超时(20s)时降级返回过期缓存(stale=True)。"""
+    code = str(code).strip()
     df, status = _cache_get(code, allow_stale=False)
     if status == "hit":
         return df, False
+    # tdx 主源:一次解析含 abstract+三大表,分解缓存
+    try:
+        parsed = fundamentals.parse_tdx_financial(code)
+    except Exception:
+        parsed = None
+    if parsed:
+        abs_df = parsed.get("abstract")
+        if abs_df is not None and not abs_df.empty:
+            try:
+                _cache_set(code, abs_df)
+            except Exception:
+                pass
+            # 预填三大表缓存(fundamentals 域),供 fundamentals.fetch 命中秒回
+            for s in ("balance", "cashflow", "profit"):
+                tdf = parsed.get(s)
+                if tdf is not None and not tdf.empty:
+                    try:
+                        fundamentals._cache_set(code, s, tdf)
+                    except Exception:
+                        pass
+            _note_fetch(True)
+            return abs_df, False
+    _note_fetch(False)  # tdx 失败计熔断
+    # akshare 备援(原逻辑)
     if _AK_OK:
         ok = False
         net = None
