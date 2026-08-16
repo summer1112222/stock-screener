@@ -628,7 +628,7 @@ def _apply_combo(main, universe, df_spot, max_per_board, max_corr, limit,
 def _build_reasons(item):
     """从已有 dim_scores/hits 机械拼入选理由（叙事化，不引入新判断）。"""
     ds = item.get("dim_scores", {})
-    names = {1: "风险调整", 2: "价值质量", 3: "资金流向", 4: "多信号"}
+    names = {1: "风险调整", 2: "价值质量", 3: "资金流向", 4: "多信号", 5: "景气"}
     parts = [f"{names[d]}(分位{round(p, 2)})"
              for d, p in sorted(ds.items()) if p is not None]
     base = "命中 " + " + ".join(parts) if parts else "无口径命中"

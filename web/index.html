@@ -1350,7 +1350,7 @@ document.getElementById('smTdxCode').onkeydown=e=>{if(e.key==='Enter')smTdxProbe
 // smart tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------
-const qsState={raw:[],sortKey:'resonance',sortDir:'desc',dimSortKey:'resonance',dimSortDir:'desc'};
+const qsState={raw:[],phaseMap:{},sortKey:'resonance',sortDir:'desc',dimSortKey:'resonance',dimSortDir:'desc'};
 // 首次超时自动重试一次:容器刚重启 warmup 后台预热(~55s)期间与首次请求争抢可能>75s,
 // 重试时 warmup 多半已完→缓存命中秒回。二次仍败才报错。
 async function _qsFetch(url){
@@ -1360,6 +1360,37 @@ async function _qsFetch(url){
     const to=setTimeout(()=>ctl.abort(),ms);
     try{ const r=await fetch(url,{signal:ctl.signal}).then(r=>r.json()); clearTimeout(to); return r; }
     catch(e){ clearTimeout(to); if(attempt===2) throw e; }
+  }
+}
+// 阶段色块(优质筛选阶段列 + 个股分析 fetchPhase 共用)。p=main_force_phase 的 data,无则占位。
+function _phaseBadge(p){
+  if(!p||!p.phase) return '<span style="color:var(--muted);font-size:11px">…</span>';
+  return `<span style="background:${PHASE_COLOR[p.phase]||'#6b7280'};color:#fff;padding:1px 6px;border-radius:6px;font-size:11px;white-space:nowrap" title="${(p.triggers||[]).join(' · ')}">${p.phase}${p.confidence!=null?' '+(p.confidence*100|0)+'%':''}</span>`;
+}
+// 口径分位 chip:每口径小色块,分位≥0.7绿/≥0.5黄/else灰,None 淡灰。替代纯文本 reasons。
+function _dimChips(ds2, names){
+  return [1,2,3,4,5].map(k=>{
+    const v=ds2[k];
+    if(v==null) return `<span style="font-size:10px;color:var(--muted);opacity:.35;margin-right:2px" title="${names[k]||''} 无数据">${k}</span>`;
+    const pct=(+v*100|0);
+    const col = v>=0.7?'#16A34A':(v>=0.5?'#F59E0B':'#9CA3AF');
+    return `<span style="font-size:10px;color:#fff;background:${col};padding:1px 4px;border-radius:4px;margin-right:2px" title="${names[k]||''} 分位${(+v).toFixed(2)}">${k}:${pct}</span>`;
+  }).join('');
+}
+// 并发池:codes 每批 6 只并发 fetch phase,异步填阶段列(不阻塞主表;命中30s缓存秒回)。
+// 结果存 qsState.phaseMap,排序重渲染时 qsRender 直接读 phaseMap 已填的,不重 fetch。
+async function _fillPhaseColumn(codes){
+  const batch=6;
+  for(let i=0;i<codes.length;i+=batch){
+    await Promise.all(codes.slice(i,i+batch).map(async c=>{
+      const td=document.querySelector(`#qsOut td.qsPhase[data-code="${CSS.escape(c)}"]`);
+      if(!td) return;
+      try{
+        const r=await fetch(`${API}/api/smart-money/phase?code=${encodeURIComponent(c)}`,{signal:AbortSignal.timeout(15000)}).then(r=>r.json()).catch(()=>null);
+        const p=r&&r.data; qsState.phaseMap[c]=p||null;
+        td.innerHTML=_phaseBadge(p);
+      }catch{ /* 留占位不崩 */ }
+    }));
   }
 }
 async function qsLoad(){
@@ -1385,6 +1416,8 @@ async function qsLoad(){
       Object.entries(ds).map(([k,v])=>{const ok=(v||'').startsWith('ok');return `<span style="color:${ok?'#16A34A':'#F59E0B'};font-size:12px;margin-right:8px" title="${v}">●口径${k}: ${(v||'').slice(0,30)}</span>`;}).join('');
     qsState.raw = d;
     qsRender();
+    const _codes=(d.main||[]).map(x=>x.code).filter(Boolean);
+    if(_codes.length) _fillPhaseColumn(_codes);   // 异步并发填阶段列,不 await(不阻塞,命中30s缓存秒回)
   }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时(已重试1次仍败，buffett财报网络阻塞或未拉历史，稍后重试5分钟内缓存命中秒回): '+e; }
   finally{ btn.disabled=false; }
 }
@@ -1401,21 +1434,24 @@ function qsRender(){
   const _arr=k=>SK===k?(SD==='desc'?' ▼':' ▲'):'';
   main.sort((a,b)=>_qscmp(a,b,SK,SD));
   const showW = combo==='min_var';
-  const cols=[['code','代码'],['name','名称'],['resonance','共振'],['hits','命中'],['dim_scores','分位(1/2/3/4)']];
+  const dimNames={1:'风险调整',2:'价值质量',3:'资金流向',4:'多信号',5:'景气'};
+  const cols=[['code','代码'],['name','名称'],['phase','阶段'],['resonance','共振'],['hits','命中'],['dim_scores','分位(1-5)']];
   if(showW)cols.push(['weight','权重']);
   cols.push(['reasons','理由']);
-  const ths=cols.map(([k,h])=>k==='dim_scores'?`<th class="num">${h}</th>`:`<th class="num" data-qk="${k}" style="cursor:pointer;user-select:none">${h}${_arr(k)}</th>`).join('');
+  const ths=cols.map(([k,h])=>(k==='dim_scores'||k==='phase'||k==='reasons')?`<th class="num">${h}</th>`:`<th class="num" data-qk="${k}" style="cursor:pointer;user-select:none">${h}${_arr(k)}</th>`).join('');
   const trs=main.length?main.map(x=>{
     const ds2=x.dim_scores||{};
     const wcol = showW?`<td class="num">${x.weight!=null?(+x.weight*100).toFixed(1)+'%':'—'}</td>`:'';
-    return `<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td><td class="num">${x.hits||0}</td><td>${[1,2,3,4].map(k=>ds2[k]!=null?(+ds2[k]).toFixed(2):'—').join('/')}</td>${wcol}<td style="font-size:12px">${(x.reasons||[]).join('；')}</td></tr>`;
+    const ph=qsState.phaseMap[x.code];
+    const phaseTd=`<td class="qsPhase num" data-code="${x.code||''}">${ph?_phaseBadge(ph):'<span style="color:var(--muted);font-size:11px">…</span>'}</td>`;
+    const reasonsTxt=(x.reasons||[]).join('；');
+    return `<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td>${phaseTd}<td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td><td class="num">${x.hits||0}</td><td>${[1,2,3,4,5].map(k=>ds2[k]!=null?(+ds2[k]).toFixed(2):'—').join('/')}</td>${wcol}<td style="font-size:11px" title="${reasonsTxt}">${_dimChips(ds2,dimNames)}</td></tr>`;
   }).join(''):'';
   const byDim=d.by_dim||{};
-  const dimNames={1:'风险调整',2:'价值质量',3:'资金流向',4:'多信号'};
   const dimHtml=Object.entries(byDim).map(([k,lst])=>{
     if(!lst||!lst.length) return '';
-    const rows=lst.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td></tr>`).join('');
-    return `<details style="margin-top:8px" open><summary style="cursor:pointer;color:var(--muted);font-size:12px">口径${k} ${dimNames[k]} (${lst.length})</summary><table><thead><tr><th>代码</th><th>名称</th><th class="num">共振</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+    const rows=lst.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${(x.dim_scores||{})[k]!=null?(+(x.dim_scores||{})[k]).toFixed(2):'—'}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td></tr>`).join('');
+    return `<details style="margin-top:8px" open><summary style="cursor:pointer;color:var(--muted);font-size:12px">口径${k} ${dimNames[k]||''} (${lst.length})</summary><table><thead><tr><th>代码</th><th>名称</th><th class="num">分位</th><th class="num">共振</th></tr></thead><tbody>${rows}</tbody></table></details>`;
   }).join('');
   document.getElementById('qsOut').innerHTML=trs?`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>${dimHtml}`:'<div class="empty">无共振清单(口径不足或历史未拉，先 /api/backtest/fetch；stock 口径2 需 akshare 财务摘要，东财被封时降级 spot 估值代理)</div>';
   document.querySelectorAll('#qsOut th[data-qk]').forEach(th=>th.onclick=()=>{
