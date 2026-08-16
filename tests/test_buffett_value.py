@@ -280,6 +280,8 @@ def test_analyze_many_deadline_returns_partial(monkeypatch):
         return {"code": c, "pe": 10.0}  # 快速成功
 
     monkeypatch.setattr(buffett, "analyze", _fake_analyze)
+    # prefetch_financial 走真实 pytdx(假码慢连)→mock 为 no-op(本测试只测 deadline 机制)
+    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes: None)
     codes = ["fast1", "fast2", "fast3", "fast4", "slow1", "slow2", "slow3", "slow4", "slow5"]
     t0 = time.time()
     out = buffett.analyze_many(codes, deadline_s=0.4)
@@ -301,6 +303,7 @@ def test_analyze_many_no_deadline_waits_all(monkeypatch):
         seen.append(c)
         return {"code": c, "pe": 10.0}
     monkeypatch.setattr(buffett, "analyze", _fake_analyze)
+    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes: None)
     out = buffett.analyze_many(["a", "b", "c"])  # 默认 None
     assert {r["code"] for r in out} == {"a", "b", "c"}
     assert len(seen) == 3

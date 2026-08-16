@@ -90,7 +90,8 @@ import backtest.buffett as buffett
 
 
 def test_fetch_abstract_tdx_primary(monkeypatch):
-    """tdx 解析成功→走 tdx,不调 akshare;abstract+三大表缓存被预填。"""
+    """tdx 解析成功→走 tdx,不调 akshare;abstract+三大表缓存被预填。
+    tdx 缺的源(cashflow/profit)写空 df 哨兵→fundamentals.fetch 命中返 None 秒回不重 parse。"""
     abs_df = pd.DataFrame({"指标": ["净利润"], "2025-12-31": [82320000000.0]})
     bal_df = pd.DataFrame({"报告期": ["2025-12-31"], "资产总额": [3e11]})
     parsed = {"abstract": abs_df, "balance": bal_df,
@@ -98,6 +99,9 @@ def test_fetch_abstract_tdx_primary(monkeypatch):
     monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial",
                         lambda code: dict(parsed))
     monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    # fundamentals 域 _cache_get 返 miss→哨兵 else 分支写空 df(防覆盖 akshare 既得数据)
+    monkeypatch.setattr(buffett.fundamentals, "_cache_get",
+                        lambda code, source, allow_stale=False: (None, "miss"))
     set_calls = []
     monkeypatch.setattr(buffett, "_cache_set", lambda code, df: set_calls.append(("abstract", code)))
     fset_calls = []
@@ -109,14 +113,16 @@ def test_fetch_abstract_tdx_primary(monkeypatch):
     assert stale is False
     assert df is abs_df
     assert ("abstract", "600519") in set_calls  # abstract 缓存
-    assert ("balance", "600519") in fset_calls  # 三大表预填
+    assert ("balance", "600519") in fset_calls  # 三大表预填(真实)
+    # 缺源写空 df 哨兵(防 fundamentals.fetch miss 重 parse)
+    assert ("cashflow", "600519") in fset_calls
+    assert ("profit", "600519") in fset_calls
 
 
 def test_fetch_abstract_akshare_fallback(monkeypatch):
-    """tdx 返全 None→走 akshare 备援。"""
-    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial",
-                        lambda code: {"abstract": None, "balance": None,
-                                      "cashflow": None, "profit": None})
+    """tdx 解析失败(parsed None:连接/空)→走 akshare 备援。
+    注:tdx 解析成功但 abstract 缺(数据缺口)→返 None 不烧 akshare,非本测试范围。"""
+    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial", lambda code: None)
     monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
     monkeypatch.setattr(buffett, "_AK_OK", True)  # 宿主无 akshare 时强制走备援块
     ak_df = pd.DataFrame({"指标": ["净利润"], "2024-12-31": [1.0]})
@@ -125,3 +131,60 @@ def test_fetch_abstract_akshare_fallback(monkeypatch):
     df, stale = buffett.fetch_abstract("600519")
     assert df is ak_df
     assert stale is False
+
+
+# ---- Task 4: fundamentals.fetch 改 tdx 主源 ----
+
+
+def test_fundamentals_fetch_tdx_primary(monkeypatch):
+    """缓存 miss→parse_tdx_financial 返本 source,不调 akshare。"""
+    bal_df = pd.DataFrame({"报告期": ["2025-12-31"], "资产总额": [3e11]})
+    monkeypatch.setattr(fundamentals, "_cache_get",
+                        lambda code, source, allow_stale=False: (None, "miss"))
+    parsed = {"abstract": None, "balance": bal_df, "cashflow": None, "profit": None}
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial", lambda code: dict(parsed))
+    monkeypatch.setattr(fundamentals, "_cache_set", lambda code, source, df: None)
+    monkeypatch.setattr(fundamentals, "_fetch_net",
+                        lambda code, source: (_ for _ in ()).throw(AssertionError("不应调 akshare")))
+    df, stale = fundamentals.fetch("600519", "balance")
+    assert df is bal_df
+    assert stale is False
+
+
+def test_fundamentals_fetch_cache_hit(monkeypatch):
+    """缓存命中→不 parse 不 akshare。"""
+    bal_df = pd.DataFrame({"报告期": ["2025-12-31"], "资产总额": [3e11]})
+    monkeypatch.setattr(fundamentals, "_cache_get",
+                        lambda code, source, allow_stale=False: (bal_df, "hit"))
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial",
+                        lambda code: (_ for _ in ()).throw(AssertionError("不应 parse")))
+    df, stale = fundamentals.fetch("600519", "balance")
+    assert df is bal_df
+    assert stale is False
+
+
+def test_fundamentals_fetch_cache_hit_empty_sentinel(monkeypatch):
+    """空 df 哨兵命中(fetch_abstract 预填的"tdx 缺本源"标记)→返 None 秒回,不 parse 不 akshare。
+    避免数据缺口源每 fetch 重 parse_tdx_financial(pytdx 单连接 Lock 串行致批处理超时)。"""
+    empty = pd.DataFrame()
+    monkeypatch.setattr(fundamentals, "_cache_get",
+                        lambda code, source, allow_stale=False: (empty, "hit"))
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial",
+                        lambda code: (_ for _ in ()).throw(AssertionError("不应 parse")))
+    df, stale = fundamentals.fetch("600519", "balance")
+    assert df is None
+    assert stale is False
+
+
+def test_fundamentals_fetch_akshare_fallback(monkeypatch):
+    """tdx 解析失败(parsed None:连接/空 content)→akshare 备援。
+    注:tdx 解析成功但本 source 缺(数据缺口)→返 None 不烧 akshare,非本测试范围。"""
+    monkeypatch.setattr(fundamentals, "_cache_get",
+                        lambda code, source, allow_stale=False: (None, "miss"))
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial", lambda code: None)
+    monkeypatch.setattr(fundamentals, "_cache_set", lambda code, source, df: None)
+    monkeypatch.setattr(fundamentals, "_AK_OK", True)  # 宿主无 akshare 时强制走备援块
+    ak_df = pd.DataFrame({"报告期": ["2024-12-31"], "资产总额": [1.0]})
+    monkeypatch.setattr(fundamentals, "_fetch_net", lambda code, source: ak_df)
+    df, stale = fundamentals.fetch("600519", "balance")
+    assert df is ak_df

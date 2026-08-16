@@ -6,6 +6,8 @@ import backtest.buffett as bt_buf
 
 def test_fetch_abstract_timeout_degrades(monkeypatch):
     bt_buf.db.init_db()
+    # tdx 不可用→测 akshare hang 超时降级路径(本测试意图)
+    monkeypatch.setattr(bt_buf.fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(bt_buf, "_AK_OK", True)
     monkeypatch.setattr(bt_buf, "_AK_TIMEOUT", 0.1)  # 0.1s 超时
     # mock ak 拉取 hang 0.5s > 超时
@@ -20,6 +22,8 @@ def test_analyze_many_concurrent(monkeypatch):
     """并发不串行：4 只各 sleep 0.2，串行 0.8s，并发 <0.5s。"""
     import time as _t
     bt_buf.db.init_db()
+    # tdx 不可用→走 akshare 路径(每只 sleep 0.2),测并发不串行
+    monkeypatch.setattr(bt_buf.fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(bt_buf, "_AK_OK", True)
     monkeypatch.setattr(bt_buf, "_AK_TIMEOUT", 5)
     monkeypatch.setattr(bt_buf.ak, "stock_financial_abstract",

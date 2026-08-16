@@ -33,6 +33,8 @@ def _cashflow_df():
 
 def test_fetch_hit_cache(monkeypatch, tmp_path):
     _tmp_db(monkeypatch, tmp_path)
+    # tdx 不可用→走 akshare 路径(本测试意图:首次 akshare 拉取入库,二次命中缓存)
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(fundamentals, "_AK_OK", True)
     called = {"n": 0}
 
@@ -50,6 +52,7 @@ def test_fetch_hit_cache(monkeypatch, tmp_path):
 
 def test_fetch_ak_fail_returns_none(monkeypatch, tmp_path):
     _tmp_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(fundamentals, "_AK_OK", True)
 
     def _err(symbol):
@@ -67,6 +70,7 @@ def test_fetch_stale_fallback(monkeypatch, tmp_path):
     db.upsert_rows("fundamentals_cache",
                    [{"code": "600519", "source": "cashflow",
                      "payload_json": payload, "ts": old_ts}])
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(fundamentals, "_AK_OK", True)
 
     def _err(symbol):
@@ -79,6 +83,7 @@ def test_fetch_stale_fallback(monkeypatch, tmp_path):
 
 def test_ak_ok_false_skips_net(monkeypatch, tmp_path):
     _tmp_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(fundamentals, "_AK_OK", False)
     called = {"n": 0}
 

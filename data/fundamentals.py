@@ -146,7 +146,7 @@ def parse_tdx_financial(code: str) -> dict:
     balance/cashflow/profit=三大表(行=报告期列=科目含'报告期',兼容 _pick_col_sum/_pick_row_fields)。
     tdx 取失败/空→全 None,不抛崩。"""
     base = {"abstract": None, "balance": None, "cashflow": None, "profit": None}
-    c = str(code).strip()
+    c = _strip_prefix(str(code).strip())
     try:
         info = get_company_info(c, _TDX_FIN_CATEGORY)
     except Exception:
@@ -185,7 +185,10 @@ def _now_ts() -> str:
 
 
 def _cache_get(code: str, source: str, allow_stale: bool = False):
-    """返回 (df_or_None, status)。status ∈ hit/stale/miss。"""
+    """返回 (df_or_None, status)。status ∈ hit/stale/miss。
+    code 经 _strip_prefix 归一(与 _cache_set 对称),使 fetch_abstract 预填的带前缀
+    code 与 fundamentals.fetch 的查询键一致→预填命中秒回。"""
+    code = _strip_prefix(code)
     rows = db.query_rows("fundamentals_cache",
                          where="code=? AND source=?", params=(code, source))
     if not rows:
@@ -210,6 +213,7 @@ def _cache_get(code: str, source: str, allow_stale: bool = False):
 
 
 def _cache_set(code: str, source: str, df: pd.DataFrame) -> None:
+    code = _strip_prefix(code)  # 与 _cache_get 对称归一,使预填命中
     payload = df.to_json(orient="records", force_ascii=False)
     db.upsert_rows("fundamentals_cache",
                    [{"code": code, "source": source,
@@ -228,20 +232,40 @@ def _fetch_net(code: str, source: str):
 
 
 def fetch(code: str, source: str) -> tuple[pd.DataFrame | None, bool]:
-    """返回 (df, stale)。缓存7天 TTL;_AK_OK=False 或单只超时(20s)降级返回过期缓存。"""
-    df, status = _cache_get(code, source, allow_stale=False)
+    """返回 (df, stale)。缓存7天TTL;tdx 主源(parse_tdx_financial 解析后命中本 source)
+    →akshare 备援。buffett.analyze 内 fetch_abstract 已预填三大表缓存时命中秒回;
+    独立调时 miss→自 parse 一次。_AK_OK=False 或单只超时(20s)降级返回过期缓存。"""
+    c = _strip_prefix(code)
+    df, status = _cache_get(c, source, allow_stale=False)
     if status == "hit":
-        return df, False
+        # 空 df 哨兵(fetch_abstract 预填的"tdx 缺本源"标记)→返 None 秒回,不重 parse
+        return (df if (df is not None and not df.empty) else None), False
+    # tdx 主源:一次解析含全部 source,命中本 source 缓存后返
+    try:
+        parsed = parse_tdx_financial(c)
+    except Exception:
+        parsed = None
+    if parsed:
+        tdf = parsed.get(source)
+        if tdf is not None and not tdf.empty:
+            try:
+                _cache_set(c, source, tdf)
+            except Exception:
+                pass
+            return tdf, False
+        # tdx 解析成功但无本 source(数据缺口,如个股无资产负债表摘要)→返 None 不烧 akshare
+        return None, False
+    # tdx 解析失败(parsed None:连接抖动/空 content)→akshare 备援
     if _AK_OK:
         try:
             with ThreadPoolExecutor(max_workers=1) as ex:
-                net = ex.submit(_fetch_net, code, source).result(timeout=_AK_TIMEOUT)
+                net = ex.submit(_fetch_net, c, source).result(timeout=_AK_TIMEOUT)
             if net is not None and not net.empty:
-                _cache_set(code, source, net)
+                _cache_set(c, source, net)
                 return net, False
         except (FuturesTimeout, Exception):
             pass
-    df_s, _ = _cache_get(code, source, allow_stale=True)
-    if df_s is not None:
+    df_s, _ = _cache_get(c, source, allow_stale=True)
+    if df_s is not None and not df_s.empty:
         return df_s, True
     return None, False
