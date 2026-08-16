@@ -30,6 +30,29 @@ _AK_TIMEOUT = 20
 _CACHE_TTL_DAYS = 7
 
 
+def _parse_cn_amount(s):
+    """解析中文金额/百分比字符串→float。亿×1e8/万×1e4/纯数字/含%去符号,空/异常→None。"""
+    if s is None:
+        return None
+    t = str(s).strip().replace("%", "")
+    if not t or t == "-":
+        return None
+    neg = False
+    if t.startswith("-"):
+        neg = True
+        t = t[1:].strip()
+    mult = 1.0
+    if t.endswith("亿"):
+        t = t[:-1]; mult = 1e8
+    elif t.endswith("万"):
+        t = t[:-1]; mult = 1e4
+    try:
+        v = float(t) * mult
+    except (ValueError, TypeError):
+        return None
+    return -v if neg else v
+
+
 def _strip_prefix(code: str) -> str:
     c = str(code).strip()
     return c[2:] if c[:2].lower() in ("sh", "sz", "bj") else c
