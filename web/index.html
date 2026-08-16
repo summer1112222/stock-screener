@@ -173,6 +173,7 @@
       <div class="row" style="margin-top:10px">
         <button class="btn" id="btRun" type="button">回测</button>
         <button class="btn ghost" id="btEval" type="button">因子评价(IC/分档)</button>
+        <button class="btn ghost" id="btWf" type="button">walk-forward过拟合检验</button>
         <button class="btn ghost" id="btFetch" type="button">先拉历史数据</button>
       </div>
       <div class="skipped" id="btMsg"></div>
@@ -232,6 +233,7 @@
         <div class="f"><label>共振≥N</label><input id="sbtMinHits" type="number" value="1" min="1" max="5" style="width:60px" title="≥2 追加 combo共振行"></div>
         <div class="f"><label>止损%(可选)</label><input id="sbtStop" type="number" placeholder="8" min="0" style="width:60px"></div>
         <div class="f"><label>费率bp(可选)</label><input id="sbtFee" type="number" placeholder="0" min="0" style="width:60px"></div>
+        <div class="f"><label>基准</label><select id="sbtBench"><option value="sh000300">沪深300</option><option value="sh000905">中证500</option><option value="sz399001">深证成指</option><option value="sh000001">上证指数</option></select></div>
         <button class="btn" id="sbtRun" type="button">回测</button>
       </div>
       <div class="skipped" id="sbtMsg"></div>
@@ -674,6 +676,25 @@ async function btEval(){
     <div class="card-t" style="margin-top:12px">Bootstrap IC 置信区间</div>${riskTable(d.bootstrap_ic)}
     <div class="disc">${(d.survivorship && d.survivorship.note) || (typeof d.survivorship==='string' ? d.survivorship : '') || ''}</div>`;
 }
+async function btWf(){
+  const btn=document.getElementById('btWf');
+  btMsg('拉取历史中(确保可查)…'); await _btFetchQuiet();
+  btMsg('walk-forward 检验中…');
+  const r=await apiFetch(`${API}/api/backtest/walkforward`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(btBody())},{btn,msg:'btMsg',busy:'检验中…'});
+  const d=r.data||{};
+  if(r._fail){btMsg('检验失败');return;}
+  if(d.error){btMsg(d.error);document.getElementById('btOut').innerHTML='';return;}
+  const segs=d.segments||[];
+  const srows=segs.map(s=>`<tr><td>${(s.train_range||[]).join('→')}</td><td>${(s.test_range||[]).join('→')}</td><td class="num">${s.train_ic??'—'}</td><td class="num">${s.test_ic??'—'}</td><td class="num"${(s.decay!==null&&s.decay>0.5)?' style="color:var(--warn)"':''}>${s.decay??'—'}</td></tr>`).join('');
+  const overfit=d.overfit_frac!=null?`<span style="color:${d.overfit_frac>0.3?'var(--warn)':'inherit'}">${d.overfit_frac}</span>`:'—';
+  btMsg(`段数=${d.n_segments} 样本外IC均值=${d.oos_ic_mean} 过拟合段占比=${d.overfit_frac}`);
+  document.getElementById('btOut').innerHTML=`
+    <div class="card-t">滚动 walk-forward:训练段 vs 测试段 IC 衰减</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:6px">过拟合段占比=${overfit} | 样本外IC均值=${d.oos_ic_mean??'—'} 中位=${d.oos_ic_median??'—'} | decay&gt;0.5 标黄=训练有效但样本外衰减</div>
+    <table><thead><tr><th>训练段</th><th>测试段</th><th class="num">训练IC</th><th class="num">测试IC</th><th class="num">衰减</th></tr></thead><tbody>${srows}</tbody></table>
+    <div class="disc">全样本 IC 高不等于稳定:过拟合段占比高或样本外IC接近0/为负,因子可能只特定历史段有效,慎用。</div>`;
+}
+document.getElementById('btWf').onclick=btWf;
 document.getElementById('btFetch').onclick=btFetch;
 document.getElementById('btRun').onclick=btRun;
 document.getElementById('btEval').onclick=btEval;
@@ -734,7 +755,7 @@ async function sbtRun(){
   msg.textContent=`回测中(${ks.length}×k 并行，首次几十秒)...`;
   out.innerHTML='';
   try{
-    const results=await Promise.all(ks.map(k=>fetch(`${API}/api/signals/backtest`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:uni,codes,signal_types,k_days:k,benchmark:'sh000300',min_hits,stop_loss,fee_bps})}).then(r=>r.json())));
+    const results=await Promise.all(ks.map(k=>fetch(`${API}/api/signals/backtest`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({universe:uni,codes,signal_types,k_days:k,benchmark:document.getElementById('sbtBench')?.value||'sh000300',min_hits,stop_loss,fee_bps})}).then(r=>r.json())));
     // 收集所有信号名(含 combo)，按每个 k 返回的 signals 顺序去重保持
     const sigOrder=[];
     results.forEach(r=>{for(const row of (r.data||r.rows||[])){if(!sigOrder.includes(row.signal))sigOrder.push(row.signal);}});
