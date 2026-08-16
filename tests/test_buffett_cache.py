@@ -32,6 +32,8 @@ def test_cache_hit_no_network(monkeypatch):
 def test_cache_miss_then_write(monkeypatch):
     code = "600000"
     bt_buf.db.init_db()
+    # tdx 不可用→走 akshare 路径(本测试的意图:miss 后 akshare 拉取并写缓存)
+    monkeypatch.setattr(bt_buf.fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(bt_buf, "_AK_OK", True)
     monkeypatch.setattr(bt_buf.ak, "stock_financial_abstract", lambda symbol: _df())
     df, stale = bt_buf.fetch_abstract(code)
@@ -46,6 +48,8 @@ def test_cache_expired_refetch(monkeypatch):
     bt_buf.db.init_db()
     old_ts = (datetime.now() - timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S")
     _set_cache(code, _df(), old_ts)
+    # tdx 不可用→过期后 akshare 重拉(本测试意图:过期触发 refetch)
+    monkeypatch.setattr(bt_buf.fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(bt_buf, "_AK_OK", True)
     monkeypatch.setattr(bt_buf.ak, "stock_financial_abstract", lambda symbol: _df())
     df, stale = bt_buf.fetch_abstract(code)
@@ -57,6 +61,8 @@ def test_ak_off_falls_back_to_stale(monkeypatch):
     code = "000003"
     bt_buf.db.init_db()
     _set_cache(code, _df(), (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S"))
+    # tdx 不可用→_AK_OK=False 跳 akshare→stale 兜底
+    monkeypatch.setattr(bt_buf.fundamentals, "parse_tdx_financial", lambda c: None)
     monkeypatch.setattr(bt_buf, "_AK_OK", False)
     df, stale = bt_buf.fetch_abstract(code)
     assert df is not None

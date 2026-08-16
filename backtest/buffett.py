@@ -138,13 +138,52 @@ def _fetch_net(code: str):
 
 
 def fetch_abstract(code: str) -> tuple[pd.DataFrame | None, bool]:
-    """返回 (df, stale)。缓存7天TTL；_AK_OK=False 或单只超时(20s)时降级返回过期缓存(stale=True)。
-    超时包装防 akshare hang 导致 quality(stock) 卡死。熔断:_note_fetch 记每次网络结果,
-    akshare 被封常快速返回空 DataFrame(非 20s 超时),空结果亦计失败——否则熔断永不触发,
-    quality 口径2 仍每只白烧 deadline。连续≥3次→akshare_blocked() 熔断30min。"""
+    """返回 (df, stale)。缓存7天TTL;tdx 主源(parse_tdx_financial 解析财务分析文本)
+    →akshare 备援。tdx 解析成功时 abstract 缓存本表(financial_abstract_cache)+三大表
+    预填 fundamentals_cache(供 fundamentals.fetch 命中秒回)。熔断:_note_fetch 记 tdx/akshare
+    结果,连续≥3失败→akshare_blocked() 熔断30min(quality 口径2 跳 buffett 省 deadline)。
+    _AK_OK=False 或单只超时(20s)时降级返回过期缓存(stale=True)。"""
+    code = str(code).strip()
     df, status = _cache_get(code, allow_stale=False)
     if status == "hit":
-        return df, False
+        # 空 df 哨兵(prefetch 预填的"tdx 无 abstract"标记)→返 None 秒回,不重 parse
+        return (df if (df is not None and not df.empty) else None), False
+    # tdx 主源:一次解析含 abstract+三大表,分解缓存
+    # _parse_tdx_with_timeout 超时守卫:tdx 全挂时单只上限 _TDX_PARSE_TIMEOUT(20s),
+    # 超→None→`if parsed:` False→_note_fetch(False) 计熔断 + akshare 备援,不无限阻塞
+    parsed = fundamentals._parse_tdx_with_timeout(code)
+    if parsed:
+        abs_df = parsed.get("abstract")
+        if abs_df is not None and not abs_df.empty:
+            try:
+                _cache_set(code, abs_df)
+            except Exception:
+                pass
+            # 预填三大表缓存(fundamentals 域),供 fundamentals.fetch 命中秒回。
+            # tdx 缺某源(数据缺口,如个股无资产负债表摘要)时,仅当缓存 miss 写空 df 哨兵
+            # (防覆盖 akshare 既得真实数据)→fundamentals.fetch 命中哨兵返 None 秒回,
+            # 避免每源各重 parse_tdx_financial 一次(pytdx 单连接 Lock 串行,
+            # N 只×3 重 parse 是 quality 批处理 deadline 40s 只出 16 的主瓶颈)
+            for s in ("balance", "cashflow", "profit"):
+                tdf = parsed.get(s)
+                if tdf is not None and not tdf.empty:
+                    try:
+                        fundamentals._cache_set(code, s, tdf)
+                    except Exception:
+                        pass
+                else:
+                    _, st = fundamentals._cache_get(code, s, allow_stale=False)
+                    if st == "miss":
+                        try:
+                            fundamentals._cache_set(code, s, pd.DataFrame())
+                        except Exception:
+                            pass
+            _note_fetch(True)
+            return abs_df, False
+        # tdx 解析成功但无 abstract(数据缺口,如科创板/创业板新 tdx 无财务分析)→返 None 不烧 akshare
+        return None, False
+    _note_fetch(False)  # tdx 解析失败(parsed None:连接/空)→计熔断,走 akshare 备援
+    # akshare 备援(原逻辑)
     if _AK_OK:
         ok = False
         net = None
@@ -160,7 +199,7 @@ def fetch_abstract(code: str) -> tuple[pd.DataFrame | None, bool]:
         if ok:
             return net, False
     df_s, _ = _cache_get(code, allow_stale=True)
-    if df_s is not None:
+    if df_s is not None and not df_s.empty:
         return df_s, True
     return None, False
 
@@ -267,10 +306,10 @@ def _pick_row_fields(df: pd.DataFrame, field_map: dict) -> dict:
 
 
 def _spot(code: str) -> dict:
-    for r in db.query_rows("stock_spot"):
-        if r.get("code") == code:
-            return r
-    return {}
+    # where code=? 走主键索引查单行(旧实现 db.query_rows("stock_spot") 全表扫~5200行,
+    # analyze_many 8 worker 并发×80 只 = 80 次全表扫+5200行转换,GIL/内存争用致硬 stall)
+    rows = db.query_rows("stock_spot", where="code=?", params=(code,))
+    return rows[0] if rows else {}
 
 
 def analyze(code: str) -> dict:
@@ -634,6 +673,54 @@ def shortlist_by_turnover(min_turnover: float = 5e8, k: int = 80,
     return df["code"].tolist()
 
 
+def prefetch_financial(codes: list[str]) -> None:
+    """串行预解析所有 code 的 tdx 财报,填 abstract+三大表缓存(含缺源空 df 哨兵)。
+
+    单线程串行 parse 避免在 analyze_many 的 8 worker 并发下争用 pytdx 单 TCP 连接 Lock
+    (并发时 parse_tdx_financial 单次 0.15s 膨胀至 ~1-3s 的重连抖动,N 只并发 deadline 40s
+    仅完成~16)。预热后并行 analyze 阶段全缓存命中 0 次 pytdx。已有新鲜 abstract 缓存的
+    code 跳过(暖跑秒回)。abstract=None 的 code 也预填三大表哨兵,使其 fundamentals.fetch
+    命中哨兵返 None 秒回(否则 analyze 内 fetch×3 各重 parse 一次=4× 冗余 TCP)。"""
+    for c in codes:
+        _, st = _cache_get(c, allow_stale=False)
+        if st == "hit":
+            continue  # 新鲜 abstract 缓存→跳过(暖跑秒回)
+        parsed = fundamentals._parse_tdx_with_timeout(c)
+        if not parsed:
+            continue
+        abs_df = parsed.get("abstract")
+        if abs_df is not None and not abs_df.empty:
+            try:
+                _cache_set(c, abs_df)
+            except Exception:
+                pass
+        else:
+            # abstract 缺(tdx 无此代码财务分析)→写空 df 哨兵,使 fetch_abstract 命中
+            # 返 None 秒回不重 parse(否则 8 worker 并发争用 pytdx Lock 致 40s 挂起)
+            _, ast = _cache_get(c, allow_stale=False)
+            if ast == "miss":
+                try:
+                    _cache_set(c, pd.DataFrame())
+                except Exception:
+                    pass
+        # 三大表:有数据写真实 df,缺源(含 abstract=None 的全缺)写空 df 哨兵(仅 miss 时,
+        # 防覆盖 akshare 既得真实数据)→fundamentals.fetch 命中哨兵返 None 不重 parse
+        for s in ("balance", "cashflow", "profit"):
+            tdf = parsed.get(s)
+            if tdf is not None and not tdf.empty:
+                try:
+                    fundamentals._cache_set(c, s, tdf)
+                except Exception:
+                    pass
+            else:
+                _, sst = fundamentals._cache_get(c, s, allow_stale=False)
+                if sst == "miss":
+                    try:
+                        fundamentals._cache_set(c, s, pd.DataFrame())
+                    except Exception:
+                        pass
+
+
 def analyze_many(codes: list[str], deadline_s: float | None = None) -> list[dict]:
     """并发 analyze（max_workers=8）；单只超时由 fetch_abstract 的 _AK_TIMEOUT 兜底。
 
@@ -644,6 +731,9 @@ def analyze_many(codes: list[str], deadline_s: float | None = None) -> list[dict
         仍可凭口径1/3/4 + 部分口径2 产出有效主清单。
     """
     out = []
+    # 串行预解析填缓存,避免 8 worker 并发争用 pytdx 单连接 Lock 致 parse 抖动
+    # (并发 parse 0.15s→1-3s,N 只 deadline 40s 仅完成~16;预热后并行阶段全缓存命中)
+    prefetch_financial(codes)
     def _one(c):
         try:
             r = analyze(c)

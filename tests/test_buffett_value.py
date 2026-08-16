@@ -280,6 +280,8 @@ def test_analyze_many_deadline_returns_partial(monkeypatch):
         return {"code": c, "pe": 10.0}  # 快速成功
 
     monkeypatch.setattr(buffett, "analyze", _fake_analyze)
+    # prefetch_financial 走真实 pytdx(假码慢连)→mock 为 no-op(本测试只测 deadline 机制)
+    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes: None)
     codes = ["fast1", "fast2", "fast3", "fast4", "slow1", "slow2", "slow3", "slow4", "slow5"]
     t0 = time.time()
     out = buffett.analyze_many(codes, deadline_s=0.4)
@@ -301,6 +303,7 @@ def test_analyze_many_no_deadline_waits_all(monkeypatch):
         seen.append(c)
         return {"code": c, "pe": 10.0}
     monkeypatch.setattr(buffett, "analyze", _fake_analyze)
+    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes: None)
     out = buffett.analyze_many(["a", "b", "c"])  # 默认 None
     assert {r["code"] for r in out} == {"a", "b", "c"}
     assert len(seen) == 3
@@ -328,6 +331,8 @@ def test_fetch_abstract_records_fail_on_timeout(monkeypatch):
     buffett = sys.modules.get("backtest.buffett") or __import__("backtest.buffett", fromlist=["x"])
     monkeypatch.setattr(buffett, "_AK_OK", True)
     monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    # tdx 主源不可用(返 None)→走 akshare 备援路径,测 akshare 超时熔断
+    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial", lambda code: None)
     calls = []
     monkeypatch.setattr(buffett, "_note_fetch", lambda ok: calls.append(ok))
     # _fetch_net hang 致 ThreadPoolExecutor 超时
@@ -346,6 +351,8 @@ def test_fetch_abstract_records_fail_on_empty_result(monkeypatch):
     import pandas as pd
     monkeypatch.setattr(buffett, "_AK_OK", True)
     monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    # tdx 主源不可用→走 akshare 备援,测空结果熔断
+    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial", lambda code: None)
     calls = []
     monkeypatch.setattr(buffett, "_note_fetch", lambda ok: calls.append(ok))
     monkeypatch.setattr(buffett, "_fetch_net", lambda code: pd.DataFrame())  # 空 df 快速返回
@@ -361,6 +368,8 @@ def test_fetch_abstract_records_success_resets_circuit(monkeypatch):
     import pandas as pd
     monkeypatch.setattr(buffett, "_AK_OK", True)
     monkeypatch.setattr(buffett, "_cache_get", lambda code, allow_stale=False: (None, "miss"))
+    # tdx 主源不可用→走 akshare 备援,测成功重置熔断
+    monkeypatch.setattr(buffett.fundamentals, "parse_tdx_financial", lambda code: None)
     calls = []
     monkeypatch.setattr(buffett, "_note_fetch", lambda ok: calls.append(ok))
     fake_df = pd.DataFrame({"指标": ["每股收益"], "2024-12-31": [1.0]})
