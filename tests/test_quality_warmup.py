@@ -37,7 +37,7 @@ def test_warm_quality_cache_calls_chain(monkeypatch):
     assert am_args["deadline"] == 120.0
     assert am_args["codes"] == ["000001", "600519"]
     assert qr_args["universe"] == "stock" and qr_args["refine"] is True
-    assert qr_args["days"] == 20 and qr_args["limit"] == 20  # 对齐前端默认
+    assert qr_args["days"] == 20 and qr_args["limit"] == 10  # 对齐前端默认
 
 
 def test_warm_skips_when_ak_not_ok(monkeypatch):

@@ -368,14 +368,24 @@ def _dim_scores(df, universe, days, min_signals, close=None):
         status["3"] = f"err:{e}"
 
     # 口径4 多信号(历史)：胜率加权（excess_win_rate 均值→横截 pct），降级 trig/5
+    # 性能:stock 限 shortlist(~72只),避免全市场3763只 scan+backtest 致17s;对齐口径2/3/5
     try:
         import backtest.signals as bt_sig
-        scan = bt_sig.scan_signals(universe, codes)
+        if universe == "stock":
+            try:
+                import backtest.buffett as bt_buf
+                sl = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
+                scan_codes = [c for c in codes if c in sl]
+            except Exception:
+                scan_codes = codes  # shortlist 失败降级全市场(罕见)
+        else:
+            scan_codes = codes  # ETF 数量少(~500),全市场 scan 不慢
+        scan = bt_sig.scan_signals(universe, scan_codes)
         if scan.get("error"):
             status["4"] = f"err:{scan['error']}"
         else:
             trig = {r["code"]: len(r["signals"]) for r in scan.get("rows", [])}
-            bt = bt_sig.backtest_signals(universe, codes, k_days=5)
+            bt = bt_sig.backtest_signals(universe, scan_codes, k_days=5)
             win_by_code = {}
             if not bt.get("error"):
                 sig_rows = {r["signal"]: r for r in bt.get("rows", [])}
@@ -385,16 +395,16 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                     ewrs = [sig_rows[k]["excess_win_rate"] for k in r.get("signal_keys", [])
                             if k in sig_rows and sig_rows[k].get("excess_win_rate") is not None]
                     win_by_code[c] = float(np.mean(ewrs)) if ewrs else None
-            s = pd.Series(index=codes, dtype=float)
-            for c in codes:
+            s = pd.Series(index=scan_codes, dtype=float)
+            for c in scan_codes:
                 v = win_by_code.get(c)
                 s[c] = v if v is not None else (trig.get(c, 0) / 5.0)
             pct = _to_pct(s)
-            for c in codes:
+            for c in codes:  # 非 scan_codes(shortlist 外)→None,与口径2/3 一致
                 scores[c][4] = _to_float(pct.get(c)) if c in pct.index else None
             dims_avail.append(4)
-            status["4"] = ("ok(胜率加权)" if any(v is not None for v in win_by_code.values())
-                           else "ok(降级trig/5)")
+            status["4"] = ("ok(胜率加权,shortlist)" if any(v is not None for v in win_by_code.values())
+                           else "ok(降级trig/5,shortlist)")
     except Exception as e:
         status["4"] = f"err:{e}"
 
@@ -708,7 +718,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
                 by_dim[d].append({**item, "_pct": ds[d]})
     for d in by_dim:
         by_dim[d].sort(key=lambda x: x.get("_pct") or 0, reverse=True)
-        by_dim[d] = [{k: v for k, v in x.items() if k != "_pct"} for x in by_dim[d]]
+        by_dim[d] = [{k: v for k, v in x.items() if k != "_pct"} for x in by_dim[d]][:10]
     main = [it for it in enriched if it["hits"] >= eff_min_dims]
     main.sort(key=lambda x: x["resonance"] or 0, reverse=True)
 
@@ -721,10 +731,10 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         refine_status = "skip(无可精排候选)"  # stock+refine 但 main 空
     quote_by_code = {}
     if universe == "stock" and refine and main:
-        pool = main[:refine_pool]
+        pool = main[:max(refine_pool, limit)]
         pool, refine_status, quote_by_code = _refine_by_quote(
             pool, df, in_session=in_session)
-        main = pool  # 精排重排后的 top refine_pool 直接作为组合层输入
+        main = pool  # 精排池至少取 limit 只(limit>refine_pool 时不静默截断)
 
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)
