@@ -48,3 +48,70 @@ def test_step2_pass():
     assert ds._step2_pass({**ok, "pe": None}, p) is False
     # ST
     assert ds._step2_pass({**ok, "st_type": "ST"}, p) is False
+
+
+import pandas as pd
+
+
+def _mk_close(codes_prices: dict, n=65):
+    """造 close 面板: {code: [p0..p63]} 升序。n=65 够算60MA。
+    不足 n 日补 NaN(非前值)——使 dropna 反映真实历史长度,need_history 测试方生效。"""
+    data = {}
+    for c, pxs in codes_prices.items():
+        if len(pxs) < n:
+            full = list(pxs) + [float("nan")] * (n - len(pxs))
+        else:
+            full = list(pxs)
+        data[c] = full[:n]
+    df = pd.DataFrame(data)
+    df.index = pd.date_range("2026-06-01", periods=n, name="date")
+    return df
+
+
+def test_step3_bullish_align(monkeypatch):
+    # A: 5/10/20 日均线严格上行发散(价递增)
+    close = _mk_close({"A": list(range(60, 125))})  # 严格递增
+    amount = _mk_close({"A": [100] * 65})
+    import backtest.signals as sig
+    monkeypatch.setattr(sig, "_uni_panels", lambda u, codes: (close, amount))
+    info = ds._ma_arrange_batch("stock", ["A"])
+    assert info["A"]["bullish_align"] is True
+    assert info["A"]["need_history"] is False
+    assert ds._step3_pass(info["A"]) is True
+
+
+def test_step3_volume_breakout(monkeypatch):
+    # B: 站稳60日线 + 当日量翻倍(不严格多头排列但放量突破)
+    px = [100] * 65  # 平盘,close>ma60 满足
+    px[-1] = 101
+    close = _mk_close({"B": px})
+    # 最后一天量是前20日均量2倍
+    amt = [100] * 65
+    amt[-1] = 250
+    amount = _mk_close({"B": amt})
+    import backtest.signals as sig
+    monkeypatch.setattr(sig, "_uni_panels", lambda u, codes: (close, amount))
+    info = ds._ma_arrange_batch("stock", ["B"])
+    assert info["B"]["volume_breakout"] is True
+    assert ds._step3_pass(info["B"]) is True
+
+
+def test_step3_bearish_reject(monkeypatch):
+    # C: 空头排列(价递减)
+    close = _mk_close({"C": list(range(125, 60, -1))})
+    amount = _mk_close({"C": [100] * 65})
+    import backtest.signals as sig
+    monkeypatch.setattr(sig, "_uni_panels", lambda u, codes: (close, amount))
+    info = ds._ma_arrange_batch("stock", ["C"])
+    assert info["C"]["bearish"] is True
+    assert ds._step3_pass(info["C"]) is False
+
+
+def test_step3_need_history(monkeypatch):
+    # D: <60 日历史
+    short = _mk_close({"D": [10, 11, 12]}, n=65)  # 只3个真实值
+    import backtest.signals as sig
+    monkeypatch.setattr(sig, "_uni_panels", lambda u, codes: (short, short))
+    info = ds._ma_arrange_batch("stock", ["D"])
+    assert info["D"]["need_history"] is True
+    assert ds._step3_pass(info["D"]) is False

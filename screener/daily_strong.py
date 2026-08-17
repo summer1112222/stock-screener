@@ -77,3 +77,71 @@ def _step2_pass(s, p) -> bool:
     if st:  # 非空=ST/*ST
         return False
     return True
+
+
+from backtest import signals as _sig
+
+
+def _ma_arrange_batch(universe: str, codes: list[str]) -> dict:
+    """批量算 5/10/20/60 MA + 量。返 {code: ma_info}。
+    ma_info: {ma5,ma10,ma20,ma60,bullish_align,volume_breakout,bearish,converged,need_history,last_vol,vol_avg20}
+    无历史/<60日→need_history=True,该股 step3 跳过不崩。
+    """
+    out = {c: {"ma5": None, "ma10": None, "ma20": None, "ma60": None,
+               "bullish_align": False, "volume_breakout": False,
+               "bearish": False, "converged": False, "need_history": False,
+               "last_vol": None, "vol_avg20": None} for c in codes}
+    if not codes:
+        return out
+    try:
+        close, amount = _sig._uni_panels(universe, codes)
+    except Exception:
+        return out
+    if close is None or close.empty:
+        return out
+    for c in codes:
+        if c not in close.columns:
+            out[c]["need_history"] = True
+            continue
+        s = close[c].dropna()
+        if len(s) < 60:
+            out[c]["need_history"] = True
+            continue
+        ma5 = s.rolling(5).mean().iloc[-1]
+        ma10 = s.rolling(10).mean().iloc[-1]
+        ma20 = s.rolling(20).mean().iloc[-1]
+        ma60 = s.rolling(60).mean().iloc[-1]
+        ma20_prev = s.rolling(20).mean().iloc[-6] if len(s) >= 6 else ma20  # 5日前
+        last_close = s.iloc[-1]
+        out[c].update({"ma5": _nan(ma5), "ma10": _nan(ma10), "ma20": _nan(ma20),
+                       "ma60": _nan(ma60)})
+        # 多头排列: ma5>ma10>ma20 且 ma20 较5日前上行(向上发散)
+        out[c]["bullish_align"] = bool(
+            ma5 > ma10 > ma20 and ma20 > ma20_prev)
+        # 空头排列: ma5<ma10<ma20
+        out[c]["bearish"] = bool(ma5 < ma10 < ma20)
+        # 均线粘合: (max-min)/min < 0.5%
+        if min(ma5, ma10, ma20) > 0:
+            spread = (max(ma5, ma10, ma20) - min(ma5, ma10, ma20)) / min(ma5, ma10, ma20)
+            out[c]["converged"] = bool(spread < 0.005)
+        # 放量突破: close>ma60 且 当日量>=2×过去20日均量
+        if amount is not None and c in amount.columns:
+            amt = amount[c].dropna()
+            if len(amt) >= 20:
+                last_vol = amt.iloc[-1]
+                vol_avg20 = amt.iloc[-20:].mean()
+                out[c]["last_vol"] = _nan(last_vol)
+                out[c]["vol_avg20"] = _nan(vol_avg20)
+                out[c]["volume_breakout"] = bool(
+                    last_close > ma60 and last_vol >= 2 * vol_avg20)
+    return out
+
+
+def _step3_pass(info: dict) -> bool:
+    """形态过滤: 多头排列 OR 放量突破 通过; 空头排列 剔除。
+    均线粘合(converged)不单独剔除——粘合后放量突破是有效形态(粘合后突破正是买点)。"""
+    if info.get("need_history"):
+        return False
+    if info.get("bearish"):
+        return False
+    return info.get("bullish_align") or info.get("volume_breakout")
