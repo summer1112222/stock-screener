@@ -197,3 +197,114 @@ def _step5_pass(code, spots, sff) -> tuple[bool, dict]:
     base["board_zt_count"] = zt
     ok = base["board_rank"] is not None and base["board_rank"] <= 5 and zt >= 2
     return ok, base
+
+
+def daily_strong_rank(universe: str = "stock",
+                      codes: list[str] | None = None,
+                      limit: int = 50, days: int = 30,
+                      min_change_pct: float = 5.0,
+                      min_turnover: float = 3.0,
+                      max_price: float = 50.0,
+                      min_mv: float = 10.0, max_mv: float = 200.0,
+                      max_pe: float = 150.0) -> dict:
+    """每日强势5步混合编排。返 {universe,count,items,ts,filters,market_median_chg,note?}。
+
+    step1/2/3/5 硬剔除, step4 软打分。排序键: 硬通过数×10 + 软分 降序。
+    粗筛: codes 非空不粗筛; 否则 change_pct>min_change_pct 按涨幅降序截 _SCAN_K。
+    30s 进程缓存。无历史/无board→对应步降级不崩。
+    """
+    p = {"min_change_pct": min_change_pct, "min_turnover": min_turnover,
+         "max_price": max_price, "min_mv": min_mv, "max_mv": max_mv,
+         "max_pe": max_pe}
+    key = (universe, tuple(codes or []), limit, days, min_change_pct,
+           min_turnover, max_price, min_mv, max_mv, max_pe)
+    now = datetime.now()
+    hit = _CACHE.get(key)
+    if hit and (now - hit[0]).total_seconds() < _CACHE_TTL:
+        return hit[1]
+
+    base = {"universe": universe, "count": 0, "items": [], "limit": limit,
+            "days": days, "filters": p,
+            "ts": now.strftime("%Y-%m-%dT%H:%M:%S")}
+
+    spot_all = db.query_rows("stock_spot", limit=0)
+    if codes:
+        cset = {str(c) for c in codes}
+        spot_all = [s for s in spot_all if str(s.get("code")) in cset]
+
+    if not spot_all:
+        base["note"] = "stock_spot 为空，先 /api/refresh 采集"
+        base["market_median_chg"] = None
+        _CACHE[key] = (now, base)
+        return base
+
+    median_chg = _median([_to_f(s.get("change_pct")) for s in spot_all])
+    base["market_median_chg"] = _nan(median_chg)
+
+    # 粗筛(codes 限定时不粗筛)
+    if not codes:
+        cand = [s for s in spot_all
+                if (_to_f(s.get("change_pct")) or -99) > min_change_pct]
+        cand.sort(key=lambda s: _to_f(s.get("change_pct")) or -99, reverse=True)
+        cand = cand[:_SCAN_K]
+    else:
+        cand = spot_all
+
+    codes_k = [str(s.get("code")) for s in cand]
+
+    # step3 批量 MA
+    ma_info = _ma_arrange_batch(universe, codes_k)
+
+    # step5 板块助攻: 单次取 sector_fund_flow(行业,今日)
+    try:
+        sff = db.query_rows("sector_fund_flow",
+                            where="sector_type = ? AND indicator = ?",
+                            params=("行业", "今日"), limit=0)
+    except Exception:
+        sff = []
+
+    items = []
+    for s in cand:
+        code = str(s.get("code"))
+        name = s.get("name") or code
+        s1 = _step1_pass(s, p)
+        s2 = _step2_pass(s, p)
+        mi = ma_info.get(code, {})
+        s3 = _step3_pass(mi)
+        s4 = _step4_score(s)
+        s5, bd = _step5_pass(code, spot_all, sff)
+        hard = sum([s1, s2, s3, s5])
+        items.append({
+            "code": code, "name": name,
+            "change_pct": _nan(_to_f(s.get("change_pct"))),
+            "turnover_rate": _nan(_to_f(s.get("turnover_rate"))),
+            "latest_price": _nan(_to_f(s.get("latest_price"))),
+            "circulating_market_cap": _nan(_to_f(s.get("circulating_market_cap"))),
+            "pe": _nan(_to_f(s.get("pe"))),
+            "st_type": s.get("st_type"),
+            "volume_ratio": _nan(_to_f(s.get("volume_ratio"))),
+            "board": bd["board"], "board_rank": bd["board_rank"],
+            "board_zt_count": bd["board_zt_count"],
+            "step1_pass": s1, "step2_pass": s2, "step3_pass": s3,
+            "step4_score": s4, "step5_pass": s5,
+            "hard_pass": hard,
+            "need_history": mi.get("need_history", False),
+            "score": hard * 10 + s4,
+        })
+
+    items.sort(key=lambda x: (x["hard_pass"], x["step4_score"]), reverse=True)
+    items = items[:max(0, limit)]
+    for i, it in enumerate(items):
+        it["rank"] = i + 1
+
+    base["count"] = len(items)
+    base["items"] = items
+    _CACHE[key] = (now, base)
+    return base
+
+
+def _median(values):
+    xs = [v for v in values if v is not None]
+    if not xs:
+        return None
+    return float(np.median(xs))
