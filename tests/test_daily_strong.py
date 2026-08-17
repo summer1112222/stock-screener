@@ -115,3 +115,50 @@ def test_step3_need_history(monkeypatch):
     info = ds._ma_arrange_batch("stock", ["D"])
     assert info["D"]["need_history"] is True
     assert ds._step3_pass(info["D"]) is False
+
+
+def test_step4_score():
+    # 量比>2.5 满分 + 涨幅<7% 满分
+    s = {"volume_ratio": 3.0, "change_pct": 5.5}
+    sc = ds._step4_score(s)
+    assert 80 < sc <= 100
+    # 涨幅>7% 扣分
+    s2 = {"volume_ratio": 3.0, "change_pct": 8.0}
+    assert ds._step4_score(s2) < sc
+    # 量比低
+    s3 = {"volume_ratio": 1.0, "change_pct": 5.5}
+    assert ds._step4_score(s3) < sc
+
+
+def test_step5_pass():
+    spots = [
+        {"code": "A", "board": "电池", "change_pct": 10.0},
+        {"code": "B", "board": "电池", "change_pct": 10.0},
+        {"code": "C", "board": "电池", "change_pct": 2.0},
+    ]
+    # 电池板块净流入排名第3(前5) + 2涨停
+    sff = [{"name": "半导体", "main_net_inflow": 100},
+           {"name": "军工", "main_net_inflow": 80},
+           {"name": "电池", "main_net_inflow": 60}]
+    ok, d = ds._step5_pass("A", spots, sff)
+    assert ok is True
+    assert d["board"] == "电池"
+    assert d["board_rank"] == 3
+    assert d["board_zt_count"] == 2
+
+
+def test_step5_fail_rank():
+    spots = [{"code": "A", "board": "电池", "change_pct": 10.0}]
+    # 电池排名第10(>5)
+    sff = [{"name": f"板块{i}", "main_net_inflow": 100 - i} for i in range(10)]
+    sff.append({"name": "电池", "main_net_inflow": 1})
+    ok, d = ds._step5_pass("A", spots, sff)
+    assert ok is False
+    assert d["board_rank"] == 11
+
+
+def test_step5_no_board():
+    spots = [{"code": "A", "board": None}]
+    ok, d = ds._step5_pass("A", spots, [])
+    assert ok is False
+    assert d["board"] is None

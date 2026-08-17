@@ -145,3 +145,55 @@ def _step3_pass(info: dict) -> bool:
     if info.get("bearish"):
         return False
     return info.get("bullish_align") or info.get("volume_breakout")
+
+
+def _step4_score(s) -> float:
+    """软打分(0-100,排序用): 量比>2.5强度(0.5权重) + 涨幅<7%避追高(0.5权重)。
+    分时项永久降级(无数据源),0不崩。"""
+    vr = _to_f(s.get("volume_ratio"))
+    chg = _to_f(s.get("change_pct"))
+    # 量比强度: >=2.5满分, 线性缩放到[0,1]
+    a = _clip((vr - 1.0) / 1.5) if vr is not None else 0.0
+    # 涨幅温和: <7%满分, 7-9.8%线性扣至0, >=9.8%为0
+    if chg is None:
+        b = 0.0
+    elif chg < 7:
+        b = 1.0
+    elif chg < 9.8:
+        b = (9.8 - chg) / 2.8
+    else:
+        b = 0.0
+    return round(_clip(0.5 * a + 0.5 * b) * 100, 2)
+
+
+def _step5_pass(code, spots, sff) -> tuple[bool, dict]:
+    """板块助攻(行业口径): 板块净流入排名前5 + 板块内>=2涨停股。
+    返 (pass, {board, board_rank, board_zt_count})。无board→pass=False。"""
+    code = str(code)
+    base = {"board": None, "board_rank": None, "board_zt_count": None}
+    board = None
+    for s in spots:
+        if str(s.get("code")) == code:
+            board = s.get("board")
+            break
+    if not board:
+        return False, base
+    base["board"] = board
+    # 板块净流入排名(降序)
+    if sff:
+        ranked = sorted(sff, key=lambda x: _to_f(x.get("main_net_inflow")) or -1e18,
+                        reverse=True)
+        names = [r.get("name") for r in ranked]
+        if board in names:
+            idx = names.index(board)
+            base["board_rank"] = idx + 1
+    # 板块内涨停股(change_pct>=9.8%)
+    intra = [s for s in spots if s.get("board") == board]
+    zt = 0
+    for s in intra:
+        chg = _to_f(s.get("change_pct"))
+        if chg is not None and chg >= 9.8:
+            zt += 1
+    base["board_zt_count"] = zt
+    ok = base["board_rank"] is not None and base["board_rank"] <= 5 and zt >= 2
+    return ok, base
