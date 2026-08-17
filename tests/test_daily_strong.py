@@ -36,18 +36,20 @@ def test_step1_pass():
 
 def test_step2_pass():
     p = {"min_mv": 10.0, "max_mv": 200.0, "max_pe": 150.0}
-    ok = {"circulating_market_cap": 100.0, "pe": 30.0, "st_type": None}
-    assert ds._step2_pass(ok, p) is True
+    # st_set 模拟 st_list 反查(stock_spot 无 st_type 列)
+    st_set = {"C"}
+    ok = {"code": "A", "circulating_market_cap": 100.0, "pe": 30.0}
+    assert ds._step2_pass(ok, p, st_set) is True
     # 市值过小
-    assert ds._step2_pass({**ok, "circulating_market_cap": 5.0}, p) is False
+    assert ds._step2_pass({**ok, "circulating_market_cap": 5.0}, p, st_set) is False
     # 市值过大
-    assert ds._step2_pass({**ok, "circulating_market_cap": 300.0}, p) is False
+    assert ds._step2_pass({**ok, "circulating_market_cap": 300.0}, p, st_set) is False
     # PE 过高
-    assert ds._step2_pass({**ok, "pe": 200.0}, p) is False
+    assert ds._step2_pass({**ok, "pe": 200.0}, p, st_set) is False
     # 亏损(pe 空)
-    assert ds._step2_pass({**ok, "pe": None}, p) is False
-    # ST
-    assert ds._step2_pass({**ok, "st_type": "ST"}, p) is False
+    assert ds._step2_pass({**ok, "pe": None}, p, st_set) is False
+    # ST(code 在 st_set)
+    assert ds._step2_pass({**ok, "code": "C"}, p, st_set) is False
 
 
 import pandas as pd
@@ -131,6 +133,7 @@ def test_step4_score():
 
 
 def test_step5_pass():
+    # 注: stock_spot 生产无 board 列,step5 降级;此测试注入 board 测逻辑(未来补列后激活)
     spots = [
         {"code": "A", "board": "电池", "change_pct": 10.0},
         {"code": "B", "board": "电池", "change_pct": 10.0},
@@ -167,17 +170,16 @@ def test_step5_no_board():
 _SPOT = [
     {"code": "A", "name": "甲", "change_pct": 6.0, "volume_ratio": 3.0,
      "turnover_rate": 5.0, "latest_price": 20.0,
-     "circulating_market_cap": 100.0, "pe": 30.0, "st_type": None,
-     "board": "电池"},
+     "circulating_market_cap": 100.0, "pe": 30.0},
     {"code": "B", "name": "乙", "change_pct": 8.0, "volume_ratio": 1.0,
      "turnover_rate": 4.0, "latest_price": 30.0,
-     "circulating_market_cap": 50.0, "pe": 40.0, "st_type": None,
-     "board": "电池"},
+     "circulating_market_cap": 50.0, "pe": 40.0},
     {"code": "C", "name": "丙", "change_pct": 2.0, "volume_ratio": 0.5,
      "turnover_rate": 1.0, "latest_price": 10.0,
-     "circulating_market_cap": 5.0, "pe": 10.0, "st_type": "ST",
-     "board": "军工"},
+     "circulating_market_cap": 5.0, "pe": 10.0},
 ]
+# 生产 schema: stock_spot 无 board/st_type;st_type 走 st_list 反查
+_ST = [{"code": "C", "st_type": "ST"}]
 _SFF = [{"name": "电池", "main_net_inflow": 100},
         {"name": "军工", "main_net_inflow": 50}]
 
@@ -185,7 +187,8 @@ _SFF = [{"name": "电池", "main_net_inflow": 100},
 def _mock_orch(monkeypatch, close_map=None):
     monkeypatch.setattr(ds.db, "query_rows",
                         lambda table, **k: (_SPOT if table == "stock_spot"
-                            else _SFF if table == "sector_fund_flow" else []))
+                            else _SFF if table == "sector_fund_flow"
+                            else _ST if table == "st_list" else []))
     # step3: A/B 多头排列通过, C 需历史
     close = close_map or _mk_close(
         {"A": list(range(60, 125)), "B": list(range(60, 125))})

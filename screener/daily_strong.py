@@ -64,17 +64,19 @@ def _step1_pass(s, p) -> bool:
     return chg > p["min_change_pct"] and tr > p["min_turnover"] and px < p["max_price"]
 
 
-def _step2_pass(s, p) -> bool:
-    """雷区剔除: 市值[min_mv,max_mv] + PE<=max_pe且非亏损 + 非ST。"""
+def _step2_pass(s, p, st_set=None) -> bool:
+    """雷区剔除: 市值[min_mv,max_mv] + PE<=max_pe且非亏损 + 非ST。
+    st_set=预加载的 ST code 集合(st_list 表; stock_spot 无 st_type 列,
+    生产必须走 st_set 反查,直接读 s.get('st_type') 永远 None 致 ST 股漏过)。"""
     mc = _to_f(s.get("circulating_market_cap"))
     pe = _to_f(s.get("pe"))
-    st = s.get("st_type")
+    is_st = (str(s.get("code")) in st_set) if st_set is not None else bool(s.get("st_type"))
     if mc is None or mc < p["min_mv"] or mc > p["max_mv"]:
         return False
     # pe 为空/负=亏损→剔除; pe>max_pe→剔除
     if pe is None or pe <= 0 or pe > p["max_pe"]:
         return False
-    if st:  # 非空=ST/*ST
+    if is_st:  # 在 ST 名单 / st_type 非空=ST/*ST
         return False
     return True
 
@@ -82,9 +84,10 @@ def _step2_pass(s, p) -> bool:
 from backtest import signals as _sig
 
 
-def _ma_arrange_batch(universe: str, codes: list[str]) -> dict:
+def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> dict:
     """批量算 5/10/20/60 MA + 量。返 {code: ma_info}。
     ma_info: {ma5,ma10,ma20,ma60,bullish_align,volume_breakout,bearish,converged,need_history,last_vol,vol_avg20}
+    days=近 N 日观察窗口(MA60 需≥60,内部 tail(max(days,60)) 兜底)。
     无历史/<60日→need_history=True,该股 step3 跳过不崩。
     """
     out = {c: {"ma5": None, "ma10": None, "ma20": None, "ma60": None,
@@ -99,11 +102,12 @@ def _ma_arrange_batch(universe: str, codes: list[str]) -> dict:
         return out
     if close is None or close.empty:
         return out
+    window = max(days, 60)  # MA60 至少需 60 日
     for c in codes:
         if c not in close.columns:
             out[c]["need_history"] = True
             continue
-        s = close[c].dropna()
+        s = close[c].dropna().tail(window)
         if len(s) < 60:
             out[c]["need_history"] = True
             continue
@@ -168,7 +172,12 @@ def _step4_score(s) -> float:
 
 def _step5_pass(code, spots, sff) -> tuple[bool, dict]:
     """板块助攻(行业口径): 板块净流入排名前5 + 板块内>=2涨停股。
-    返 (pass, {board, board_rank, board_zt_count})。无board→pass=False。"""
+    返 (pass, {board, board_rank, board_zt_count})。无board→pass=False。
+
+    **降级(2026-08-17)**: stock_spot 表无 board 列(spot 源新浪/东财不带板块字段),
+    故生产环境 board 永远 None→pass=False。逻辑保留待项目级补 stock_spot.board 列
+    (refresh 时 board_stocks 回填)后激活;board_money_link 路由有同 bug 待一并修。
+    """
     code = str(code)
     base = {"board": None, "board_rank": None, "board_zt_count": None}
     board = None
@@ -225,9 +234,17 @@ def daily_strong_rank(universe: str = "stock",
 
     base = {"universe": universe, "count": 0, "items": [], "limit": limit,
             "days": days, "filters": p,
+            "step5_note": "stock_spot 无 board 列,板块助攻降级(pass=False);待补 board 列激活",
             "ts": now.strftime("%Y-%m-%dT%H:%M:%S")}
 
     spot_all = db.query_rows("stock_spot", limit=0)
+    # 预加载 ST 名单(st_list 表; stock_spot 无 st_type 列,须反查)
+    try:
+        st_rows = db.query_rows("st_list", limit=0)
+        st_map = {str(r.get("code")): r.get("st_type") for r in st_rows}
+    except Exception:
+        st_map = {}
+    st_set = set(st_map)
     if codes:
         cset = {str(c) for c in codes}
         spot_all = [s for s in spot_all if str(s.get("code")) in cset]
@@ -252,8 +269,8 @@ def daily_strong_rank(universe: str = "stock",
 
     codes_k = [str(s.get("code")) for s in cand]
 
-    # step3 批量 MA
-    ma_info = _ma_arrange_batch(universe, codes_k)
+    # step3 批量 MA(传 days 截窗口)
+    ma_info = _ma_arrange_batch(universe, codes_k, days)
 
     # step5 板块助攻: 单次取 sector_fund_flow(行业,今日)
     try:
@@ -268,7 +285,7 @@ def daily_strong_rank(universe: str = "stock",
         code = str(s.get("code"))
         name = s.get("name") or code
         s1 = _step1_pass(s, p)
-        s2 = _step2_pass(s, p)
+        s2 = _step2_pass(s, p, st_set)
         mi = ma_info.get(code, {})
         s3 = _step3_pass(mi)
         s4 = _step4_score(s)
@@ -281,7 +298,7 @@ def daily_strong_rank(universe: str = "stock",
             "latest_price": _nan(_to_f(s.get("latest_price"))),
             "circulating_market_cap": _nan(_to_f(s.get("circulating_market_cap"))),
             "pe": _nan(_to_f(s.get("pe"))),
-            "st_type": s.get("st_type"),
+            "st_type": st_map.get(code) or s.get("st_type"),
             "volume_ratio": _nan(_to_f(s.get("volume_ratio"))),
             "board": bd["board"], "board_rank": bd["board_rank"],
             "board_zt_count": bd["board_zt_count"],
