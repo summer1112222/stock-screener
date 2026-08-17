@@ -307,7 +307,7 @@
       <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:8px">
         <div class="f"><label>标的</label><select id="qsUniverse" class="btn ghost"><option value="stock">个股</option><option value="etf">ETF</option></select></div>
         <div class="f"><label>窗口</label><select id="qsDays" class="btn ghost"><option>20</option><option>40</option><option>60</option></select></div>
-        <div class="f"><label>数量</label><select id="qsLimit" class="btn ghost"><option>10</option><option selected>20</option><option>30</option></select></div>
+        <div class="f"><label>数量</label><select id="qsLimit" class="btn ghost"><option>10</option><option selected>20</option><option>30</option><option>50</option><option>100</option></select></div>
         <div class="f"><label>最少口径</label><select id="qsMinDims" class="btn ghost"><option>1</option><option selected>2</option><option>3</option></select></div>
         <div class="f"><label>组合</label><select id="qsCombo" class="btn ghost" title="贪心=等权+行业≤上限+相关性≤上限；最小方差=风险预算机械分配(非推荐仓位)"><option value="greedy">贪心(等权)</option><option value="min_var">最小方差</option></select></div>
         <div class="f"><label>共振模式</label><select id="qsResMode" class="btn ghost" title="贪心=hits×10+加权均值(数量偏好,共识优先)；短板惩罚=几何均值(某口径极低拉低总分)。权重为经验先验非IC校准"><option value="greedy" selected>贪心(共识)</option><option value="penalize">短板惩罚</option></select></div>
@@ -320,6 +320,32 @@
       <div class="skipped" id="qsMsg"></div>
       <div id="qsOut" style="margin-top:10px"></div>
       <div class="disc"><b>优质筛选免责</b>：多口径(风险调整/价值质量/资金流向/多信号)共振<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议、不承诺收益</b>。共振=多口径同靠前的事实，非收益预测。市场有风险，盈亏自负。</div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-t">次日强势 <span style="color:var(--warn);font-weight:400;margin-left:8px">5因子机械排序·观察清单·非推荐</span></div>
+      <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:8px">
+        <div class="f"><label>标的</label><select id="ndUniverse" class="btn ghost"><option value="stock">个股</option></select></div>
+        <div class="f"><label>窗口</label><select id="ndDays" class="btn ghost"><option>20</option><option selected>30</option><option>60</option></select></div>
+        <div class="f"><label>数量</label><select id="ndLimit" class="btn ghost"><option>20</option><option selected>50</option><option>100</option></select></div>
+        <div class="f"><label>筛选</label><select id="ndFilter" class="btn ghost" title="粗筛(文章条件2/3): 宽松=涨幅≥1%+量比≥0.5；文章=涨幅≥3%+量比≥1(贴合文章)；全部=不过滤全市场topK"><option value="loose" selected>宽松</option><option value="article">文章</option><option value="all">全部</option></select></div>
+        <button class="btn ghost" id="ndRun" type="button">排次日强势</button>
+        <span id="ndMsg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="ndOut" style="margin-top:10px"></div>
+      <div class="disc"><b>次日强势免责</b>：5因子(资金连续0.30/主力阶段0.20/技术信号0.20/当日强势0.15/筹码收集0.15)<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议</b>。依赖资金流+历史(需先 refresh+fetch)，无历史则对应因子0不崩。出货阶段拉低总分沉底。盈亏自负。</div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-t">每日强势 <span style="color:var(--warn);font-weight:400;margin-left:8px">5步漏斗+板块助攻·观察清单·非推荐</span></div>
+      <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:8px">
+        <div class="f"><label>标的</label><select id="dsUniverse" class="btn ghost"><option value="stock">个股</option></select></div>
+        <div class="f"><label>数量</label><select id="dsLimit" class="btn ghost"><option>20</option><option selected>50</option><option>100</option></select></div>
+        <div class="f"><label>窗口</label><select id="dsDays" class="btn ghost"><option>20</option><option selected>30</option><option>60</option></select></div>
+        <div class="f"><label>涨幅≥</label><select id="dsMinChg" class="btn ghost" title="step1 粗筛最低涨幅%"><option>3</option><option selected>5</option><option>7</option></select></div>
+        <button class="btn ghost" id="dsRun" type="button">排每日强势</button>
+        <span id="dsMsg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="dsOut" style="margin-top:10px"></div>
+      <div class="disc"><b>每日强势免责</b>：5步漏斗(step1入选/step2雷区/step3形态/step4软打分/step5板块助攻)<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议</b>。硬剔除step1/2/3/5+软打分step4，板块助攻需 sector_fund_flow。依赖 stock_daily(step3 MA)，无历史该步降级。盈亏自负。</div>
     </div>
   </section>
 
@@ -1491,6 +1517,80 @@ document.getElementById('qsCorr').onchange=qsLoad;
 document.getElementById('qsCombo').onchange=qsLoad;
 document.getElementById('qsResMode').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
+
+// ---------------- 次日强势(5因子机械排序) ----------------
+async function ndLoad(){
+  const uni=document.getElementById('ndUniverse').value;
+  const days=document.getElementById('ndDays').value;
+  const limit=document.getElementById('ndLimit').value;
+  const flt=document.getElementById('ndFilter').value;
+  let mcp=1.0,mvr=0.5;
+  if(flt==='article'){mcp=3;mvr=1.0;}
+  if(flt==='all'){mcp=0;mvr=0;}
+  const btn=document.getElementById('ndRun');
+  btn.disabled=true; const t0=Date.now();
+  document.getElementById('ndMsg').textContent='加载中(资金流+筹码,首次较慢;30s缓存)...';
+  try{
+    const r=await _qsFetch(`${API}/api/nextday-strong?universe=${uni}&days=${days}&limit=${limit}&min_change_pct=${mcp}&min_volume_ratio=${mvr}`);
+    const d=r.data||{};
+    const dt=((Date.now()-t0)/1000).toFixed(1);
+    document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
+    document.getElementById('ndMsg').textContent=(d.note?d.note+'；':'')+'共'+(d.count||0)+'只；大盘中位'+(d.market_median_chg!=null?(+d.market_median_chg).toFixed(2)+'%':'-')+'；耗时'+dt+'s'+(dt<2?' (缓存命中)':'');
+    ndRender(d);
+  }catch(e){ document.getElementById('ndMsg').textContent='加载失败: '+e; }
+  finally{ btn.disabled=false; }
+}
+function ndRender(d){
+  const items=d.items||[];
+  if(!items.length){ document.getElementById('ndOut').innerHTML='<div class="empty">'+(d.note||'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或选"全部"放开过滤)')+'</div>'; return; }
+  const W=d.weights||{};
+  const phaseColor={出货:'#DC2626',拉升:'#16A34A',吸筹:'#16A34A',流入:'#16A34A',观望:'var(--muted)'};
+  const ths=['#','代码','名称','分','阶段','量价强势','换手市值','资金连续','主力阶段','筹码收集','明细'].map(h=>`<th class="num">${h}</th>`).join('');
+  const trs=items.map(x=>{
+    const f=x.factors||{}, det=x.detail||{};
+    const pc=phaseColor[x.phase]||'var(--muted)';
+    const detTxt='chg='+(det.change_pct!=null?(+det.change_pct).toFixed(2)+'%':'-')+',量比='+(det.volume_ratio!=null?(+det.volume_ratio).toFixed(2):'-')+',换手='+(det.turnover_rate!=null?(+det.turnover_rate).toFixed(1)+'%':'-')+',流通市值='+(det.circulating_market_cap!=null?(+det.circulating_market_cap).toFixed(0)+'亿':'-')+',streak='+(det.streak_inflow??'-')+',加速='+(det.margin_accel!=null?(det.margin_accel/1e4).toFixed(0)+'万':'-')+',集中Δ='+(det.chip_concentration_delta??'-');
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?x.score:'—'}</b></td><td class="num" style="color:${pc}">${x.phase||'—'}</td><td class="num">${f['量价强势']!=null?f['量价强势']:'—'}</td><td class="num">${f['换手市值']!=null?f['换手市值']:'—'}</td><td class="num">${f['资金连续']!=null?f['资金连续']:'—'}</td><td class="num">${f['主力阶段']!=null?f['主力阶段']:'—'}</td><td class="num">${f['筹码收集']!=null?f['筹码收集']:'—'}</td><td style="font-size:11px" title="${detTxt}">${detTxt}</td></tr>`;
+  }).join('');
+  const wTxt='权重: 量价强势'+((W['量价强势']||0)*100).toFixed(0)+'% / 换手市值'+((W['换手市值']||0)*100).toFixed(0)+'% / 资金连续'+((W['资金连续']||0)*100).toFixed(0)+'% / 主力阶段'+((W['主力阶段']||0)*100).toFixed(0)+'% / 筹码收集'+((W['筹码收集']||0)*100).toFixed(0)+'%';
+  document.getElementById('ndOut').innerHTML=`<div style="font-size:11px;color:var(--muted);margin-bottom:6px">${wTxt}</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+}
+document.getElementById('ndRun').onclick=ndLoad;
+document.getElementById('ndFilter').onchange=ndLoad;
+
+// ---------------- 每日强势(5步漏斗+板块助攻) ----------------
+async function dsLoad(){
+  const uni=document.getElementById('dsUniverse').value;
+  const limit=document.getElementById('dsLimit').value;
+  const days=document.getElementById('dsDays').value;
+  const mcp=document.getElementById('dsMinChg').value;
+  const btn=document.getElementById('dsRun');
+  btn.disabled=true; const t0=Date.now();
+  document.getElementById('dsMsg').textContent='加载中(step3 MA+板块助攻,首次较慢;30s缓存)...';
+  try{
+    const r=await _qsFetch(`${API}/api/daily-strong?universe=${uni}&limit=${limit}&days=${days}&min_change_pct=${mcp}`);
+    const d=r.data||{};
+    const dt=((Date.now()-t0)/1000).toFixed(1);
+    document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
+    document.getElementById('dsMsg').textContent=(d.note?d.note+'；':'')+'共'+(d.count||0)+'只；大盘中位'+(d.market_median_chg!=null?(+d.market_median_chg).toFixed(2)+'%':'-')+'；耗时'+dt+'s'+(dt<2?' (缓存命中)':'');
+    dsRender(d);
+  }catch(e){ document.getElementById('dsMsg').textContent='加载失败: '+e; }
+  finally{ btn.disabled=false; }
+}
+function _yn(v){ return v===true?'✓':(v===false?'✗':'—'); }
+function _ynColor(v){ return v===true?'#16A34A':(v===false?'#DC2626':'var(--muted)'); }
+function dsRender(d){
+  const items=d.items||[];
+  if(!items.length){ document.getElementById('dsOut').innerHTML='<div class="empty">'+(d.note||'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或调低涨幅门槛)')+'</div>'; return; }
+  const ths=['#','代码','名称','涨幅','step1','step2','step3','step4分','step5','硬通过','分','板块','板块涨停','明细'].map(h=>`<th class="num">${h}</th>`).join('');
+  const trs=items.map(x=>{
+    const det=x;
+    const detTxt='chg='+(x.change_pct!=null?(+x.change_pct).toFixed(2)+'%':'-')+',量比='+(x.volume_ratio!=null?(+x.volume_ratio).toFixed(2):'-')+',换手='+(x.turnover_rate!=null?(+x.turnover_rate).toFixed(1)+'%':'-')+',价='+(x.latest_price!=null?(+x.latest_price).toFixed(2):'-')+',流通市值='+(x.circulating_market_cap!=null?(+x.circulating_market_cap).toFixed(0)+'亿':'-')+',PE='+(x.pe!=null?(+x.pe).toFixed(0):'-')+',板块排名='+(x.board_rank??'-')+('need_history' in x && x.need_history?' [需历史]':'');
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${x.change_pct!=null?(+x.change_pct).toFixed(2)+'%':'—'}</td><td class="num" style="color:${_ynColor(x.step1_pass)}">${_yn(x.step1_pass)}</td><td class="num" style="color:${_ynColor(x.step2_pass)}">${_yn(x.step2_pass)}</td><td class="num" style="color:${_ynColor(x.step3_pass)}">${_yn(x.step3_pass)}</td><td class="num">${x.step4_score!=null?x.step4_score:'—'}</td><td class="num" style="color:${_ynColor(x.step5_pass)}">${_yn(x.step5_pass)}</td><td class="num"><b>${x.hard_pass!=null?x.hard_pass:'—'}</b></td><td class="num"><b>${x.score!=null?x.score:'—'}</b></td><td>${x.board||'—'}</td><td class="num">${x.board_zt_count!=null?x.board_zt_count:'—'}</td><td style="font-size:11px" title="${detTxt}">${detTxt}</td></tr>`;
+  }).join('');
+  document.getElementById('dsOut').innerHTML=`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+}
+document.getElementById('dsRun').onclick=dsLoad;
 
 // ---------------- 个股深度分析卡 ----------------
 function _badge(v,ok='#16A34A'){return `<span style="color:${ok};font-size:12px">${v}</span>`;}

@@ -247,3 +247,25 @@ def test_rank_cache(monkeypatch):
                         lambda table, **k: [])
     r2 = ds.daily_strong_rank(limit=10, min_change_pct=5.0)
     assert r2["count"] == r1["count"]
+
+
+def test_route_daily_strong(monkeypatch):
+    from fastapi.testclient import TestClient
+    import api.server as srv
+    monkeypatch.setattr(srv, "_DS", None)  # 清模块缓存引用(如有)
+    monkeypatch.setattr(ds.db, "query_rows",
+                        lambda table, **k: (_SPOT if table == "stock_spot"
+                            else _SFF if table == "sector_fund_flow" else []))
+    close = _mk_close({"A": list(range(60, 125)), "B": list(range(60, 125))})
+    amount = _mk_close({"A": [100] * 65, "B": [100] * 65})
+    import backtest.signals as sig
+    monkeypatch.setattr(sig, "_uni_panels", lambda u, codes: (close, amount))
+    ds._CACHE.clear()
+    client = TestClient(srv.app)
+    r = client.get("/api/daily-strong?limit=10&min_change_pct=5.0")
+    assert r.status_code == 200
+    body = r.json()
+    assert "data" in body
+    assert "cand_disclaimer" in body
+    assert "每日强势" in body["cand_disclaimer"]
+    assert body["data"]["count"] >= 0

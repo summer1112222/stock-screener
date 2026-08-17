@@ -874,7 +874,7 @@ def comments(code: str):
 def quality_screen(universe: str = Query("stock"), days: int = Query(20),
                    min_dims: int = Query(2), min_turnover: float = Query(5e7),
                    max_per_board: int = Query(3), max_corr: float = Query(0.85),
-                   limit: int = Query(20), combo_method: str = Query("greedy"),
+                   limit: int = Query(20, ge=1, le=100), combo_method: str = Query("greedy"),
                    resonance_mode: str = Query("greedy"),
                    dim_thresh: float = Query(0.7, ge=0.0, le=1.0),
                    refine: bool = Query(True), refine_pool: int = Query(50)):
@@ -887,6 +887,56 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
         dim_thresh=dim_thresh, refine=refine, refine_pool=refine_pool)
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
+
+
+@app.get("/api/nextday-strong")
+def nextday_strong(universe: str = Query("stock"),
+                   limit: int = Query(50, ge=1, le=200),
+                   days: int = Query(30, ge=5, le=120),
+                   min_change_pct: float = Query(1.0, ge=0.0, le=20.0),
+                   min_volume_ratio: float = Query(0.5, ge=0.0, le=10.0),
+                   codes: str = Query("")):
+    """次日强势概率排序(5 因子机械算分，对齐"次日必涨"量价市值方法论)：
+    量价强势 0.25(涨幅区间3-5%最佳+量比>1+跑赢大盘)/换手市值 0.20(换手5-10%+流通市值50-200亿)/
+    资金连续 0.20/主力阶段 0.15/筹码收集 0.20。复用 smart_money/spot，不新增表、不触网
+    (_behavior_batch 批量)。粗筛 min_change_pct/min_volume_ratio(文章条件2/3)。
+    依赖 smart_money_action + stock_daily，无历史对应因子 0 不崩。出货拉低总分沉底。"""
+    from screener import nextday
+    cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
+    res = nextday.nextday_strong_rank(universe=universe, codes=cl,
+                                      limit=limit, days=days,
+                                      min_change_pct=min_change_pct,
+                                      min_volume_ratio=min_volume_ratio)
+    return _wrap(res, {"cand_disclaimer":
+                       "次日强势清单——多因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
+
+
+_DS = None  # 模块级 daily_strong 缓存引用(测试清空用;路由内 lazy import)
+
+
+@app.get("/api/daily-strong")
+def daily_strong(universe: str = Query("stock"),
+                 limit: int = Query(50, ge=1, le=200),
+                 days: int = Query(30, ge=5, le=120),
+                 min_change_pct: float = Query(5.0, ge=0.0, le=20.0),
+                 min_turnover: float = Query(3.0, ge=0.0, le=50.0),
+                 max_price: float = Query(50.0, ge=1.0, le=500.0),
+                 min_mv: float = Query(10.0, ge=0.0, le=1000.0),
+                 max_mv: float = Query(200.0, ge=10.0, le=10000.0),
+                 max_pe: float = Query(150.0, ge=0.0, le=1000.0),
+                 codes: str = Query("")):
+    """每日强势股5步漏斗+板块助攻(混合:硬剔除+软打分)。
+    step1入选/step2雷区/step3形态/step4软打分/step5板块助攻。
+    复用 stock_spot/sector_fund_flow/stock_daily，不触网不新增表。
+    依赖 stock_daily(step3/MA)，无历史该步降级。挂 cand_disclaimer。"""
+    from screener import daily_strong as ds
+    cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
+    res = ds.daily_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
+                               min_change_pct=min_change_pct,
+                               min_turnover=min_turnover, max_price=max_price,
+                               min_mv=min_mv, max_mv=max_mv, max_pe=max_pe)
+    return _wrap(res, {"cand_disclaimer":
+                       "每日强势清单——多步机械漏斗+板块助攻排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
 
 @app.get("/api/buffett")
