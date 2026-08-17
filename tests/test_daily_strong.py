@@ -252,7 +252,6 @@ def test_rank_cache(monkeypatch):
 def test_route_daily_strong(monkeypatch):
     from fastapi.testclient import TestClient
     import api.server as srv
-    monkeypatch.setattr(srv, "_DS", None)  # 清模块缓存引用(如有)
     monkeypatch.setattr(ds.db, "query_rows",
                         lambda table, **k: (_SPOT if table == "stock_spot"
                             else _SFF if table == "sector_fund_flow" else []))

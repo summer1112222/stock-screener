@@ -911,9 +911,6 @@ def nextday_strong(universe: str = Query("stock"),
                        "次日强势清单——多因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
 
-_DS = None  # 模块级 daily_strong 缓存引用(测试清空用;路由内 lazy import)
-
-
 @app.get("/api/daily-strong")
 def daily_strong(universe: str = Query("stock"),
                  limit: int = Query(50, ge=1, le=200),
