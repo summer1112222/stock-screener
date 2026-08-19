@@ -219,3 +219,107 @@ def test_default_dim_weights():
     assert ra > rb, f"口径2 权重高→高分落口径2 共振分应更高:{ra} > {rb}"
     # 默认权重:口径2/5=1.3 > 口径1=1.0 > 口径4=0.7 > 口径3=0.6
     assert quality._DEFAULT_DIM_WEIGHTS == {1: 1.0, 2: 1.3, 3: 0.6, 4: 0.7, 5: 1.3}
+
+
+# ---------- Phase 4: 操盘因子增强 ----------
+
+def test_risk_factors_use_downside_and_multi_window():
+    """风险口径包含下行波动、多窗口动量和成交额加速。"""
+    idx = pd.date_range("2026-01-01", periods=80)
+    close = pd.DataFrame({
+        "a": [10 + i * 0.10 for i in range(80)],
+        "b": [10 + i * 0.02 for i in range(80)],
+    }, index=idx)
+    amount = pd.DataFrame({
+        "a": [1e6] * 60 + [2e6] * 20,
+        "b": [1e6] * 80,
+    }, index=idx)
+    factors = quality._risk_factor_series(close, amount, days=20)
+    for name in ("volatility", "downside_volatility", "momentum_5",
+                 "momentum_20", "momentum_60", "sortino", "amount_accel"):
+        assert name in factors
+    assert factors["momentum_5"]["a"] > factors["momentum_5"]["b"]
+    assert factors["amount_accel"]["a"] > factors["amount_accel"]["b"]
+
+
+def test_value_factors_include_growth_and_fcf_yield():
+    """价值质量口径加入营收增长、毛利趋势和 FCF yield。"""
+    results = [
+        {"code": "a", "earnings_yield_pct": 5, "moat_score": 2,
+         "ratios": {"leverage_adj_roe": 10, "roic": 8,
+                    "owner_earnings_to_ni": .7, "rev_cagr": 3,
+                    "gross_margin_trend": 1, "fcf_proxy": 1e7}},
+        {"code": "b", "earnings_yield_pct": 5, "moat_score": 2,
+         "ratios": {"leverage_adj_roe": 10, "roic": 8,
+                    "owner_earnings_to_ni": .7, "rev_cagr": 8,
+                    "gross_margin_trend": 4, "fcf_proxy": 3e7}},
+    ]
+    spot = pd.DataFrame([
+        {"code": "a", "circulating_market_cap": 1e9},
+        {"code": "b", "circulating_market_cap": 1e9},
+    ])
+    factors = quality._value_factor_series(results, spot, ["a", "b"])
+    assert {"rev_cagr", "gross_margin_trend", "fcf_yield"} <= set(factors)
+    assert factors["rev_cagr"]["b"] > factors["rev_cagr"]["a"]
+    assert factors["fcf_yield"]["b"] > factors["fcf_yield"]["a"]
+
+
+def test_flow_factors_include_quote_and_dragon(monkeypatch):
+    """资金口径纳入通达信内外盘比与龙虎榜净额。"""
+    monkeypatch.setattr(
+        "data.pytdx_client.get_quote",
+        lambda codes: [
+            {"code": "a", "b_vol": 200, "s_vol": 100},
+            {"code": "b", "b_vol": 100, "s_vol": 200},
+        ],
+    )
+    monkeypatch.setattr(
+        "data.db.query_rows",
+        lambda table, **kwargs: [
+            {"code": "a", "channel": "龙虎榜", "amount": 3e7},
+            {"code": "b", "channel": "龙虎榜", "amount": -1e7},
+        ] if table == "smart_money_action" else [],
+    )
+    behavior = {
+        "a": {"streak_inflow": 4, "streak_outflow": 0,
+               "north_cum": 1e7, "margin_accel": 2e6},
+        "b": {"streak_inflow": 1, "streak_outflow": 4,
+               "north_cum": -1e7, "margin_accel": -2e6},
+    }
+    factors = quality._flow_factor_series(["a", "b"], behavior)
+    assert {"streak_inflow", "north_cum", "margin_accel",
+            "inner_outer_ratio", "dragon_net"} <= set(factors)
+    assert factors["inner_outer_ratio"]["a"] > factors["inner_outer_ratio"]["b"]
+    assert factors["dragon_net"]["a"] > factors["dragon_net"]["b"]
+    assert factors["streak_inflow"]["b"] == 0
+
+
+def test_signal_factors_include_recent_intensity():
+    """多信号口径同时使用历史胜率、当日命中数和触发强度。"""
+    scan = {"rows": [
+        {"code": "a", "hits": 4, "signal_keys": ["x", "y", "z", "w"]},
+        {"code": "b", "hits": 1, "signal_keys": ["x"]},
+    ]}
+    backtest = {"rows": [
+        {"signal": "x", "excess_win_rate": .1},
+        {"signal": "y", "excess_win_rate": .2},
+        {"signal": "z", "excess_win_rate": .3},
+        {"signal": "w", "excess_win_rate": .4},
+    ]}
+    factors = quality._signal_factor_series(scan, backtest, ["a", "b"])
+    assert {"win_rate", "signal_hits", "recent_intensity"} <= set(factors)
+    assert factors["signal_hits"]["a"] > factors["signal_hits"]["b"]
+    assert factors["recent_intensity"]["a"] > factors["recent_intensity"]["b"]
+
+
+def test_industry_proxy_factor_uses_board_momentum(monkeypatch):
+    """研报不可用时，行业板块涨跌幅可作为景气代理。"""
+    monkeypatch.setattr(
+        "data.db.query_rows",
+        lambda table, **kwargs: [
+            {"name": "板块A", "change_pct": 8, "members": ["a"]},
+            {"name": "板块B", "change_pct": -2, "members": ["b"]},
+        ] if table == "industry_board" else [],
+    )
+    factor = quality._industry_proxy_series(["a", "b"])
+    assert factor["a"] > factor["b"]

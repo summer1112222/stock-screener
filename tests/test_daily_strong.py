@@ -253,16 +253,22 @@ def test_rank_cache(monkeypatch):
 
 
 def test_route_daily_strong(monkeypatch):
+    """/api/daily-strong 兼容转调调 nextday，返回每日强势 disclaimer。"""
     from fastapi.testclient import TestClient
     import api.server as srv
-    monkeypatch.setattr(ds.db, "query_rows",
-                        lambda table, **k: (_SPOT if table == "stock_spot"
-                            else _SFF if table == "sector_fund_flow" else []))
-    close = _mk_close({"A": list(range(60, 125)), "B": list(range(60, 125))})
-    amount = _mk_close({"A": [100] * 65, "B": [100] * 65})
-    import backtest.signals as sig
-    monkeypatch.setattr(sig, "_uni_panels", lambda u, codes: (close, amount))
-    ds._CACHE.clear()
+    import screener.nextday as nd
+    # mock nextday.nextday_strong_rank 直接返回
+    def _mock_rank(**kw):
+        return {"count": 1, "items": [{"code": "A", "name": "甲", "score": 80.0, "rank": 1,
+                                         "phase": "吸筹", "factors": {"量价强势": 0.8, "换手市值": 0.6,
+                                                                       "资金连续": 0.5, "主力阶段": 0.6,
+                                                                       "筹码收集": 0.4, "趋势形态": 0.5,
+                                                                       "板块助攻": 0.6}}],
+                "weights": {"量价强势": 0.2, "换手市值": 0.15, "资金连续": 0.15,
+                            "主力阶段": 0.1, "筹码收集": 0.15, "趋势形态": 0.15, "板块助攻": 0.1},
+                "filters": {}, "mode": "full", "universe": "stock", "limit": 50}
+    monkeypatch.setattr(nd, "nextday_strong_rank", _mock_rank)
+    nd._CACHE.clear()
     client = TestClient(srv.app)
     r = client.get("/api/daily-strong?limit=10&min_change_pct=5.0")
     assert r.status_code == 200
@@ -270,4 +276,5 @@ def test_route_daily_strong(monkeypatch):
     assert "data" in body
     assert "cand_disclaimer" in body
     assert "每日强势" in body["cand_disclaimer"]
-    assert body["data"]["count"] >= 0
+    assert body["data"]["count"] == 1
+    assert body["data"]["items"][0]["code"] == "A"

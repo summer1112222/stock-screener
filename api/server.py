@@ -895,18 +895,28 @@ def nextday_strong(universe: str = Query("stock"),
                    days: int = Query(30, ge=5, le=120),
                    min_change_pct: float = Query(1.0, ge=0.0, le=20.0),
                    min_volume_ratio: float = Query(0.5, ge=0.0, le=10.0),
+                   min_turnover: float = Query(0.0, ge=0.0, le=50.0),
+                   max_price: float = Query(9999.0, ge=1.0, le=5000.0),
+                   min_mv: float = Query(0.0, ge=0.0, le=1000.0),
+                   max_mv: float = Query(999999.0, ge=10.0, le=100000.0),
+                   max_pe: float = Query(9999.0, ge=0.0, le=10000.0),
+                   exclude_st: bool = Query(False),
                    codes: str = Query("")):
-    """次日强势概率排序(5 因子机械算分，对齐"次日必涨"量价市值方法论)：
+    """次日强势概率排序(7 因子机械算分，对齐"次日必涨"量价市值方法论)：
     量价强势 0.25(涨幅区间3-5%最佳+量比>1+跑赢大盘)/换手市值 0.20(换手5-10%+流通市值50-200亿)/
-    资金连续 0.20/主力阶段 0.15/筹码收集 0.20。复用 smart_money/spot，不新增表、不触网
-    (_behavior_batch 批量)。粗筛 min_change_pct/min_volume_ratio(文章条件2/3)。
+    资金连续 0.20/主力阶段 0.15/筹码收集 0.20 + 趋势形态/板块助攻(7因子)。
+    可叠加每日漏斗硬门槛(min_turnover/max_price/min_mv/max_mv/max_pe/exclude_st)。
+    复用 smart_money/spot，不新增表、不触网(_behavior_batch 批量)。
     依赖 smart_money_action + stock_daily，无历史对应因子 0 不崩。出货拉低总分沉底。"""
     from screener import nextday
     cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
     res = nextday.nextday_strong_rank(universe=universe, codes=cl,
                                       limit=limit, days=days,
                                       min_change_pct=min_change_pct,
-                                      min_volume_ratio=min_volume_ratio)
+                                      min_volume_ratio=min_volume_ratio,
+                                      min_turnover=min_turnover, max_price=max_price,
+                                      min_mv=min_mv, max_mv=max_mv, max_pe=max_pe,
+                                      exclude_st=exclude_st)
     return _wrap(res, {"cand_disclaimer":
                        "次日强势清单——多因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
@@ -921,17 +931,20 @@ def daily_strong(universe: str = Query("stock"),
                  min_mv: float = Query(10.0, ge=0.0, le=1000.0),
                  max_mv: float = Query(200.0, ge=10.0, le=10000.0),
                  max_pe: float = Query(150.0, ge=0.0, le=1000.0),
+                 exclude_st: bool = Query(True),
                  codes: str = Query("")):
-    """每日强势股5步漏斗+板块助攻(混合:硬剔除+软打分)。
-    step1入选/step2雷区/step3形态/step4软打分/step5板块助攻。
-    复用 stock_spot/sector_fund_flow/stock_daily，不触网不新增表。
-    依赖 stock_daily(step3/MA)，无历史该步降级。挂 cand_disclaimer。"""
-    from screener import daily_strong as ds
+    """每日强势(合并到次日强势后的兼容转调)。
+    /api/daily-strong 保留为旧 URL 兼容入口：用每日漏斗参数(涨幅/换手/股价/市值/PE/非ST)
+    调 nextday_strong_rank，复用其 7 因子评分 + 板块助攻。
+    不再走 screener/daily_strong.py(已并入 nextday)。挂 cand_disclaimer。"""
+    from screener import nextday
     cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
-    res = ds.daily_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
-                               min_change_pct=min_change_pct,
-                               min_turnover=min_turnover, max_price=max_price,
-                               min_mv=min_mv, max_mv=max_mv, max_pe=max_pe)
+    res = nextday.nextday_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
+                                      min_change_pct=min_change_pct,
+                                      min_volume_ratio=0.0,
+                                      min_turnover=min_turnover, max_price=max_price,
+                                      min_mv=min_mv, max_mv=max_mv,
+                                      max_pe=max_pe, exclude_st=exclude_st)
     return _wrap(res, {"cand_disclaimer":
                        "每日强势清单——多步机械漏斗+板块助攻排序观察清单，非荐股非买卖信号，盈亏自负。"})
 

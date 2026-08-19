@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""优质选股筛选编排层：四口径分位 + 共振层 + 组合层。
+"""优质选股筛选编排层：五口径分位 + 共振层 + 组合层。
 
 合规：多口径共振机械排序观察清单，非荐股非买卖信号，不承诺收益。
       resonance 是"多口径同靠前"事实陈述，非收益预测/推荐强度。
@@ -152,6 +152,178 @@ def _avg_rank_pct(factors: list, codes: list) -> pd.Series:
     return pct.mean(axis=1, skipna=True)
 
 
+# ------------------------------------------------------------------
+# 因子 series 生成器（各口径维度因子，方向统一"大=好"）
+# ------------------------------------------------------------------
+
+def _risk_factor_series(close: pd.DataFrame, amount: pd.DataFrame | None,
+                        days: int = 20) -> dict:
+    """风险调整口径的因子集（全部大=好，供 _avg_rank_pct）：
+    volatility(负)/downside_volatility(负)/momentum_5/20/60/sortino/amount_accel。
+    无量能面板时 amount_accel 缺省（NaN），不拖累其他因子。"""
+    ret = close.pct_change().dropna(how="all")
+    if ret.empty or ret.shape[0] < 2:
+        names = ("volatility", "downside_volatility", "momentum_5",
+                 "momentum_20", "momentum_60", "sortino", "amount_accel")
+        return {n: pd.Series(dtype=float) for n in names}
+    vol = ret.std().clip(lower=1e-9)
+    down = ret.where(ret < 0).std()  # 下行波动
+    out = {
+        "volatility": -vol,
+        "downside_volatility": -down.fillna(0.0),
+        "momentum_5": close.pct_change(5).iloc[-1],
+        "momentum_20": close.pct_change(max(days, 2)).iloc[-1],
+        "momentum_60": close.pct_change(60).iloc[-1],
+        "sortino": ret.mean() / down.replace(0, pd.NA),
+    }
+    if amount is not None and not amount.empty:
+        # 成交额加速:近5日均量 vs 近60日(去5日)基准。基准窗口取大(≥60),
+        # 保证放量的起点能被 base 捕获(若只用 tail(days) 会整段落在放量期→比值中性)
+        w = amount.tail(max(days, 60))
+        a5 = w.tail(5).mean()
+        a_base = w.iloc[:-5].mean() if len(w) > 5 else a5
+        out["amount_accel"] = (a5 / a_base.replace(0, pd.NA) - 1.0)
+    else:
+        out["amount_accel"] = pd.Series(dtype=float, index=close.columns)
+    return out
+
+
+def _value_factor_series(results: list, spot: pd.DataFrame | None,
+                         codes: list) -> dict:
+    """价值质量口径因子集（大=好）：ey/moat/lroe/roic/mos/oet +
+    rev_cagr/gross_margin_trend/fcf_yield(fcf_proxy/流通市值)。
+    results=buffett.analyze 结果（可能空）；字段缺失→NaN 缺省不拖累。"""
+    d = {str(r.get("code")): r for r in results}
+
+    def _s(key, path=None):
+        vals = {}
+        for c in d:
+            r = d[c]
+            v = r.get(key) if path is None else (r.get("ratios") or {}).get(key)
+            vals[c] = v
+        return pd.Series(vals, dtype=float)
+
+    fac = {
+        "ey": _s("earnings_yield_pct"),
+        "moat": _s("moat_score"),
+        "lroe": _s("leverage_adj_roe", path="ratios"),
+        "roic": _s("roic", path="ratios"),
+        "mos": _s("margin_of_safety"),
+        "oet": _s("owner_earnings_to_ni", path="ratios"),
+        "rev_cagr": _s("rev_cagr", path="ratios"),
+        "gross_margin_trend": _s("gross_margin_trend", path="ratios"),
+    }
+    fcf = _s("fcf_proxy", path="ratios")
+    mcap = pd.Series(dtype=float)
+    if spot is not None and "code" in spot.columns and "circulating_market_cap" in spot.columns:
+        mcap = pd.to_numeric(
+            spot.set_index(spot["code"].astype(str))["circulating_market_cap"],
+            errors="coerce")
+    fac["fcf_yield"] = (fcf / mcap.reindex(codes) * 100.0) if mcap.notna().any() \
+        else pd.Series(dtype=float)
+    return fac
+
+
+def _flow_factor_series(codes: list, behavior: dict, quote_codes=None) -> dict:
+    """资金流向口径因子集（大=好）：streak_inflow(连续流出≥3 → 0 惩罚)/
+    north_cum/margin_accel + inner_outer_ratio(tdx 内外盘 b_vol/s_vol)/
+    dragon_net(龙虎榜净额,channel=龙虎榜)。
+    quote_codes: 限小名单取盘口(shortlist)，默认全 codes；触网失败→缺省不崩。"""
+    codes_l = [str(c) for c in codes]
+    cset = set(codes_l)
+    qc = [str(c) for c in (quote_codes if quote_codes is not None else codes_l)]
+    inflow, north, margin = {}, {}, {}
+    for c in codes_l:
+        b = behavior.get(c) or {}
+        v = b.get("streak_inflow")
+        if (b.get("streak_outflow") or 0) >= 3:
+            v = 0.0  # 连续流出惩罚：不加分不计强度
+        inflow[c] = v
+        north[c] = b.get("north_cum")
+        margin[c] = b.get("margin_accel")
+    # 内外盘比（主动买/主动卖，>1 买盘占优）
+    ior = {c: None for c in codes_l}
+    try:
+        from data import pytdx_client
+        for q in (pytdx_client.get_quote(qc) or []):
+            c = str(q.get("code"))
+            bv = _to_float(q.get("b_vol"))
+            sv = _to_float(q.get("s_vol"))
+            if bv is not None and sv and sv > 0:
+                ior[c] = bv / sv
+    except Exception:
+        pass
+    # 龙虎榜净买额
+    dr = {c: None for c in codes_l}
+    try:
+        rows = db.query_rows("smart_money_action", where="channel = ?",
+                             params=("龙虎榜",), limit=0) or []
+        agg = {}
+        for r in rows:
+            c = str(r.get("code"))
+            if c not in cset:
+                continue
+            amt = _to_float(r.get("amount"))
+            if amt is not None:
+                agg[c] = (agg.get(c) or 0.0) + amt
+        for c in agg:
+            dr[c] = agg[c]
+    except Exception:
+        pass
+    return {
+        "streak_inflow": pd.Series(inflow, dtype=float),
+        "north_cum": pd.Series(north, dtype=float),
+        "margin_accel": pd.Series(margin, dtype=float),
+        "inner_outer_ratio": pd.Series(ior, dtype=float),
+        "dragon_net": pd.Series(dr, dtype=float),
+    }
+
+
+def _signal_factor_series(scan: dict, bt: dict, codes: list) -> dict:
+    """多信号口径因子集（大=好）：win_rate(历史胜率均值,缺→trig/5 降级)/
+    signal_hits(当日触发数)/recent_intensity(触发强度=hits/5)。"""
+    trig = {str(r["code"]): int(r.get("hits") or len(r.get("signals", [])))
+            for r in scan.get("rows", [])}
+    win = {}
+    if not bt.get("error"):
+        sig_rows = {r["signal"]: r for r in bt.get("rows", [])}
+        for r in scan.get("rows", []):
+            c = str(r["code"])
+            ewrs = [sig_rows[k]["excess_win_rate"] for k in r.get("signal_keys", [])
+                    if k in sig_rows and sig_rows[k].get("excess_win_rate") is not None]
+            win[c] = float(np.mean(ewrs)) if ewrs else (trig.get(c, 0) / 5.0)
+    else:
+        for c, t in trig.items():
+            win[c] = t / 5.0
+    hits_s = pd.Series(trig, dtype=float)
+    return {
+        "win_rate": pd.Series(win, dtype=float),
+        "signal_hits": hits_s,
+        "recent_intensity": hits_s.div(5.0),
+    }
+
+
+def _industry_proxy_series(codes: list) -> pd.Series:
+    """行业景气代理：所属行业板块近20日涨跌幅(change_pct) 用作口径5 降级。
+    研报不可用时仍能给行业景气维度。无板块/无 change_pct→None。"""
+    idx = {str(c): True for c in codes}
+    out = {str(c): None for c in codes}
+    try:
+        rows = db.query_rows("industry_board", limit=0) or []
+    except Exception:
+        rows = []
+    for b in rows:
+        nm = b.get("name")
+        chg = _to_float(b.get("change_pct"))
+        if nm is None or chg is None:
+            continue
+        for m in (b.get("members") or b.get("stocks") or []):
+            mc = str(m)
+            if mc in idx and out[mc] is None:
+                out[mc] = chg
+    return pd.Series(out, dtype=float)
+
+
 def _tradable(df: pd.DataFrame, min_turnover: float, limit_pct: float) -> pd.DataFrame:
     """可交易性预筛：排除 ST/停牌/涨停/低成交额。复用 candidates 风格。"""
     if df is None or df.empty:
@@ -177,7 +349,7 @@ def _dim_scores(df, universe, days, min_signals, close=None):
     scores = {c: {} for c in codes}
     dims_avail, status = [], {}
 
-    # 口径1 风险调整(历史)：波动率(负)/动量/夏普/最大回撤(负)
+    # 口径1 风险调整(历史)：多窗口动量/下行波动/Sortino/成交额加速。
     try:
         import backtest.eval as bt_eval
         if close is None:
@@ -185,17 +357,19 @@ def _dim_scores(df, universe, days, min_signals, close=None):
         if close is None or close.empty:
             status["1"] = "err:无历史数据，先 /api/backtest/fetch"
         else:
-            ret = close.pct_change().dropna(how="all")
-            vol = ret.std().clip(lower=1e-9)
-            mom = close.pct_change(days).iloc[-1]
-            sharpe = ret.mean() / vol
-            dd = (close / close.cummax() - 1).min()
-            comp = (_zscore(-vol) + _zscore(mom) + _zscore(sharpe) + _zscore(-dd)) / 4
-            pct = _to_pct(comp)
+            try:
+                amount = bt_eval.load_panel(universe, codes, "1990-01-01", "2099-12-31", "amount")
+            except Exception:
+                amount = None
+            factors = _risk_factor_series(close, amount, days=days)
+            comp = _avg_rank_pct(list(factors.values()), codes)
             for c in codes:
-                scores[c][1] = _to_float(pct.get(c)) if c in pct.index else None
-            dims_avail.append(1)
-            status["1"] = "ok"
+                scores[c][1] = _to_float(comp.get(c)) if c in comp.index else None
+            if comp.notna().any():
+                dims_avail.append(1)
+                status["1"] = "ok(多窗口动量+下行风险+成交额加速)"
+            else:
+                status["1"] = "err:历史因子为空"
     except Exception as e:
         status["1"] = f"err:{e}"
 
@@ -230,16 +404,9 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                     return False
 
                 results = [r for r in results if not _bad(r)]
-                ey = pd.Series({r["code"]: r.get("earnings_yield_pct") for r in results}).dropna()
-                moat = pd.Series({r["code"]: r.get("moat_score") for r in results}).dropna()
-                lroe = pd.Series({r["code"]: (r.get("ratios") or {}).get("leverage_adj_roe")
-                                  for r in results}).dropna()
-                # 丰富因子(B):纳 buffett 已算的 ROIC/安全边际/盈利含金量,不增网络调用
-                roic = pd.Series({r["code"]: (r.get("ratios") or {}).get("roic") for r in results}).dropna()
-                mos = pd.Series({r["code"]: r.get("margin_of_safety") for r in results}).dropna()
-                oet = pd.Series({r["code"]: (r.get("ratios") or {}).get("owner_earnings_to_ni")
-                                 for r in results}).dropna()
-                comp = _avg_rank_pct([ey, moat, lroe, roic, mos, oet], codes)
+
+                vf = _value_factor_series(results, df, codes)
+                comp = _avg_rank_pct(list(vf.values()), codes)
                 for c in codes:
                     scores[c][2] = _to_float(comp.get(c)) if c in comp.index else None
                 dims_avail.append(2)
@@ -333,13 +500,11 @@ def _dim_scores(df, universe, days, min_signals, close=None):
             except Exception:
                 sl_codes = codes
             bb = sm_q._behavior_batch(sl_codes, days=days)
-            # 任一 shortlist 标的有行为序列 → 用新口径(连续性+北向+边际)
+            # 任一 shortlist 标的有行为序列 → 新口径；盘口只触达同一小名单。
             if any(bb[c]["streak_inflow"] is not None or bb[c]["north_cum"] is not None
                    or bb[c]["margin_accel"] is not None for c in sl_codes):
-                f1 = pd.Series({c: (bb[c]["streak_inflow"] or 0) for c in sl_codes})   # 资金流连续性
-                f2 = pd.Series({c: bb[c]["north_cum"] for c in sl_codes})            # 北向累计(聪明资金)
-                f3 = pd.Series({c: bb[c]["margin_accel"] for c in sl_codes})         # 边际加速
-                comp = _avg_rank_pct([f1, f2, f3], codes)
+                ff = _flow_factor_series(sl_codes, bb, quote_codes=sl_codes)
+                comp = _avg_rank_pct(list(ff.values()), sl_codes)
                 for c in codes:
                     scores[c][3] = _to_float(comp.get(c)) if c in comp.index else None
                 dims_avail.append(3)
@@ -384,35 +549,26 @@ def _dim_scores(df, universe, days, min_signals, close=None):
         if scan.get("error"):
             status["4"] = f"err:{scan['error']}"
         else:
-            trig = {r["code"]: len(r["signals"]) for r in scan.get("rows", [])}
             bt = bt_sig.backtest_signals(universe, scan_codes, k_days=5)
-            win_by_code = {}
-            if not bt.get("error"):
-                sig_rows = {r["signal"]: r for r in bt.get("rows", [])}
-                for r in scan.get("rows", []):
-                    c = r["code"]
-                    # 用 signal_keys(type key)匹配 sig_rows，而非显示串
-                    ewrs = [sig_rows[k]["excess_win_rate"] for k in r.get("signal_keys", [])
-                            if k in sig_rows and sig_rows[k].get("excess_win_rate") is not None]
-                    win_by_code[c] = float(np.mean(ewrs)) if ewrs else None
-            s = pd.Series(index=scan_codes, dtype=float)
-            for c in scan_codes:
-                v = win_by_code.get(c)
-                s[c] = v if v is not None else (trig.get(c, 0) / 5.0)
-            pct = _to_pct(s)
+            sf = _signal_factor_series(scan, bt, scan_codes)
+            comp = _avg_rank_pct(list(sf.values()), scan_codes)
             for c in codes:  # 非 scan_codes(shortlist 外)→None,与口径2/3 一致
-                scores[c][4] = _to_float(pct.get(c)) if c in pct.index else None
-            dims_avail.append(4)
-            status["4"] = ("ok(胜率加权,shortlist)" if any(v is not None for v in win_by_code.values())
-                           else "ok(降级trig/5,shortlist)")
+                scores[c][4] = _to_float(comp.get(c)) if c in comp.index else None
+            if comp.notna().any():
+                dims_avail.append(4)
+                has_win = sf["win_rate"].notna().any()
+                status["4"] = ("ok(胜率+命中数+近期强度,shortlist)"
+                               if has_win else "ok(降级trig/5,shortlist)")
+            else:
+                status["4"] = "err:无信号因子"
     except Exception as e:
         status["4"] = f"err:{e}"
 
-    # 口径5 景气成长(仅个股,shortlist 限定,研报覆盖/评级偏多/目标价上行空间)
+    # 口径5 景气成长(仅个股,shortlist 限定,研报覆盖/评级偏多/目标价上行空间;
+    # 无研报时降级行业板块涨幅代理)
     if universe == "stock":
         try:
             from data.research import query_reports
-            # shortlist 限定(与口径2/3 一致):非 shortlist 口径5=None
             try:
                 import backtest.buffett as bt_buf
                 sl5 = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
@@ -434,7 +590,6 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                 nbull = sum(1 for r in rpt
                             if (r.get("rating") or "") in ("买入", "增持", "推荐", "强推"))
                 bull[c] = nbull / max(len(rpt), 1)
-                # 目标价上行空间 = mean(tp/spot - 1)
                 ups = []
                 for r in rpt:
                     tp = r.get("target_price")
@@ -457,7 +612,19 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                 dims_avail.append(5)
                 status["5"] = "ok(景气:覆盖/评级/目标价)"
             else:
-                status["5"] = "ok(降级:无研报)"
+                # 降级：行业板块涨跌幅代理
+                try:
+                    ind_pct = _industry_proxy_series(codes)
+                    if ind_pct.notna().any():
+                        pct = _to_pct(ind_pct)
+                        for c in codes:
+                            scores[c][5] = _to_float(pct.get(c)) if c in pct.index else None
+                        dims_avail.append(5)
+                        status["5"] = "ok(降级:行业板块景气代理)"
+                    else:
+                        status["5"] = "ok(降级:无研报且无行业板块)"
+                except Exception:
+                    status["5"] = "ok(降级:无研报)"
         except Exception as e:
             status["5"] = f"err:{e}"
 
