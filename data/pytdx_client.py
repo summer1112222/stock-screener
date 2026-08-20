@@ -5,6 +5,7 @@
 - 历史日 K 线：akshare(东财) 被封/失败时备援，**不复权**（诚实标 source=tdx）。
 - 单股实时五档行情：spot 缺价时兜底，盘中实时（servertime 精确到毫秒）。
 - 公司信息文本块：融资融券/股东研究/主力追踪/财务分析等 16 类（按需取，不解析）。
+- 财务概要：`get_finance_info` 提供流通股本/总股本/净利润/每股净资产等，供本地机械计算市值/PE。
 
 合规：通达信行情服务器直取，机械汇总/观察清单，非荐股非买卖信号，盈亏自负。
 复权限制：pytdx get_security_bars 返回不复权数据，落库与 qfq 行混在同一 daily 表
@@ -109,6 +110,26 @@ def _nan(v):
 
 
 # ---------- 公开接口 ----------
+
+def get_finance_info(code: str) -> dict:
+    """取通达信财务概要(流通股本/总股本/净利润/每股净资产等)。
+    code 为 6 位纯代码；失败返空 dict，不让采集流程崩溃。"""
+    if not _TDX_OK:
+        return {}
+    c = str(code).strip()
+    m = _market(c)
+    if m is None:
+        return {}
+    api = _get_api()
+    if api is None:
+        return {}
+    with _lock:
+        try:
+            info = api.get_finance_info(m, c)
+        except Exception:
+            return {}
+    return dict(info) if info else {}
+
 
 def get_quote(codes: list[str]) -> list[dict]:
     """批量实时五档行情。codes 为 6 位纯代码列表。

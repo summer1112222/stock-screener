@@ -293,7 +293,7 @@
       <div class="row" style="align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
         <input id="smTdxCode" type="text" placeholder="通达信个股主力深查(代码)" style="min-width:160px">
         <button class="btn ghost" id="smTdxProbe" type="button">深查主力</button>
-        <span style="font-size:11px;color:var(--muted)">机构持股/融资融券/外内盘净流(通达信直取·非买卖信号)</span>
+        <span style="font-size:11px;color:var(--muted)">盘口主动成交+五档失衡+主力追踪资料(通达信直取·非买卖信号)</span>
         <span id="smTdxLoading" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div id="smTdxOut" style="margin-top:8px"></div>
@@ -322,17 +322,17 @@
       <div class="disc"><b>优质筛选免责</b>：多口径(风险调整/价值质量/资金流向/多信号)共振<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议、不承诺收益</b>。共振=多口径同靠前的事实，非收益预测。市场有风险，盈亏自负。</div>
     </div>
     <div class="card" style="margin-top:12px">
-      <div class="card-t">次日强势 <span style="color:var(--warn);font-weight:400;margin-left:8px">7因子机械排序·观察清单·非推荐(含每日漏斗)</span></div>
+      <div class="card-t">次日强势 <span style="color:var(--warn);font-weight:400;margin-left:8px">5因子机械排序·观察清单·非推荐</span></div>
       <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:8px">
         <div class="f"><label>标的</label><select id="ndUniverse" class="btn ghost"><option value="stock">个股</option></select></div>
         <div class="f"><label>窗口</label><select id="ndDays" class="btn ghost"><option>20</option><option selected>30</option><option>60</option></select></div>
         <div class="f"><label>数量</label><select id="ndLimit" class="btn ghost"><option>20</option><option selected>50</option><option>100</option></select></div>
-        <div class="f"><label>筛选</label><select id="ndFilter" class="btn ghost" title="宽松=涨幅≥1%+量比≥0.5；每日漏斗=涨幅>5/换手>3/价<50/市值10-200亿/PE≤150/非ST(对齐5步漏斗)；全部=不过滤"><option value="loose" selected>宽松</option><option value="funnel">每日漏斗</option><option value="all">全部</option></select></div>
+        <div class="f"><label>漏斗</label><select id="ndFilter" class="btn ghost" title="严格=涨幅>5/换手>3/价<50/市值10-200亿/PE≤150/非ST(5因子默认)；宽敞=放宽涨幅/市值/PE；全部=不过滤"><option value="strict" selected>严格(5因子)</option><option value="wide">宽敞</option><option value="all">全部</option></select></div>
         <button class="btn ghost" id="ndRun" type="button">排次日强势</button>
         <span id="ndMsg" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div id="ndOut" style="margin-top:10px"></div>
-      <div class="disc"><b>次日强势免责</b>：7因子(量价强势/换手市值/资金连续/主力阶段/筹码收集/趋势形态/板块助攻)<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议</b>。「每日漏斗」模式套用每日强势5步漏斗硬门槛(涨幅>5/换手>3/价<50/市值10-200亿/PE≤150/非ST)，再 7 因子评分。依赖资金流+历史(需先 refresh+fetch)，无历史则对应因子0不崩。出货阶段拉低总分沉底。盈亏自负。</div>
+      <div class="disc"><b>次日强势免责</b>：<b>5因子机械排序→排序观察清单，非推荐、非买卖点、不构成投资建议</b>。第1步强势(涨幅>5/换手>3/价<50)；第2步雷区(市值10-200亿/PE≤150且非亏损/非ST)；第3步形态(多头排列或放量突破60日线)；第4步量价验证(量比>2.5+涨幅<7)软分排序；第5步板块助攻(行业热度前5+≥2涨停)。依赖板块成分股+历史(需先 refresh+fetch)，无历史该股 step3 降级不通过，板块成分股失败 step5 诚实不通过。盈亏自负。</div>
     </div>
   </section>
 
@@ -1347,35 +1347,43 @@ async function smSeatsStocksLoad(){
   finally{ document.getElementById('smLoading').textContent=''; }
 }
 document.getElementById('smSeatsStocks').onclick=smSeatsStocksLoad;
-// 通达信个股主力深查(机构持股/融资融券/外内盘净流,文本表格预格式,非买卖信号)
+// 通达信个股主力深查(盘口主动成交+五档失衡+文本资料,非买卖信号)
 async function smTdxProbeLoad(){
   const code=(document.getElementById('smTdxCode').value||'').trim();
   const out=document.getElementById('smTdxOut');
   if(!code){ out.innerHTML='<div class="empty">请输入代码</div>'; return; }
-  document.getElementById('smTdxLoading').textContent='深查中(主力追踪+融资融券+实时外内盘,约2-5s)...';
+  document.getElementById('smTdxLoading').textContent='深查中(实时盘口+主力追踪资料,约2-5s)...';
   out.innerHTML='';
   const esc=s=>String(s||'').replace(/</g,'&lt;');
+  const n=v=>v==null?'—':fmtNum(v);
   try{
     const [qr,mr,lr]=await Promise.all([
-      fetch(`${API}/api/tdx/quote?code=${encodeURIComponent(code)}`).then(r=>r.json()),
+      fetch(`${API}/api/tdx/quote-analysis?code=${encodeURIComponent(code)}`).then(r=>r.json()),
       fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent('主力追踪')}`).then(r=>r.json()),
       fetch(`${API}/api/tdx/company-info?code=${encodeURIComponent(code)}&category=${encodeURIComponent('龙虎榜单')}`).then(r=>r.json()),
     ]);
     const q=(qr.data)||{}, mc=(mr.data)||{}, lc=(lr.data)||{};
-    let headHtml='';
-    if(q.price!=null){
-      const b=q.b_vol, s=q.s_vol;
-      const net=(b!=null&&s!=null)?(b-s)*(q.price):null;
-      const netCol=net==null?'var(--muted)':(net>=0?'#16A34A':'#F59E0B');
-      headHtml=`<div style="font-size:13px">现价 <b>${q.price}</b> · 外盘(主动买) ${fmtNum(b)} · 内盘(主动卖) ${fmtNum(s)} · 净流代理(外-内)×价 <b style="color:${netCol}">${net!=null?fmtNum(net)+'元':'—'}</b></div>
-        <div style="font-size:11px;color:var(--muted)">外内盘=当日主动买卖量代理,非大单主力资金流(后者见个股分析卡 behavior 序列)</div>`;
-    }else{ headHtml='<div class="empty">无实时行情(代码非法或服务器不可用)</div>'; }
+    const score=q.quote_observation_score, dq=q.data_quality||{}, fs=q.factor_scores||{};
+    const scoreCol=score==null?'var(--muted)':score>=60?'#16A34A':score<=40?'#F59E0B':'var(--text)';
+    const headHtml=q.price!=null?`
+      <div style="font-size:13px">现价 <b>${n(q.price)}</b> · 盘口观察分 <b style="color:${scoreCol}">${n(score)}</b> · ${esc(q.label||'数据不足')}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;margin-top:8px;font-size:12px">
+        <div>主动成交净额代理 <b>${n(q.active_net_amount)} 元</b></div>
+        <div>主动买卖比率 <b>${q.active_net_ratio==null?'—':(q.active_net_ratio*100).toFixed(2)+'%'}</b></div>
+        <div>五档盘口失衡 <b>${q.order_imbalance==null?'—':(q.order_imbalance*100).toFixed(2)+'%'}</b></div>
+        <div>买/卖五档金额 <b>${n(q.bid_depth_amount)} / ${n(q.ask_depth_amount)}</b></div>
+        <div>买卖深度比 <b>${n(q.bid_depth_ratio)}</b></div>
+        <div>日内价格位置 <b>${q.intraday_position==null?'—':(q.intraday_position*100).toFixed(2)+'%'}</b></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">数据源 ${dq.source||'tdx'} · ${dq.in_session?'盘中盘口有效':'盘后/非交易时段，五档与日内位置不计分'} · 缺失: ${(dq.missing_fields||[]).join(', ')||'无'}</div>
+      <div style="font-size:11px;color:var(--muted)">因子分(0-100)：主动成交 ${n(fs.active_trade)} · 五档失衡 ${n(fs.order_imbalance)} · 内外盘 ${n(fs.inner_outer)} · 日内位置 ${n(fs.intraday_position)}</div>`
+      :'<div class="empty">无实时行情(代码非法或服务器不可用)</div>';
     out.innerHTML=`
       <div class="card-t" style="font-size:13px">通达信主力深查 ${code}</div>
       ${headHtml}
-      ${mc.ok?`<div class="card-t" style="margin-top:10px;font-size:13px">主力追踪(机构持股/北向/股东户数)</div><pre style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto">${esc(mc.content)}</pre>`:`<div class="skipped">主力追踪: ${esc(mc.err)||'无'}</div>`}
-      ${lc.ok?`<div class="card-t" style="margin-top:10px;font-size:13px">龙虎榜单(融资融券/资金流向/异动/大宗交易)</div><pre style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto">${esc(lc.content)}</pre>`:`<div class="skipped">龙虎榜单: ${esc(lc.err)||'无'}</div>`}
-      <div class="disc" style="margin-top:6px">通达信个股主力数据机械汇总,非买卖信号,盈亏自负</div>`;
+      ${mc.ok?`<div class="card-t" style="margin-top:10px;font-size:13px">主力追踪资料(机构持股/北向/股东户数)</div><pre style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto">${esc(mc.content)}</pre>`:`<div class="skipped">主力追踪: ${esc(mc.err)||'无'}</div>`}
+      ${lc.ok?`<div class="card-t" style="margin-top:10px;font-size:13px">通达信资料(融资融券/资金流向/异动/大宗交易，不是游资席位龙虎榜)</div><pre style="background:var(--surface-2);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:420px;overflow:auto">${esc(lc.content)}</pre>`:`<div class="skipped">相关资料: ${esc(lc.err)||'无'}</div>`}
+      <div class="disc" style="margin-top:6px">盘口主动成交与五档深度是实时供求代理，不等同机构主力资金流；历史主力行为请看行为序列。非买卖信号,盈亏自负</div>`;
   }catch(e){ out.innerHTML='<div class="empty">深查失败: '+e+'</div>'; }
   finally{ document.getElementById('smTdxLoading').textContent=''; }
 }
@@ -1392,8 +1400,16 @@ async function _qsFetch(url){
     const ctl=new AbortController();
     const ms=attempt===1?75000:90000;
     const to=setTimeout(()=>ctl.abort(),ms);
-    try{ const r=await fetch(url,{signal:ctl.signal}).then(r=>r.json()); clearTimeout(to); return r; }
-    catch(e){ clearTimeout(to); if(attempt===2) throw e; }
+    try{
+      const res=await fetch(url,{signal:ctl.signal});
+      const body=await res.json();
+      clearTimeout(to);
+      if(!res.ok){
+        const detail=body.detail||body.error||('HTTP '+res.status);
+        throw new Error(typeof detail==='string'?detail:JSON.stringify(detail));
+      }
+      return body;
+    }catch(e){ clearTimeout(to); if(attempt===2) throw e; }
   }
 }
 // 阶段色块(优质筛选阶段列 + 个股分析 fetchPhase 共用)。p=main_force_phase 的 data,无则占位。
@@ -1505,20 +1521,20 @@ document.getElementById('qsCombo').onchange=qsLoad;
 document.getElementById('qsResMode').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
-// ---------------- 次日强势(7因子机械排序,含每日漏斗模式) ----------------
+// ---------------- 次日强势(5因子机械排序) ----------------
 async function ndLoad(){
   const uni=document.getElementById('ndUniverse').value;
   const days=document.getElementById('ndDays').value;
   const limit=document.getElementById('ndLimit').value;
   const flt=document.getElementById('ndFilter').value;
-  let mcp=1.0,mvr=0.5,mt=0,mp=9999,mmvLo=0,mmvHi=999999,mpe=9999,est=0;
-  if(flt==='funnel'){mcp=5;mvr=0;mt=3;mp=50;mmvLo=10;mmvHi=200;mpe=150;est=1;}
-  if(flt==='all'){mcp=0;mvr=0;}
+  let mcp=5, mt=3, mp=50, mmvLo=10, mmvHi=200, mpe=150, est=1;
+  if(flt==='wide'){mcp=1; mt=1.5; mp=80; mmvLo=5; mmvHi=300; mpe=200; est=0;}
+  if(flt==='all'){mcp=0; mt=0; mp=9999; mmvLo=0; mmvHi=999999; mpe=9999; est=0;}
   const btn=document.getElementById('ndRun');
   btn.disabled=true; const t0=Date.now();
-  document.getElementById('ndMsg').textContent='加载中(资金流+筹码+趋势+板块,首次较慢;30s缓存)...';
+  document.getElementById('ndMsg').textContent='加载中(5因子计算+板块成分股,首次较慢;30s缓存)...';
   try{
-    const r=await _qsFetch(`${API}/api/nextday-strong?universe=${uni}&days=${days}&limit=${limit}&min_change_pct=${mcp}&min_volume_ratio=${mvr}&min_turnover=${mt}&max_price=${mp}&min_mv=${mmvLo}&max_mv=${mmvHi}&max_pe=${mpe}&exclude_st=${est}`);
+    const r=await _qsFetch(`${API}/api/nextday-strong?universe=${uni}&days=${days}&limit=${limit}&min_change_pct=${mcp}&min_turnover=${mt}&max_price=${mp}&min_mv=${mmvLo}&max_mv=${mmvHi}&max_pe=${mpe}&exclude_st=${est}`);
     const d=r.data||{};
     const dt=((Date.now()-t0)/1000).toFixed(1);
     document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
@@ -1530,17 +1546,13 @@ async function ndLoad(){
 function ndRender(d){
   const items=d.items||[];
   if(!items.length){ document.getElementById('ndOut').innerHTML='<div class="empty">'+(d.note||'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或选"全部"放开过滤)')+'</div>'; return; }
-  const W=d.weights||{};
-  const phaseColor={出货:'#DC2626',拉升:'#16A34A',吸筹:'#16A34A',流入:'#16A34A',观望:'var(--muted)'};
-  const ths=['#','代码','名称','分','阶段','量价强势','换手市值','资金连续','主力阶段','筹码收集','趋势形态','板块助攻','明细'].map(h=>`<th class="num">${h}</th>`).join('');
+  const badge=v=>v?'<span style="color:#16A34A">通过</span>':'<span style="color:#6B7280">未过</span>';
+  const ths=['#','代码','名称','分','硬过','步1','步2','步3','步4','步5','板块','板块排名','板块涨停数','明细'].map(h=>`<th class="num">${h}</th>`).join('');
   const trs=items.map(x=>{
-    const f=x.factors||{}, det=x.detail||{};
-    const pc=phaseColor[x.phase]||'var(--muted)';
-    const detTxt='chg='+(det.change_pct!=null?(+det.change_pct).toFixed(2)+'%':'-')+',量比='+(det.volume_ratio!=null?(+det.volume_ratio).toFixed(2):'-')+',换手='+(det.turnover_rate!=null?(+det.turnover_rate).toFixed(1)+'%':'-')+',市值='+(det.circulating_market_cap!=null?(+det.circulating_market_cap).toFixed(0)+'亿':'-')+',streak='+(det.streak_inflow??'-')+',加速='+(det.margin_accel!=null?(det.margin_accel/1e4).toFixed(0)+'万':'-')+',集中Δ='+(det.chip_concentration_delta??'-')+',趋势='+(det.trend_type||'-')+',板块='+(det.board||'-')+'排名'+(det.board_rank??'-')+'涨停'+(det.sector_zt??'-');
-    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?x.score:'—'}</b></td><td class="num" style="color:${pc}">${x.phase||'—'}</td><td class="num">${f['量价强势']!=null?f['量价强势']:'—'}</td><td class="num">${f['换手市值']!=null?f['换手市值']:'—'}</td><td class="num">${f['资金连续']!=null?f['资金连续']:'—'}</td><td class="num">${f['主力阶段']!=null?f['主力阶段']:'—'}</td><td class="num">${f['筹码收集']!=null?f['筹码收集']:'—'}</td><td class="num">${f['趋势形态']!=null?f['趋势形态']:'—'}</td><td class="num">${f['板块助攻']!=null?f['板块助攻']:'—'}</td><td style="font-size:11px" title="${detTxt}">${detTxt}</td></tr>`;
+    const det='涨幅='+(x.change_pct!=null?(+x.change_pct).toFixed(2)+'%':'-')+' / 换手='+(x.turnover_rate!=null?(+x.turnover_rate).toFixed(1)+'%':'-')+' / 价='+(x.latest_price!=null?(+x.latest_price).toFixed(2):'-')+' / 市值='+(x.circulating_market_cap!=null?(+x.circulating_market_cap).toFixed(1)+'亿':'-')+' / PE='+(x.pe!=null?(+x.pe).toFixed(1):'-')+' / 量比='+(x.volume_ratio!=null?(+x.volume_ratio).toFixed(2):'-')+' / 步3='+(x.need_history?'历史不足':'形态可算');
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?x.score.toFixed(2):'—'}</b></td><td class="num">${x.hard_pass!=null?x.hard_pass:'—'}</td><td class="num">${badge(x.step1_pass)}</td><td class="num">${badge(x.step2_pass)}</td><td class="num">${badge(x.step3_pass)}</td><td class="num">${x.step4_score!=null?x.step4_score.toFixed(2):'—'}</td><td class="num">${badge(x.step5_pass)}</td><td class="num">${x.board||'—'}</td><td class="num">${x.board_rank!=null?x.board_rank:'—'}</td><td class="num">${x.board_zt_count!=null?x.board_zt_count:'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
   }).join('');
-  const wTxt='权重: 量价强势'+((W['量价强势']||0)*100).toFixed(0)+'% / 换手市值'+((W['换手市值']||0)*100).toFixed(0)+'% / 资金连续'+((W['资金连续']||0)*100).toFixed(0)+'% / 主力阶段'+((W['主力阶段']||0)*100).toFixed(0)+'% / 筹码收集'+((W['筹码收集']||0)*100).toFixed(0)+'% / 趋势形态'+((W['趋势形态']||0)*100).toFixed(0)+'% / 板块助攻'+((W['板块助攻']||0)*100).toFixed(0)+'%';
-  document.getElementById('ndOut').innerHTML=`<div style="font-size:11px;color:var(--muted);margin-bottom:6px">${wTxt}</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  document.getElementById('ndOut').innerHTML=`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
 document.getElementById('ndRun').onclick=ndLoad;
 document.getElementById('ndFilter').onchange=ndLoad;

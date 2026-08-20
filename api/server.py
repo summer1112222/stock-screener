@@ -893,32 +893,27 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
 def nextday_strong(universe: str = Query("stock"),
                    limit: int = Query(50, ge=1, le=200),
                    days: int = Query(30, ge=5, le=120),
-                   min_change_pct: float = Query(1.0, ge=0.0, le=20.0),
-                   min_volume_ratio: float = Query(0.5, ge=0.0, le=10.0),
-                   min_turnover: float = Query(0.0, ge=0.0, le=50.0),
-                   max_price: float = Query(9999.0, ge=1.0, le=5000.0),
-                   min_mv: float = Query(0.0, ge=0.0, le=1000.0),
-                   max_mv: float = Query(999999.0, ge=10.0, le=100000.0),
-                   max_pe: float = Query(9999.0, ge=0.0, le=10000.0),
-                   exclude_st: bool = Query(False),
+                   min_change_pct: float = Query(5.0, ge=0.0, le=20.0),
+                   min_turnover: float = Query(3.0, ge=0.0, le=50.0),
+                   max_price: float = Query(50.0, ge=1.0, le=5000.0),
+                   min_mv: float = Query(10.0, ge=0.0, le=1000.0),
+                   max_mv: float = Query(200.0, ge=10.0, le=100000.0),
+                   max_pe: float = Query(150.0, ge=0.0, le=10000.0),
+                   exclude_st: bool = Query(True),
                    codes: str = Query("")):
-    """次日强势概率排序(7 因子机械算分，对齐"次日必涨"量价市值方法论)：
-    量价强势 0.25(涨幅区间3-5%最佳+量比>1+跑赢大盘)/换手市值 0.20(换手5-10%+流通市值50-200亿)/
-    资金连续 0.20/主力阶段 0.15/筹码收集 0.20 + 趋势形态/板块助攻(7因子)。
-    可叠加每日漏斗硬门槛(min_turnover/max_price/min_mv/max_mv/max_pe/exclude_st)。
-    复用 smart_money/spot，不新增表、不触网(_behavior_batch 批量)。
-    依赖 smart_money_action + stock_daily，无历史对应因子 0 不崩。出货拉低总分沉底。"""
+    """次日强势 5 步流程：强势门槛、风险剔除、均线/放量形态、量价软分、
+    行业板块助攻。前后四步是硬通过数，第四步按量比和涨幅温和度排序；
+    返回机械排序观察清单，不构成投资建议。板块成分股按需取得，失败诚实降级。"""
     from screener import nextday
     cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
     res = nextday.nextday_strong_rank(universe=universe, codes=cl,
                                       limit=limit, days=days,
                                       min_change_pct=min_change_pct,
-                                      min_volume_ratio=min_volume_ratio,
                                       min_turnover=min_turnover, max_price=max_price,
                                       min_mv=min_mv, max_mv=max_mv, max_pe=max_pe,
                                       exclude_st=exclude_st)
     return _wrap(res, {"cand_disclaimer":
-                       "次日强势清单——多因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
+                       "次日强势清单——5因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
 
 @app.get("/api/daily-strong")
@@ -934,14 +929,12 @@ def daily_strong(universe: str = Query("stock"),
                  exclude_st: bool = Query(True),
                  codes: str = Query("")):
     """每日强势(合并到次日强势后的兼容转调)。
-    /api/daily-strong 保留为旧 URL 兼容入口：用每日漏斗参数(涨幅/换手/股价/市值/PE/非ST)
-    调 nextday_strong_rank，复用其 7 因子评分 + 板块助攻。
-    不再走 screener/daily_strong.py(已并入 nextday)。挂 cand_disclaimer。"""
+    /api/daily-strong 保留为旧 URL 兼容入口，参数与 5 步流程一致。
+    挂 cand_disclaimer。"""
     from screener import nextday
     cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
     res = nextday.nextday_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
                                       min_change_pct=min_change_pct,
-                                      min_volume_ratio=0.0,
                                       min_turnover=min_turnover, max_price=max_price,
                                       min_mv=min_mv, max_mv=max_mv,
                                       max_pe=max_pe, exclude_st=exclude_st)
@@ -974,6 +967,114 @@ def buffett_top(n: int = Query(10, ge=1, le=50),
         "n": n, "order": order, "scanned": len(results), "shortlist_k": shortlist_k,
         "bt_disclaimer": "可买入=排除ST/涨停/停牌+成交额达标；估值标签基于财务摘要机械评分，非买卖指令，盈亏自负。",
     })
+
+
+def _tdx_quote_analysis(q: dict, in_session: bool) -> dict:
+    """把 TDX 五档快照整理为结构化盘口观察报告。
+
+    这是实时盘口代理，不等同机构/主力资金流；缺字段不填零，评分按可用
+    因子重归一，避免盘后空五档被误判为卖方。
+    """
+    def _f(v):
+        try:
+            f = float(v)
+            return None if math.isnan(f) or math.isinf(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    price = _f(q.get("price"))
+    bvol, svol = _f(q.get("b_vol")), _f(q.get("s_vol"))
+    active_ratio = None
+    active_net_amount = None
+    inner_outer_ratio = None
+    if bvol is not None and svol is not None and bvol + svol > 0:
+        active_ratio = (bvol - svol) / (bvol + svol)
+        inner_outer_ratio = bvol / svol if svol > 0 else None
+        if price is not None:
+            active_net_amount = (bvol - svol) * 100.0 * price
+
+    bid_depth, ask_depth = 0.0, 0.0
+    bid_qty, ask_qty = 0.0, 0.0
+    for i in range(1, 6):
+        bp, ap = _f(q.get(f"bid{i}")), _f(q.get(f"ask{i}"))
+        bv, av = _f(q.get(f"bid_vol{i}")), _f(q.get(f"ask_vol{i}"))
+        if bv is not None:
+            bid_qty += bv
+            bid_depth += (bp or 0.0) * bv * 100.0
+        if av is not None:
+            ask_qty += av
+            ask_depth += (ap or 0.0) * av * 100.0
+    depth_total = bid_depth + ask_depth
+    order_imbalance = ((bid_depth - ask_depth) / depth_total
+                       if depth_total > 0 else None)
+    depth_ratio = bid_depth / ask_depth if ask_depth > 0 else None
+    low, high = _f(q.get("low")), _f(q.get("high"))
+    intraday_position = ((price - low) / (high - low)
+                         if price is not None and low is not None and high is not None
+                         and high > low else None)
+
+    # 方向因素转换到 0-1；盘后仍展示主动成交，但五档/日内位置不入观察分。
+    factors = {
+        "active_trade": (active_ratio + 1.0) / 2.0 if active_ratio is not None else None,
+        "order_imbalance": (order_imbalance + 1.0) / 2.0
+        if in_session and order_imbalance is not None else None,
+        "inner_outer": (active_ratio + 1.0) / 2.0 if active_ratio is not None else None,
+        "intraday_position": intraday_position if in_session else None,
+    }
+    weights = {"active_trade": 0.35, "order_imbalance": 0.35,
+               "inner_outer": 0.15, "intraday_position": 0.15}
+    valid = {k: v for k, v in factors.items() if v is not None}
+    denom = sum(weights[k] for k in valid)
+    score = round(sum(weights[k] * v for k, v in valid.items()) / denom * 100, 2) if denom else None
+    if score is None:
+        label = "数据不足"
+    elif score >= 60:
+        label = "偏买方"
+    elif score <= 40:
+        label = "偏卖方"
+    else:
+        label = "中性"
+
+    missing = [k for k, v in factors.items() if v is None]
+    return {
+        "code": q.get("code"), "price": price,
+        "active_buy_volume": bvol, "active_sell_volume": svol,
+        "active_net_ratio": active_ratio,
+        "active_net_amount": active_net_amount,
+        "inner_outer_ratio": inner_outer_ratio,
+        "bid_depth_amount": bid_depth or None, "ask_depth_amount": ask_depth or None,
+        "bid_depth_ratio": depth_ratio,
+        "order_imbalance": order_imbalance,
+        "liquidity_depth": (math.log(bid_qty + ask_qty)
+                            if bid_qty + ask_qty > 0 else None),
+        "intraday_position": intraday_position,
+        "quote_observation_score": score, "label": label,
+        "factor_scores": {k: round(v * 100, 2) if v is not None else None
+                           for k, v in factors.items()},
+        "factor_status": {k: ("ok" if v is not None else "missing") for k, v in factors.items()},
+        "data_quality": {
+            "source": "tdx", "in_session": in_session,
+            "quote_available": price is not None,
+            "is_stale": not in_session,
+            "missing_fields": missing,
+            "note": ("盘中盘口快照" if in_session else "盘后/非交易时段，五档与日内位置不纳入评分"),
+        },
+    }
+
+
+@app.get("/api/tdx/quote-analysis")
+def tdx_quote_analysis(code: str = Query(...)):
+    """通达信实时盘口结构化观察报告，不等同主力资金流。"""
+    q = pytdx_client.get_quote([code])
+    if not q:
+        return _wrap({"code": code, "quote_available": False,
+                      "data_quality": {"source": "tdx", "quote_available": False,
+                                        "is_stale": True, "missing_fields": ["quote"]},
+                      "quote_observation_score": None, "label": "数据不足"},
+                     {"cand_disclaimer": "通达信盘口机械观察，非主力资金流，非买卖信号，盈亏自负。"})
+    from backtest.quality import _is_in_session
+    report = _tdx_quote_analysis(q[0], _is_in_session())
+    return _wrap(report, {"cand_disclaimer": "通达信盘口机械观察，非主力资金流，非买卖信号，盈亏自负。"})
 
 
 @app.get("/api/tdx/quote")
