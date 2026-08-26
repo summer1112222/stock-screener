@@ -219,11 +219,22 @@ def test_rank_basic(monkeypatch):
 def test_rank_order_hard_pass(monkeypatch):
     _mock_orch(monkeypatch)
     r = ds.daily_strong_rank(limit=10, min_change_pct=1.0)
-    # A 硬通过3步(step1/2/3) > C 硬通过0步 → A 排前
+    # step2 风险雷区为硬剔除，C 不得进入结果。
     items = r["items"]
-    a_idx = next(i for i, x in enumerate(items) if x["code"] == "A")
-    c_idx = next(i for i, x in enumerate(items) if x["code"] == "C")
-    assert a_idx < c_idx
+    assert [x["code"] for x in items] == ["A", "B"]
+    assert items[0]["score"] >= items[1]["score"]
+
+
+def test_rank_uses_step_weights(monkeypatch):
+    _mock_orch(monkeypatch)
+    r = ds.daily_strong_rank(limit=10, min_change_pct=5.0)
+    item = r["items"][0]
+    assert r["weights"] == ds.STEP_WEIGHTS
+    expected = (ds.STEP_WEIGHTS["step1"] * item["step_scores"]["step1"]
+                + ds.STEP_WEIGHTS["step3"] * item["step_scores"]["step3"]
+                + ds.STEP_WEIGHTS["step4"] * item["step_scores"]["step4"]
+                + ds.STEP_WEIGHTS["step5"] * item["step_scores"]["step5"])
+    assert item["score"] == round(expected, 2)
 
 
 def test_rank_codes_limit(monkeypatch):
@@ -256,8 +267,8 @@ def test_route_daily_strong(monkeypatch):
     """/api/daily-strong 兼容转调调 nextday，返回每日强势 disclaimer。"""
     from fastapi.testclient import TestClient
     import api.server as srv
-    import screener.nextday as nd
-    # mock nextday.nextday_strong_rank 直接返回
+    import screener.daily_strong as daily
+    # mock daily_strong.daily_strong_rank 直接返回
     def _mock_rank(**kw):
         return {"count": 1, "items": [{"code": "A", "name": "甲", "score": 80.0, "rank": 1,
                                          "phase": "吸筹", "factors": {"量价强势": 0.8, "换手市值": 0.6,
@@ -267,8 +278,8 @@ def test_route_daily_strong(monkeypatch):
                 "weights": {"量价强势": 0.2, "换手市值": 0.15, "资金连续": 0.15,
                             "主力阶段": 0.1, "筹码收集": 0.15, "趋势形态": 0.15, "板块助攻": 0.1},
                 "filters": {}, "mode": "full", "universe": "stock", "limit": 50}
-    monkeypatch.setattr(nd, "nextday_strong_rank", _mock_rank)
-    nd._CACHE.clear()
+    monkeypatch.setattr(daily, "daily_strong_rank", _mock_rank)
+    daily._CACHE.clear()
     client = TestClient(srv.app)
     r = client.get("/api/daily-strong?limit=10&min_change_pct=5.0")
     assert r.status_code == 200

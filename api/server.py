@@ -31,7 +31,8 @@ from screener import engine, smart_money as sm_query
 from screener.conditions import BOARD_FIELDS_CAT, ETF_FIELDS_CAT, STOCK_FIELDS_CAT, OPS
 from backtest import (eval as bt_eval, engine as bt_engine, risk as bt_risk,
                       robust as bt_robust, candidates as bt_cand,
-                      signals as bt_sig, buffett as bt_buf)
+                      signals as bt_sig, buffett as bt_buf,
+                      research as bt_research)
 
 app = FastAPI(title="A股板块/ETF 筛选器(本地)")
 
@@ -139,7 +140,7 @@ def _collect_health():
             except Exception as e:
                 domains["fundamentals"] = {"status": "red", "err": str(e)}
             try:
-                rr = _q("SELECT COUNT(*) AS n, MAX(date) AS d FROM research_report")
+                rr = _q("SELECT COUNT(*) AS n, MAX(pub_date) AS d FROM research_report")
                 domains["research"] = {"rows": rr["n"] if rr else 0, "latest": rr["d"] if rr else "",
                                        "status": _domain_status(rr["n"] if rr else 0, rr["d"] if rr else "")}
             except Exception as e:
@@ -412,6 +413,18 @@ class BTEvalReq(BaseModel):
     end: str = "20240101"
 
 
+class FactorResearchReq(BaseModel):
+    universe: str
+    codes: list[str]
+    factor: str = "momentum_n"
+    n: int = 20
+    n_groups: int = 5
+    forward_days: list[int] = [1, 5, 10, 20]
+    start: str = "20200101"
+    end: str = "20240101"
+    train_frac: float = 0.6
+
+
 class BTRunReq(BaseModel):
     universe: str
     codes: list[str]
@@ -423,6 +436,7 @@ class BTRunReq(BaseModel):
     end: str = "20240101"
     benchmark: str | None = "sh000300"
     cost_bps: float = 30.0
+    execution_mode: str = "close"
     delisted_codes: list[str] | None = None
 
 
@@ -431,6 +445,26 @@ def bt_fetch(req: BTFetchReq):
     """抓取历史日线落库(ETF/个股新浪可用，板块 best-effort)。"""
     report = history.fetch_history(req.universe, req.codes, req.start, req.end)
     return _wrap(report, {"bt_disclaimer": BT_DISCLAIMER})
+
+
+@app.post("/api/research/factor")
+def factor_research_route(req: FactorResearchReq):
+    """因子有效性研究：多前瞻周期 IC/Rank IC/分层与训练测试统计。"""
+    try:
+        res = bt_research.run_factor_research(
+            universe=req.universe,
+            codes=req.codes,
+            factor=req.factor,
+            start=req.start,
+            end=req.end,
+            forward_days=req.forward_days,
+            n=req.n,
+            n_groups=req.n_groups,
+            train_frac=req.train_frac,
+        )
+    except Exception as exc:
+        res = {"status": "error", "message": f"因子研究失败: {exc}", "horizons": {}}
+    return _wrap(res, {"bt_disclaimer": BT_DISCLAIMER})
 
 
 @app.post("/api/backtest/eval")
@@ -466,6 +500,12 @@ def bt_run(req: BTRunReq):
         return _wrap({"error": "无历史数据，先 /api/backtest/fetch"},
                      {"bt_disclaimer": BT_DISCLAIMER})
     amount = bt_eval.load_panel(req.universe, req.codes, req.start, req.end, "amount")
+    open_prices = None
+    if req.execution_mode == "next_open":
+        open_prices = bt_eval.load_panel(req.universe, req.codes, req.start, req.end, "open")
+        if open_prices.empty:
+            return _wrap({"error": "next_open 模式需要历史开盘价"},
+                         {"bt_disclaimer": BT_DISCLAIMER})
     factor = bt_eval.compute_factor(close, req.factor,
                                     params={"n": req.n}, amount=amount)
     bench = None
@@ -476,7 +516,9 @@ def bt_run(req: BTRunReq):
     res = bt_engine.run_backtest(close, factor, topn=req.topn,
                                  freq=req.freq, benchmark=bench,
                                  cost_bps=req.cost_bps,
-                                 delisted_codes=req.delisted_codes)
+                                 delisted_codes=req.delisted_codes,
+                                 open_prices=open_prices,
+                                 execution_mode=req.execution_mode)
     eq = pd.Series(res.get("equity_curve", {})).astype(float).sort_index()
     bench_nav = pd.Series(res.get("benchmark_curve", {}))
     bench_nav = bench_nav.astype(float).sort_index() if len(bench_nav) else None
@@ -559,6 +601,7 @@ class BtSignalsReq(BaseModel):
     min_hits: int = 1
     stop_loss: float | None = None
     fee_bps: float = 0
+    execution_mode: str = "close"
 
 
 @app.post("/api/signals/backtest")
@@ -569,10 +612,12 @@ def bt_signals_route(req: BtSignalsReq):
     res = bt_sig.backtest_signals(req.universe, req.codes, req.signal_types,
                                   k_days=req.k_days, benchmark=req.benchmark,
                                   min_hits=req.min_hits, stop_loss=req.stop_loss,
-                                  fee_bps=req.fee_bps)
+                                  fee_bps=req.fee_bps,
+                                  execution_mode=req.execution_mode)
     return _wrap(res.get("rows", res), {
         "n_scanned": res.get("n_scanned"), "error": res.get("error"),
         "k_days": res.get("k_days"), "signals": res.get("signals"),
+        "execution_mode": res.get("execution_mode"),
         "cand_disclaimer": "历史触发统计事实，非预测，不构成投资建议，盈亏自负。",
     })
 
@@ -931,13 +976,13 @@ def daily_strong(universe: str = Query("stock"),
     """每日强势(合并到次日强势后的兼容转调)。
     /api/daily-strong 保留为旧 URL 兼容入口，参数与 5 步流程一致。
     挂 cand_disclaimer。"""
-    from screener import nextday
+    from screener import daily_strong
     cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
-    res = nextday.nextday_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
-                                      min_change_pct=min_change_pct,
-                                      min_turnover=min_turnover, max_price=max_price,
-                                      min_mv=min_mv, max_mv=max_mv,
-                                      max_pe=max_pe, exclude_st=exclude_st)
+    res = daily_strong.daily_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
+                                         min_change_pct=min_change_pct,
+                                         min_turnover=min_turnover, max_price=max_price,
+                                         min_mv=min_mv, max_mv=max_mv,
+                                         max_pe=max_pe)
     return _wrap(res, {"cand_disclaimer":
                        "每日强势清单——多步机械漏斗+板块助攻排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
@@ -1062,10 +1107,41 @@ def _tdx_quote_analysis(q: dict, in_session: bool) -> dict:
     }
 
 
+def _resolve_stock_code(value: str) -> tuple[str, str | None]:
+    """把代码或中文名称解析为 spot 中的代码；名称按包含关系模糊匹配。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return raw, None
+    pure = pytdx_client._pure_code(raw)
+    if len(pure) == 6 and pure.isdigit():
+        return raw, pure
+    pat = f"%{raw}%"
+    try:
+        rows = db.query_rows("stock_spot",
+                             where="name LIKE ? OR code LIKE ?",
+                             params=(pat, pat), limit=10)
+    except Exception:
+        rows = []
+    if not rows:
+        return raw, None
+    exact = next((r for r in rows if str(r.get("name") or "") == raw), None)
+    row = exact or rows[0]
+    code = str(row.get("code") or "").strip()
+    return raw, code or None
+
+
 @app.get("/api/tdx/quote-analysis")
 def tdx_quote_analysis(code: str = Query(...)):
-    """通达信实时盘口结构化观察报告，不等同主力资金流。"""
-    q = pytdx_client.get_quote([code])
+    """通达信实时盘口结构化观察报告，不等同主力资金流；支持代码/名称。"""
+    raw_code, resolved = _resolve_stock_code(code)
+    if not resolved:
+        return _wrap({"code": raw_code, "quote_available": False,
+                      "error": "未找到匹配的股票代码",
+                      "data_quality": {"source": "tdx", "quote_available": False,
+                                        "is_stale": True, "missing_fields": ["code"]},
+                      "quote_observation_score": None, "label": "代码未匹配"},
+                     {"cand_disclaimer": "通达信盘口机械观察，非主力资金流，非买卖信号，盈亏自负。"})
+    q = pytdx_client.get_quote([resolved])
     if not q:
         return _wrap({"code": code, "quote_available": False,
                       "data_quality": {"source": "tdx", "quote_available": False,
@@ -1079,8 +1155,12 @@ def tdx_quote_analysis(code: str = Query(...)):
 
 @app.get("/api/tdx/quote")
 def tdx_quote(code: str = Query(...)):
-    """通达信实时五档行情(盘中实时,免key直取)。机械行情,非买卖信号。"""
-    q = pytdx_client.get_quote([code])
+    """通达信实时五档行情(盘中实时,免key直取)。支持代码/中文名称。"""
+    _, resolved = _resolve_stock_code(code)
+    if not resolved:
+        return _wrap({"error": "未找到匹配的股票代码"}, {
+            "cand_disclaimer": "通达信实时行情机械快照,非买卖信号,盈亏自负。"})
+    q = pytdx_client.get_quote([resolved])
     if not q:
         return _wrap({"error": "通达信未连接或无此标的，稍后重试"}, {
             "cand_disclaimer": "通达信实时行情机械快照,非买卖信号,盈亏自负。"})
@@ -1091,12 +1171,17 @@ def tdx_quote(code: str = Query(...)):
 @app.get("/api/tdx/company-info")
 def tdx_company_info(code: str = Query(...),
                      category: str = Query("龙虎榜单")):
-    """通达信公司信息文本块(按需取,16 类)。
+    """通达信公司信息文本块(按需取,16 类)，支持代码/中文名称。
     category ∈ 龙虎榜单/主力追踪/股东研究/财务分析/公司概况/股本结构/研究报告 等。
     注意:通达信"龙虎榜单"类别实含【融资融券/资金流向/涨跌幅异动/大宗交易】,
     并非游资席位龙虎榜(后者走 /api/smart-money/seats)。第一版返回原始文本,
     前端预格式显示。机械汇总,非荐股非买卖信号。"""
-    res = pytdx_client.get_company_info(code, category)
+    _, resolved = _resolve_stock_code(code)
+    if not resolved:
+        return _wrap({"code": code, "category": category, "ok": False,
+                      "content": "", "err": "未找到匹配的股票代码"}, {
+            "cand_disclaimer": "通达信公司信息机械汇总,非荐股非买卖信号,盈亏自负。"})
+    res = pytdx_client.get_company_info(resolved, category)
     return _wrap(res, {
         "cand_disclaimer": "通达信公司信息机械汇总,非荐股非买卖信号,盈亏自负。"})
 

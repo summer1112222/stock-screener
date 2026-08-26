@@ -28,6 +28,9 @@ def test_analyze_many_concurrent(monkeypatch):
     monkeypatch.setattr(bt_buf, "_AK_TIMEOUT", 5)
     monkeypatch.setattr(bt_buf.ak, "stock_financial_abstract",
                         lambda symbol: _t.sleep(0.2) or None)
+    # analyze_many 内部 prefetch_financial 是串行预热，会破坏并发测试意图；
+    # mock 为空操作，纯测并发阶段。
+    monkeypatch.setattr(bt_buf, "prefetch_financial", lambda codes: None)
     t0 = time.time()
     bt_buf.analyze_many(["900001", "900002", "900003", "900004"])
     dt = time.time() - t0

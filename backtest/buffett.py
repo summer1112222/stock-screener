@@ -38,6 +38,106 @@ _CACHE_TTL_DAYS = 7
 _COST_OF_EQUITY = 0.09
 
 
+def _safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
+    """安全比例；缺失或零分母不以 0 冒充事实。"""
+    if numerator is None or denominator in (None, 0):
+        return None
+    try:
+        return round(float(numerator) / float(denominator), 4)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _owner_earnings_quality(ratios: dict, history_years: int | None,
+                            missing_fields: list[str] | None = None) -> dict:
+    """基于已有财报字段评估所有者收益质量，不新增数据源。"""
+    missing = list(missing_fields or [])
+    oe = ratios.get("owner_earnings")
+    ni = ratios.get("net_income")
+    ocf = ratios.get("ocf")
+    capex = ratios.get("capex")
+    out = {
+        "status": "uncertain", "ocf_to_netincome": _safe_ratio(ocf, ni),
+        "capex_to_ocf": _safe_ratio(capex, ocf),
+        "working_capital_drag": ratios.get("working_capital_drag"),
+        "share_dilution": None, "owner_earnings_to_netincome": _safe_ratio(oe, ni),
+        "history_years": history_years, "missing_fields": missing,
+    }
+    if out["ocf_to_netincome"] is None:
+        missing.append("cashflow" if ocf is None else "net_income")
+    if out["owner_earnings_to_netincome"] is None:
+        missing.append("owner_earnings")
+    if len(set(missing)) or out["ocf_to_netincome"] is None:
+        return out
+    conv = out["ocf_to_netincome"]
+    oe_ratio = out["owner_earnings_to_netincome"]
+    if conv >= 0.8 and oe_ratio >= 0.8:
+        out["status"] = "strong"
+    elif conv >= 0.5 and oe_ratio >= 0.5:
+        out["status"] = "medium"
+    else:
+        out["status"] = "weak"
+    return out
+
+
+def _scenario_valuation(bps_latest, price, roe_avg, bps_cagr, cost_of_equity=_COST_OF_EQUITY):
+    out = {}
+    if not bps_latest or not price or roe_avg is None:
+        return {k: {"status": "insufficient_data"} for k in ("bear", "base", "bull")}
+    for name, g_adj, roe_adj in (("bear", -0.03, -0.03), ("base", 0.0, 0.0), ("bull", 0.03, 0.03)):
+        roe = max(0.0, float(roe_avg) / 100 + roe_adj)
+        g = max(0.0, min((bps_cagr or 0.0) + g_adj, roe))
+        if g >= cost_of_equity or roe <= 0:
+            out[name] = {"growth_g": g, "cost_of_equity_r": cost_of_equity,
+                         "sustainable_roe": roe, "intrinsic_value": None,
+                         "margin_of_safety": None, "status": "invalid",
+                         "note": "g≥r或ROE无效"}
+            continue
+        iv = ((roe - g) / (cost_of_equity - g)) * float(bps_latest)
+        out[name] = {"growth_g": round(g, 4), "cost_of_equity_r": cost_of_equity,
+                     "sustainable_roe": round(roe, 4), "intrinsic_value": round(iv, 2),
+                     "margin_of_safety": round((iv - price) / iv, 3) if iv else None,
+                     "status": "ok", "note": "Gordon-on-Book机械估值"}
+    return out
+
+
+def _reverse_valuation(price, bps_latest, roe_avg, cost_of_equity=_COST_OF_EQUITY):
+    if not price or not bps_latest or not roe_avg:
+        return {"status": "insufficient_data", "implied_growth_g": None,
+                "implied_roe": None, "implied_pb": None}
+    pb = float(price) / float(bps_latest)
+    roe = float(roe_avg) / 100
+    g = (pb * cost_of_equity - roe) / (pb - 1) if abs(pb - 1) > 1e-9 else None
+    return {"status": "ok", "implied_pb": round(pb, 3),
+            "implied_growth_g": round(g, 4) if g is not None else None,
+            "implied_roe": round(roe, 4), "note": "由当前价格反推的机械假设"}
+
+
+def _capital_allocation(ratios, abstract_metrics=None, missing_fields=None):
+    missing = list(missing_fields or [])
+    if ratios.get("fcf_to_netincome") is None: missing.append("fcf_to_netincome")
+    score = None if not ratios.get("fcf_to_netincome") else max(0, min(100, ratios["fcf_to_netincome"] * 50))
+    return {"status": "uncertain" if score is None else ("strong" if score >= 40 else "watch"),
+            "score": round(score, 2) if score is not None else None,
+            "dividend_signal": None, "dilution_signal": None, "leverage_signal": ratios.get("debt_ratio_latest"),
+            "acquisition_signal": None, "retained_earnings_return": ratios.get("roe_avg"),
+            "evidence": [], "missing_fields": sorted(set(missing))}
+
+
+def _risk_radar(ratios, capital_allocation, owner_quality, data_gaps=None):
+    items = []
+    if (ratios.get("goodwill_to_equity_pct") or 0) > 30:
+        items.append({"code": "goodwill", "severity": "high", "message": "商誉占净资产偏高", "value": ratios["goodwill_to_equity_pct"]})
+    if (ratios.get("debt_ratio_latest") or 0) > 75:
+        items.append({"code": "leverage", "severity": "high", "message": "资产负债率偏高", "value": ratios["debt_ratio_latest"]})
+    if owner_quality.get("status") == "weak":
+        items.append({"code": "cash_conversion", "severity": "watch", "message": "所有者收益转换偏弱", "value": owner_quality.get("owner_earnings_to_netincome")})
+    gaps = sorted(set((data_gaps or []) + ["related_party", "pledge", "audit_opinion", "inquiry", "acquisition_detail"]))
+    rank = {"info": 0, "watch": 1, "high": 2}
+    overall = max((x["severity"] for x in items), key=lambda x: rank[x], default="uncertain")
+    return {"overall": overall, "accounting": items, "governance": [], "data_gaps": gaps}
+
+
 def _cagr(series: list[float], min_n: int = 3) -> float | None:
     """复合年增长率。series 为年报值升序或降序均可（取首末两端）。
     min_n 控制最少年数（< min_n 返回 None）。负值/零端点→None（增长无意义）。"""
@@ -325,6 +425,7 @@ def analyze(code: str) -> dict:
     real_fcf = None
     fcf_source = "摘要代理(经营现金流量净额)"
     owner_earnings = None
+    cf_fields = {}
     if cf_df is not None and not cf_df.empty:
         ocf = _pick_col_sum(cf_df, ["经营活动产生的现金流量净额",
                                     "经营活动现金流量净额"])
@@ -477,6 +578,19 @@ def analyze(code: str) -> dict:
 
     if gw_latest is not None and eq_latest:
         ratios["goodwill_to_equity_pct"] = round(float(gw_latest / eq_latest * 100), 2)
+    # 附加研究字段：仅复用已加载的财报结果，缺失保持 None。
+    ratios["net_income"] = ni_ann
+    ratios["ocf"] = ocf_ann
+    if cf_fields:
+        ratios["capex"] = cf_fields.get("capex")
+        ratios["working_capital_drag"] = cf_fields.get("wc_increase")
+    owner_missing = []
+    if cf_df is None or cf_df.empty:
+        owner_missing.append("cashflow")
+    if ni_ann is None:
+        owner_missing.append("net_income")
+    res["owner_earnings_quality"] = _owner_earnings_quality(
+        ratios, len(ni_p), owner_missing)
     res["ratios"] = ratios
 
     # ---- 负面红旗 ----
@@ -610,6 +724,14 @@ def analyze(code: str) -> dict:
                 }
     res["intrinsic_value"] = round(iv, 2) if iv is not None else None
     res["margin_of_safety"] = round(mos, 3) if mos is not None else None
+    # 三情景与反向估值：复用 Gordon-on-Book 假设，不进入既有评分。
+    res["valuation_scenarios"] = _scenario_valuation(
+        bps_latest, price, ratios.get("roe_avg"), bps_cagr)
+    res["reverse_valuation"] = _reverse_valuation(
+        price, bps_latest, ratios.get("roe_avg"))
+    res["capital_allocation"] = _capital_allocation(ratios, {}, [])
+    res["risk_radar"] = _risk_radar(
+        ratios, res["capital_allocation"], res["owner_earnings_quality"], [])
 
     # 综合 IV 安全边际进绝对估值标签（与盈利收益率并存，互为印证）
     if mos is not None:

@@ -291,7 +291,7 @@
       <div class="skipped" id="smMsg"></div>
       <div id="smOut" style="margin-top:10px"></div>
       <div class="row" style="align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
-        <input id="smTdxCode" type="text" placeholder="通达信个股主力深查(代码)" style="min-width:160px">
+        <input id="smTdxCode" type="text" placeholder="通达信个股主力深查(代码/名称)" style="min-width:160px">
         <button class="btn ghost" id="smTdxProbe" type="button">深查主力</button>
         <span style="font-size:11px;color:var(--muted)">盘口主动成交+五档失衡+主力追踪资料(通达信直取·非买卖信号)</span>
         <span id="smTdxLoading" style="font-size:12px;color:var(--muted)"></span>
@@ -332,7 +332,8 @@
         <span id="ndMsg" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div id="ndOut" style="margin-top:10px"></div>
-      <div class="disc"><b>次日强势免责</b>：<b>5因子机械排序→排序观察清单，非推荐、非买卖点、不构成投资建议</b>。第1步强势(涨幅>5/换手>3/价<50)；第2步雷区(市值10-200亿/PE≤150且非亏损/非ST)；第3步形态(多头排列或放量突破60日线)；第4步量价验证(量比>2.5+涨幅<7)软分排序；第5步板块助攻(行业热度前5+≥2涨停)。依赖板块成分股+历史(需先 refresh+fetch)，无历史该股 step3 降级不通过，板块成分股失败 step5 诚实不通过。盈亏自负。</div>
+      <div class="skipped" style="margin-top:8px;line-height:1.7"><b>五步口径：</b>步1量价门槛＝涨幅、换手率、价格；步2规模估值＝流通市值、PE、非ST；步3趋势形态＝MA5&gt;MA10&gt;MA20且MA20上行，或站上MA60且成交量≥20日均量2倍；步4量价软分＝量比强度+涨幅温和度（只排序，不作硬剔除）；步5板块助攻＝行业资金流热度前5+板块内至少2只涨停。<span style="color:var(--muted)">“缺数据”表示无法判断，不等同“未过”；TDX字段失败时不伪造。</span></div>
+      <div class="disc"><b>次日强势免责</b>：<b>5因子机械排序→排序观察清单，非推荐、非买卖点、不构成投资建议</b>。依赖刷新后的行情、TDX财务概要/盘口与历史日线；无历史/板块成员失败时对应步骤诚实标记。</div>
     </div>
   </section>
 
@@ -1103,7 +1104,7 @@ function attachAc(id){
   const st=document.createElement('style');
   st.textContent=`.ac-box{position:absolute;z-index:9999;left:0;top:100%;min-width:200px;max-width:320px;background:var(--surface,#fff);border:1px solid var(--border,#ddd);border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.18);max-height:280px;overflow-y:auto;font-size:13px}.ac-item{padding:5px 10px;cursor:pointer;white-space:nowrap;display:flex;gap:8px;align-items:center}.ac-item:hover,.ac-item.ac-sel{background:var(--surface-2,#f4f3ee)}.ac-item b{color:var(--accent,#1a73e8)}.ac-name{color:var(--muted,#666);overflow:hidden;text-overflow:ellipsis}`;
   document.head.appendChild(st);
-  ['hkCode','bfCode','anCode','pfCode','wlCode'].forEach(attachAc);
+  ['hkCode','bfCode','anCode','pfCode','wlCode','smTdxCode'].forEach(attachAc);
 })();
 
 // ---------------- 巴菲特分析 ----------------
@@ -1546,11 +1547,21 @@ async function ndLoad(){
 function ndRender(d){
   const items=d.items||[];
   if(!items.length){ document.getElementById('ndOut').innerHTML='<div class="empty">'+(d.note||'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或选"全部"放开过滤)')+'</div>'; return; }
-  const badge=v=>v?'<span style="color:#16A34A">通过</span>':'<span style="color:#6B7280">未过</span>';
-  const ths=['#','代码','名称','分','硬过','步1','步2','步3','步4','步5','板块','板块排名','板块涨停数','明细'].map(h=>`<th class="num">${h}</th>`).join('');
+  const badge=(v,missing=false)=>missing
+    ? '<span style="color:#D97706" title="数据缺失，未作判断">缺数据</span>'
+    : v ? '<span style="color:#16A34A">通过</span>'
+    : '<span style="color:#6B7280">未过</span>';
+  const stepStatus=(x,n)=>{
+    if(n===1) return badge(x.step1_pass,x.turnover_rate==null||x.latest_price==null||x.change_pct==null);
+    if(n===2) return badge(x.step2_pass,x.circulating_market_cap==null||x.pe==null);
+    if(n===3) return badge(x.step3_pass,!!x.need_history);
+    if(n===5) return badge(x.step5_pass,x.board_rank==null||x.board_zt_count==null);
+    return '—';
+  };
+  const ths=['#','代码','名称','总分','硬通过数','步1<br><small>量价门槛</small>','步2<br><small>规模估值</small>','步3<br><small>趋势形态</small>','步4<br><small>量价软分</small>','步5<br><small>板块助攻</small>','板块','板块排名','板块涨停数','明细'].map(h=>`<th class="num">${h}</th>`).join('');
   const trs=items.map(x=>{
-    const det='涨幅='+(x.change_pct!=null?(+x.change_pct).toFixed(2)+'%':'-')+' / 换手='+(x.turnover_rate!=null?(+x.turnover_rate).toFixed(1)+'%':'-')+' / 价='+(x.latest_price!=null?(+x.latest_price).toFixed(2):'-')+' / 市值='+(x.circulating_market_cap!=null?(+x.circulating_market_cap).toFixed(1)+'亿':'-')+' / PE='+(x.pe!=null?(+x.pe).toFixed(1):'-')+' / 量比='+(x.volume_ratio!=null?(+x.volume_ratio).toFixed(2):'-')+' / 步3='+(x.need_history?'历史不足':'形态可算');
-    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?x.score.toFixed(2):'—'}</b></td><td class="num">${x.hard_pass!=null?x.hard_pass:'—'}</td><td class="num">${badge(x.step1_pass)}</td><td class="num">${badge(x.step2_pass)}</td><td class="num">${badge(x.step3_pass)}</td><td class="num">${x.step4_score!=null?x.step4_score.toFixed(2):'—'}</td><td class="num">${badge(x.step5_pass)}</td><td class="num">${x.board||'—'}</td><td class="num">${x.board_rank!=null?x.board_rank:'—'}</td><td class="num">${x.board_zt_count!=null?x.board_zt_count:'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
+    const det='步1=涨幅>'+(d.filters?.min_change_pct??5)+'%/换手>'+(d.filters?.min_turnover??3)+'%/价格<'+(d.filters?.max_price??50)+'；步2=流通市值'+(d.filters?.min_mv??10)+'-'+(d.filters?.max_mv??200)+'亿/PE≤'+(d.filters?.max_pe??150)+'/非ST；步3=MA5>MA10>MA20或站上MA60且量≥20日均2倍；步4=量比与涨幅温和度软分；步5=行业热度前5且板块涨停≥2。当前值：涨幅='+(x.change_pct!=null?(+x.change_pct).toFixed(2)+'%':'-')+' / 换手='+(x.turnover_rate!=null?(+x.turnover_rate).toFixed(1)+'%':'-')+' / 价='+(x.latest_price!=null?(+x.latest_price).toFixed(2):'-')+' / 市值='+(x.circulating_market_cap!=null?(+x.circulating_market_cap).toFixed(1)+'亿':'-')+' / PE='+(x.pe!=null?(+x.pe).toFixed(1):'-')+' / 量比='+(x.volume_ratio!=null?(+x.volume_ratio).toFixed(2):'-');
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?x.score.toFixed(2):'—'}</b></td><td class="num">${x.hard_pass!=null?x.hard_pass:'—'}</td><td class="num">${stepStatus(x,1)}</td><td class="num">${stepStatus(x,2)}</td><td class="num">${stepStatus(x,3)}</td><td class="num">${x.step4_score!=null?x.step4_score.toFixed(2):'—'}</td><td class="num">${stepStatus(x,5)}</td><td class="num">${x.board||'—'}</td><td class="num">${x.board_rank!=null?x.board_rank:'—'}</td><td class="num">${x.board_zt_count!=null?x.board_zt_count:'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
   }).join('');
   document.getElementById('ndOut').innerHTML=`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
@@ -1646,6 +1657,14 @@ async function fetchPhase(code){
   el.innerHTML=`<span style="background:${PHASE_COLOR[p.phase]||'#6b7280'};color:#fff;padding:2px 10px;border-radius:8px;font-size:13px">${p.phase} ${(p.confidence*100|0)}%</span>`
     +`<div style="font-size:12px;color:var(--muted);margin-top:4px">${(p.triggers||[]).join(' · ')}</div>`;
 }
+function _researchValue(v, suffix=''){ return v==null?'证据不足':`${v}${suffix}`; }
+function _renderOwnerResearch(q){
+  q=q||{}; const miss=(q.missing_fields||[]).join('、');
+  return `<div class="card-t" style="margin-top:12px;font-size:13px">所有者收益质量 <span class="muted">${q.status||'uncertain'}</span></div><div class="kv-grid">${_kv('经营现金流/净利润',_researchValue(q.ocf_to_netincome))}${_kv('资本开支/经营现金流',_researchValue(q.capex_to_ocf))}${_kv('所有者收益/净利润',_researchValue(q.owner_earnings_to_netincome))}${_kv('可用年报年数',_researchValue(q.history_years))}</div>${miss?`<div class="muted">数据缺口：${miss}</div>`:''}`;
+}
+function _renderCapitalResearch(c){ c=c||{}; return `<div class="card-t" style="margin-top:12px;font-size:13px">资本配置 <span class="muted">${c.status||'uncertain'}</span></div><div class="kv-grid">${_kv('机械评分',_researchValue(c.score))}${_kv('留存收益回报',_researchValue(c.retained_earnings_return))}${_kv('杠杆线索',_researchValue(c.leverage_signal))}</div><div class="muted">${(c.evidence||[]).join('；')||'现有数据未提供完整资本配置证据'}</div>`; }
+function _renderValuationResearch(v,r){ v=v||{}; const rows=Object.entries(v).map(([k,x])=>`<tr><td>${k}</td><td>${_researchValue(x.intrinsic_value)}</td><td>${_researchValue(x.margin_of_safety)}</td><td>${x.status||'—'}</td></tr>`).join(''); return `<div class="card-t" style="margin-top:12px;font-size:13px">情景估值与反向估值</div><table><thead><tr><th>情景</th><th>机械估值</th><th>安全边际</th><th>状态</th></tr></thead><tbody>${rows||'<tr><td colspan="4">证据不足</td></tr>'}</tbody></table><div class="muted">反向估值：隐含PB ${_researchValue(r&&r.implied_pb)}，隐含增长 ${_researchValue(r&&r.implied_growth_g)}；${(r&&r.note)||'机械假设，需人工判断'}</div>`; }
+function _renderRiskResearch(r){ r=r||{}; const items=[...(r.accounting||[]),...(r.governance||[])]; return `<div class="card-t" style="margin-top:12px;font-size:13px">风险雷达 <span class="muted">${r.overall||'uncertain'}</span></div>${items.length?items.map(x=>`<div>${x.severity==='high'?'⚠':'•'} ${x.code}: ${x.message} (${_researchValue(x.value)})</div>`).join(''):'<div class="muted">暂无已识别风险，但不代表不存在风险</div>'}<div class="muted">未接入数据：${(r.data_gaps||[]).join('、')||'暂无'}</div>`; }
 async function anRun(){
   const code=(document.getElementById('anCode').value||'').trim();
   if(!code){document.getElementById('anMsg').textContent='请输入代码';return;}
@@ -1710,6 +1729,10 @@ async function anRun(){
     out.innerHTML=`
       <div class="card-t">${cardName} ${code} ${d.latest_price!=null?`<span style="margin-left:8px;color:#1E3A5F">现价 <b>${d.latest_price}</b></span>`:''} <span style="margin-left:12px">综合评分: <b style="color:${scoreColor}">${score??'—'}</b>/100 | 研究优先级: ${_badge(priority)} | 估值: ${_badge(val,'#3B82F6')}</span></div>
       ${olHtml}
+      ${_renderOwnerResearch(f.owner_earnings_quality)}
+      ${_renderCapitalResearch(f.capital_allocation)}
+      ${_renderValuationResearch(f.valuation_scenarios,f.reverse_valuation)}
+      ${_renderRiskResearch(f.risk_radar)}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">
         <div><div class="card-t" style="font-size:13px">基本面质量</div>
           ${_kv('ROE(均值)',fr.roe_avg!=null?(+fr.roe_avg).toFixed(2)+'%':'—')}

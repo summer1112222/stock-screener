@@ -23,7 +23,10 @@ from datetime import datetime
 
 import numpy as np
 
-from data import db
+from data import db, pytdx_client
+
+# 五步加权：step2 为风险硬剔除，不进入总分。
+STEP_WEIGHTS = {"step1": 0.20, "step3": 0.25, "step4": 0.25, "step5": 0.30}
 
 _SCAN_K = 200       # 粗筛后精算上限(按涨幅降序)
 _CACHE: dict[tuple, tuple] = {}
@@ -233,11 +236,28 @@ def daily_strong_rank(universe: str = "stock",
         return hit[1]
 
     base = {"universe": universe, "count": 0, "items": [], "limit": limit,
-            "days": days, "filters": p,
+            "days": days, "filters": p, "weights": dict(STEP_WEIGHTS),
+            "risk_step": "step2_hard_exclude",
             "step5_note": "stock_spot 无 board 列,板块助攻降级(pass=False);待补 board 列激活",
             "ts": now.strftime("%Y-%m-%dT%H:%M:%S")}
 
     spot_all = db.query_rows("stock_spot", limit=0)
+    # 盘中优先以 TDX 逐股行情更新实时字段；TDX 失败时保留本地快照。
+    tdx_rows = pytdx_client.get_quote([str(s.get("code")) for s in spot_all])
+    tdx_by_code = {str(r.get("code")): r for r in tdx_rows if r.get("code")}
+    for s in spot_all:
+        q = tdx_by_code.get(str(s.get("code")))
+        if not q:
+            continue
+        price, prev = _to_f(q.get("price")), _to_f(q.get("last_close"))
+        if price is not None:
+            s["latest_price"] = price
+        if price is not None and prev:
+            s["change_pct"] = (price / prev - 1) * 100
+        if q.get("vol") is not None:
+            s["volume"] = q["vol"]
+        if q.get("amount") is not None:
+            s["amount"] = q["amount"]
     # 预加载 ST 名单(st_list 表; stock_spot 无 st_type 列,须反查)
     try:
         st_rows = db.query_rows("st_list", limit=0)
@@ -290,7 +310,14 @@ def daily_strong_rank(universe: str = "stock",
         s3 = _step3_pass(mi)
         s4 = _step4_score(s)
         s5, bd = _step5_pass(code, spot_all, sff)
+        if not s2:
+            continue  # 风险雷区为硬剔除，不进入候选排序。
         hard = sum([s1, s2, s3, s5])
+        # step2 通过后才参与加权；各步骤布尔值按 0/1 归一化。
+        weighted = (STEP_WEIGHTS["step1"] * float(s1)
+                    + STEP_WEIGHTS["step3"] * float(s3)
+                    + STEP_WEIGHTS["step4"] * s4 / 100.0
+                    + STEP_WEIGHTS["step5"] * float(s5)) * 100
         items.append({
             "code": code, "name": name,
             "change_pct": _nan(_to_f(s.get("change_pct"))),
@@ -306,10 +333,14 @@ def daily_strong_rank(universe: str = "stock",
             "step4_score": s4, "step5_pass": s5,
             "hard_pass": hard,
             "need_history": mi.get("need_history", False),
-            "score": hard * 10 + s4,
+            "score": round(weighted, 2),
+            "step_scores": {"step1": float(s1) * 100, "step2": float(s2) * 100,
+                            "step3": float(s3) * 100, "step4": s4,
+                            "step5": float(s5) * 100},
+            "source": "tdx" if code in tdx_by_code else "stock_spot",
         })
 
-    items.sort(key=lambda x: (x["hard_pass"], x["step4_score"]), reverse=True)
+    items.sort(key=lambda x: (x["score"], x["hard_pass"], x["code"]), reverse=True)
     items = items[:max(0, limit)]
     for i, it in enumerate(items):
         it["rank"] = i + 1

@@ -10,6 +10,11 @@ from data import pytdx_client as t
 
 # ---------- 纯函数 ----------
 def test_market_mapping():
+    assert t._pure_code("sh600519") == "600519"
+    assert t._pure_code("sz000001") == "000001"
+    assert t._pure_code("bj830799") == "830799"
+    assert t._market("sh600519") == 1   # 带前缀沪个股
+    assert t._market("sz000001") == 0   # 带前缀深个股
     assert t._market("000001") == 0   # 深个股
     assert t._market("600519") == 1   # 沪个股
     assert t._market("510300") == 1   # 沪 ETF
@@ -39,6 +44,18 @@ class _FakeApi:
         return self._qdf.to_dict("records")
 
 
+class _RetryApi(_FakeApi):
+    def __init__(self, quotes_df):
+        super().__init__(quotes_df)
+        self.calls = []
+
+    def get_security_quotes(self, pairs):
+        self.calls.append(pairs)
+        if len(self.calls) == 1:
+            raise RuntimeError("batch endpoint unavailable")
+        return self._qdf.to_dict("records")
+
+
 def _quote_df():
     return pd.DataFrame([
         {"code": "000001", "price": 11.25, "last_close": 11.26,
@@ -55,7 +72,7 @@ def _quote_df():
 def test_get_quote(monkeypatch):
     monkeypatch.setattr(t, "_TDX_OK", True)
     monkeypatch.setattr(t, "_get_api", lambda: _FakeApi(_quote_df()))
-    q = t.get_quote(["000001"])
+    q = t.get_quote(["sz000001"])
     assert len(q) == 1
     r = q[0]
     assert r["code"] == "000001"
@@ -76,6 +93,68 @@ def test_get_quote_nan_to_none(monkeypatch):
     monkeypatch.setattr(t, "_get_api", lambda: _FakeApi(df))
     q = t.get_quote(["000001"])
     assert q[0]["price"] is None  # NaN→None,防 allow_nan=False 500
+
+
+def test_get_quote_drops_empty_rows(monkeypatch):
+    """TDX 批量接口偶发返回 code=None 空行，不能泄漏给调用方。"""
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    df = pd.concat([
+        pd.DataFrame([{"code": None, "price": None}]),
+        _quote_df(),
+    ], ignore_index=True)
+    monkeypatch.setattr(t, "_get_api", lambda: _FakeApi(df))
+    q = t.get_quote(["000001"])
+    assert len(q) == 1
+    assert q[0]["code"] == "000001"
+
+
+def test_get_quote_retries_each_code_after_batch_failure(monkeypatch):
+    """批量端点异常后逐只重试，避免整批行情静默丢失。"""
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    api = _RetryApi(_quote_df())
+    monkeypatch.setattr(t, "_get_api", lambda: api)
+    q = t.get_quote(["000001"])
+    assert len(q) == 1
+    assert q[0]["code"] == "000001"
+    assert len(api.calls) == 2
+
+
+class _ProbeApi:
+    def __init__(self, probe, connect_ok=True):
+        self.probe = probe
+        self.connect_ok = connect_ok
+        self.disconnected = False
+
+    def connect(self, host, port, time_out):
+        return self.connect_ok
+
+    def get_security_quotes(self, pairs):
+        return self.probe
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def test_get_api_reconnects_when_existing_probe_is_empty(monkeypatch):
+    """TCP 尚存但探针空响应时，必须丢弃旧连接并重连。"""
+    old = _ProbeApi([])
+    new = _ProbeApi([{"code": "000001"}])
+    created = []
+
+    def _new_api():
+        created.append(True)
+        return new
+
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    monkeypatch.setattr(t, "TdxHq_API", _new_api)
+    monkeypatch.setattr(t, "_api", old)
+    monkeypatch.setattr(t, "_connected_host", "old")
+    monkeypatch.setattr(t, "_SERVERS", [("new", 7709)])
+    api = t._get_api()
+    assert api is new
+    assert old.disconnected is True
+    assert created == [True]
+    assert t._connected_host == "new"
 
 
 # ---------- get_daily_bars mock(分页) ----------
@@ -166,3 +245,42 @@ def test_get_company_info_missing_category(monkeypatch):
     r = t.get_company_info("000001", "龙虎榜单")
     assert not r["ok"]
     assert "无此类别" in r["err"]
+
+
+class _BlockApi:
+    def __init__(self):
+        self.calls = []
+
+    def get_block_info_meta(self, filename):
+        self.calls.append(("meta", filename))
+        return {"size": 3}
+
+    def get_block_info(self, filename, start, size):
+        self.calls.append(("data", filename, start, size))
+        return b"raw"
+
+
+def test_get_block_members_reads_full_file_and_normalizes(monkeypatch):
+    """TDX 板块文件按 meta size 读取并归一前缀代码。"""
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    api = _BlockApi()
+    monkeypatch.setattr(t, "_get_api", lambda: api)
+
+    class _Reader:
+        def get_data(self, raw, reader_type):
+            assert bytes(raw) == b"raw"
+            return [{"blockname": "新能源", "code": "sh600001"},
+                    {"blockname": "新能源", "code": "600001"},
+                    {"blockname": "新能源", "code": "sz000002"},
+                    {"blockname": "\x00坏组", "code": "600003"}]
+
+    import sys
+    import types
+    reader = types.ModuleType("pytdx.reader.block_reader")
+    reader.BlockReader = _Reader
+    reader.BlockReader_TYPE_FLAT = object()
+    monkeypatch.setitem(sys.modules, "pytdx.reader.block_reader", reader)
+    result = t.get_block_members("industry")
+    assert result == {"新能源": ["600001", "000002"]}
+    # 行业板块读 block_zs.dat，而不是 block.dat（后者只有指数/自定义组）
+    assert api.calls == [("meta", "block_zs.dat"), ("data", "block_zs.dat", 0, 3)]

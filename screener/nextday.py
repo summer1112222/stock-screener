@@ -19,13 +19,16 @@ step5 从 industry_board 成分表反查 code→board(同 daily_strong 套路)�
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 
 from data import db
+from data import pytdx_client
 
 _SCAN_K = 200       # 粗筛后精算上限(按涨幅降序)
+_TDX_ENRICH_K = 40  # TDX 实时/财务补全只覆盖前 N 名，避免全市场请求压力
+_HISTORY_FILL_K = 40  # TDX 自动补历史只覆盖涨幅靠前的小名单，避免阻塞全市场
 _CACHE: dict[tuple, tuple] = {}
 _CACHE_TTL = 30
 
@@ -40,6 +43,94 @@ def _nan(v):
     if math.isnan(f) or math.isinf(f):
         return None
     return f
+
+
+# ------------------------------------------------------------------
+# TDX 字段补全(新浪 spot 缺 换手率/流通市值/PE/量比, 用 TDX 机械算出)
+# 缺失值保持 None(前端显示 —), 不伪造。TDX 失败/无数据 → 不补, 降级旧路径。
+# ------------------------------------------------------------------
+
+def _finance_derived(fin: dict, quote: dict | None) -> dict:
+    """从 get_finance_info + get_quote 机械补字段，功匹配产出 0/None 不崩。
+
+    fin: liutongguben(流通股)/zongguben(总股本)/jinglirun(净利润)/meigujingzichan。
+    quote: get_quote 返回的单股行情(price/vol 单位手, 1手=100股)。
+    返回 {circulating_market_cap(亿), total_market_cap(亿), pe, turnover_rate}。
+    任一项缺数据→对应 None(前端显示 —)，不伪造。
+    """
+    price = _to_f(quote.get("price")) if quote else None
+    lt = _to_f(fin.get("liutongguben"))
+    zg = _to_f(fin.get("zongguben"))
+    ni = _to_f(fin.get("jinglirun"))
+    vol = _to_f(quote.get("vol")) if quote else None  # 手
+    out = {"circulating_market_cap": None, "total_market_cap": None,
+           "pe": None, "turnover_rate": None}
+    if price is not None and lt:
+        out["circulating_market_cap"] = _nan(
+            price * lt / 1e8)                     # 市值(亿)
+    if price is not None and zg:
+        out["total_market_cap"] = _nan(price * zg / 1e8)
+    if price is not None and ni and zg:
+        eps_proxy = ni / zg
+        if eps_proxy > 0:
+            out["pe"] = _nan(price / eps_proxy)   # PE=价/每股净利
+    if vol is not None and lt and price is not None:
+        out["turnover_rate"] = _nan(vol * 100 / lt * 100)  # 换手(%)
+    return out
+
+
+def _tdx_vol_ratio(code: str, quote: dict | None,
+                   hist_amount: dict) -> float | None:
+    """量比 = 当日实时量 / 前 5 日均量(用成交额做量代理, 排除停牌缩量)。
+    hist_amount: {code: [近 N 日 amount 序列]}。无历史 → None。"""
+    amt_cur = _to_f(quote.get("amount")) if quote else None
+    once_hist = hist_amount.get(_code_key(code)) or hist_amount.get(code)
+    if amt_cur is None or not once_hist:
+        return None
+    prev = [_to_f(x) for x in once_hist[:-1] if _to_f(x) is not None and _to_f(x) > 0]
+    if not prev:
+        return None
+    avg5 = sum(prev[-5:]) / max(len(prev[-5:]), 1)
+    if avg5 <= 0:
+        return None
+    return _nan(amt_cur / avg5)
+
+
+def _tdx_rich_enrich(spot: dict, quote_by_code: dict,
+                     fin_by_code: dict, hist_amount: dict) -> dict:
+    """把 TDX 字段合并进 spot(值优先, 缺则保 spot 现状)。返回新 spot。"""
+    code = str(spot.get("code") or "")
+    pure = _code_key(code)
+    if not pure:
+        return spot
+    out = dict(spot)
+    q = dict(quote_by_code.get(pure) or {})
+    if _to_f(q.get("price")) is None:
+        q["price"] = spot.get("latest_price")
+    # TDX 五档偶发不可用时，新浪 spot 仍有成交额；按成交额推导
+    # vol(手)=成交额/(价格×100)，让换手率/量比不因盘口失败一起消失。
+    if _to_f(q.get("amount")) is None and _to_f(spot.get("turnover_amount")) is not None:
+        q["amount"] = spot.get("turnover_amount")
+    if _to_f(q.get("vol")) is None:
+        price = _to_f(q.get("price"))
+        amount = _to_f(q.get("amount"))
+        if price and amount is not None:
+            q["vol"] = amount / (price * 100.0)
+    # TDX 实时快照是主源；仅当字段缺失时才保留 stock_spot 降级值。
+    price = _to_f(q.get("price"))
+    last_close = _to_f(q.get("last_close"))
+    if price is not None:
+        out["latest_price"] = price
+    if price is not None and last_close and last_close > 0:
+        out["change_pct"] = _nan((price / last_close - 1.0) * 100.0)
+    fi = _finance_derived(fin_by_code.get(pure) or {}, q or None)
+    for k, v in fi.items():
+        if v is not None:
+            out[k] = v
+    vr = _tdx_vol_ratio(code, q or None, hist_amount)
+    if vr is not None and _to_f(out.get("volume_ratio")) is None:
+        out["volume_ratio"] = vr
+    return out
 
 
 def _clip(v, lo=0.0, hi=1.0):
@@ -86,29 +177,123 @@ def _step2_pass(s, p, st_set=None) -> bool:
 # step3 批量 MA(复用 backtest.signals._uni_panels)
 # ------------------------------------------------------------------
 
-def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> dict:
-    """批量算 5/10/20/60 MA + 量。返 {code: ma_info}。
-    ma_info: {ma5,ma10,ma20,ma60,bullish_align,volume_breakout,bearish,converged,
-              need_history,last_vol,vol_avg20}。"""
+def _missing_history_codes(close, codes: list[str], min_rows: int = 60) -> list[str]:
+    """找出没有足够日 K 的候选股；同时兼容纯代码和 sh/sz 前缀列。"""
+    if close is None or getattr(close, "empty", True):
+        return list(codes)
+    columns = set(close.columns)
+    missing = []
+    for code in codes:
+        col = next((c for c in (code, _add_prefix(code), _code_key(code))
+                    if c in columns), None)
+        if col is None or int(close[col].count()) < min_rows:
+            missing.append(code)
+    return missing
+
+
+def _fill_missing_history(universe: str, codes: list[str]) -> int:
+    """为缺少 stock_daily 历史的候选股按需从 TDX 拉最近日 K 并入库。
+
+    只服务个股次日强势流程；调用方已将名单限制在涨幅靠前的小名单。只取约
+    180 个自然日，覆盖 MA60、20 日量均值和量比，避免首次请求为每股拉多年历史。
+    采集并发、SQLite 写入串行，避免并发写锁；返回成功补入的股票数。
+    """
+    if str(universe).lower() != "stock" or not codes:
+        return 0
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from data import history
+    except Exception:
+        return 0
+
+    def fetch_one(code):
+        pure = _code_key(code)
+        if not pure:
+            return pure, []
+        try:
+            end = datetime.now()
+            start = (end - timedelta(days=180)).strftime("%Y%m%d")
+            df, ok, _ = history.fetch_stock_hist(
+                _add_prefix(pure), start, end.strftime("%Y%m%d"))
+            if not ok or df is None or df.empty:
+                return pure, []
+            records = df.astype(object).where(df.notna(), None).to_dict("records")
+            return pure, records
+        except Exception:
+            return pure, []
+
+    fetched: list[tuple[str, list[dict]]] = []
+    workers = min(8, max(1, len(codes)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(fetch_one, code) for code in codes]
+        for future in as_completed(futures):
+            pure, records = future.result()
+            if records:
+                fetched.append((pure, records))
+
+    success = 0
+    for pure, records in fetched:
+        try:
+            db.upsert_rows("stock_daily", records)
+            success += 1
+        except Exception:
+            continue
+    return success
+
+
+def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> tuple[dict, dict]:
+    """批量算 5/10/20/60 MA + 量。返 (ma_info, hist_amount)。
+    ma_info: {code: {ma5,ma10,ma20,ma60,bullish_align,volume_breakout,bearish,converged,
+                     need_history,last_vol,vol_avg20}}。
+    hist_amount: {code: [近 N 日 amount 序列]} 供量比计算。"""
     out = {c: {"ma5": None, "ma10": None, "ma20": None, "ma60": None,
                "bullish_align": False, "volume_breakout": False,
                "bearish": False, "converged": False, "need_history": False,
                "last_vol": None, "vol_avg20": None} for c in codes}
+    hist_amount: dict[str, list] = {}
     if not codes:
-        return out
+        return out, hist_amount
     try:
         from backtest import signals as _sig
-        close, amount = _sig._uni_panels(universe, codes)
+        # stock_daily.symbol 是 sh600519 格式，但 codes 来自 spot(纯6位代码)。
+        # 传入 _uni_panels 前必须加前缀，否则 symbol 过滤全空。
+        prefixed = [_add_prefix(c) for c in codes]
+        close, amount = _sig._uni_panels(universe, prefixed)
     except Exception:
-        return out
+        for c in codes:
+            out[c]["need_history"] = True
+        return out, hist_amount
+    # 无历史(从没拉过 stock_daily) → 按需从 TDX 补拉日 K 入库后重算。
+    missing = _missing_history_codes(close, codes, 60)
+    if missing:
+        # codes 已按涨幅降序粗筛；只补最靠前的小名单，避免 200 股逐只串行
+        # 占满 TDX 单连接锁。未补到的股票继续诚实标记 need_history。
+        _fill_missing_history(universe, missing[:_HISTORY_FILL_K])
+        try:
+            close, amount = _sig._uni_panels(universe, [_add_prefix(c) for c in codes])
+        except Exception:
+            pass
     if close is None or close.empty:
-        return out
+        for c in codes:
+            out[c]["need_history"] = True
+        return out, hist_amount
+    # 构建 hist_amount；历史面板使用 sh600519 格式，而候选列表可能带 sh/sz 前缀。
+    if amount is not None:
+        for c in codes:
+            candidates = (c, _add_prefix(c), _code_key(c))
+            amount_col = next((col for col in candidates if col in amount.columns), None)
+            if amount_col is not None:
+                s = amount[amount_col].dropna().tolist()
+                if len(s) >= 5:
+                    hist_amount[_code_key(c)] = s
     window = max(days, 60)
     for c in codes:
-        if c not in close.columns:
+        candidates = (c, _add_prefix(c), _code_key(c))
+        close_col = next((col for col in candidates if col in close.columns), None)
+        if close_col is None:
             out[c]["need_history"] = True
             continue
-        s = close[c].dropna().tail(window)
+        s = close[close_col].dropna().tail(window)
         if len(s) < 60:
             out[c]["need_history"] = True
             continue
@@ -125,16 +310,19 @@ def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> dict:
         if min(ma5, ma10, ma20) > 0:
             spread = (max(ma5, ma10, ma20) - min(ma5, ma10, ma20)) / min(ma5, ma10, ma20)
             out[c]["converged"] = bool(spread < 0.005)
-        if amount is not None and c in amount.columns:
-            amt = amount[c].dropna()
-            if len(amt) >= 20:
-                last_vol = amt.iloc[-1]
-                vol_avg20 = amt.iloc[-20:].mean()
-                out[c]["last_vol"] = _nan(last_vol)
-                out[c]["vol_avg20"] = _nan(vol_avg20)
-                out[c]["volume_breakout"] = bool(
-                    last_close > ma60 and last_vol >= 2 * vol_avg20)
-    return out
+        if amount is not None:
+            amount_col = next((col for col in (c, _add_prefix(c), _code_key(c))
+                               if col in amount.columns), None)
+            if amount_col is not None:
+                amt = amount[amount_col].dropna()
+                if len(amt) >= 20:
+                    last_vol = amt.iloc[-1]
+                    vol_avg20 = amt.iloc[-20:].mean()
+                    out[c]["last_vol"] = _nan(last_vol)
+                    out[c]["vol_avg20"] = _nan(vol_avg20)
+                    out[c]["volume_breakout"] = bool(
+                        last_close > ma60 and last_vol >= 2 * vol_avg20)
+    return out, hist_amount
 
 
 def _step3_pass(info: dict) -> bool:
@@ -180,38 +368,109 @@ def _code_key(code) -> str:
     return s.zfill(6) if s.isdigit() else s
 
 
+def _add_prefix(code) -> str:
+    """给纯 6 位代码加 sh/sz 前缀，匹配 stock_daily.symbol 列格式。"""
+    c = _code_key(str(code))
+    if not c or not c.isdigit():
+        return str(code)
+    if c.startswith(("5", "6", "9")):
+        return "sh" + c
+    return "sz" + c
+
+
 def _rank_sector_flow(sff: list) -> list[dict]:
-    """按行业今日主力净流入降序排名，保留名称和排名。"""
-    ranked = sorted(
-        [x for x in (sff or []) if x.get("name")],
-        key=lambda x: _to_f(x.get("main_net_inflow")) or -1e18,
-        reverse=True,
-    )
+    """按行业今日主力净流入降序排名，保留名称和排名。
+
+    资金流字段为空时不把所有板块伪装成同一排名；调用方会再用 TDX
+    成员实时涨幅构造机械热度排名。
+    """
+    valid = [x for x in (sff or [])
+             if x.get("name") and _to_f(x.get("main_net_inflow")) is not None]
+    ranked = sorted(valid, key=lambda x: _to_f(x.get("main_net_inflow")), reverse=True)
     return [{"name": x.get("name"), "rank": i + 1} for i, x in enumerate(ranked)]
 
 
-def _board_members_batch(board_names: list[str]) -> dict[str, list[str]]:
-    """按需取得板块成分股，返 board→归一化 code 列表。
+def _rank_tdx_blocks(block_members: dict[str, list[str]],
+                     spot_by_code: dict[str, dict],
+                     quote_by_code: dict[str, dict] | None = None) -> list[dict]:
+    """用 TDX 板块成员的实时涨幅/涨停扩散计算板块热度排名。
 
-    `industry_board` 只存板块汇总，没有 members/stocks 列；不能假装从该表反查。
-    成分股接口本身是按需采集，失败时返回空并让 step5 诚实不通过。
+    TDX 板块文件提供成员关系，stock_spot/TDX quote 提供当日价格；这里是
+    机械横截面热度，不等同主力资金流。成员缺少行情时跳过，不伪造涨幅。
     """
+    def _change(row, quote):
+        value = _to_f((row or {}).get("change_pct"))
+        if value is not None:
+            return value
+        price = _to_f((quote or {}).get("price"))
+        close = _to_f((quote or {}).get("last_close"))
+        if price is not None and close is not None and close > 0:
+            return (price - close) / close * 100.0
+        return None
+
+    rows = []
+    for name, members in (block_members or {}).items():
+        changes = [_change(spot_by_code.get(_code_key(c)),
+                           (quote_by_code or {}).get(_code_key(c)))
+                   for c in members]
+        changes = [x for x in changes if x is not None]
+        if not changes:
+            continue
+        zt = sum(x >= 9.8 for x in changes)
+        positive = sum(x > 0 for x in changes)
+        rows.append({"name": name, "heat": float(np.mean(changes)),
+                     "zt": zt, "up": positive, "coverage": len(changes)})
+    rows.sort(key=lambda x: (x["heat"], x["zt"], x["up"]), reverse=True)
+    return [{"name": x["name"], "rank": i + 1, "board_zt_count": x["zt"],
+             "board_heat": _nan(x["heat"]), "member_coverage": x["coverage"]}
+            for i, x in enumerate(rows)]
+
+
+def _board_members_batch(board_names: list[str], spot_by_code: dict | None = None) -> dict[str, list[str]]:
+    """按需取得板块成分股，优先通达信板块文件，失败再用既有板块源。"""
     if not board_names:
         return {}
     try:
+        tdx = pytdx_client.get_block_members("industry")
+    except Exception:
+        tdx = {}
+    if tdx:
+        # TDX 的行业文件本身是行业/概念混合分类；只取请求板名精确或包含命中。
+        out = {}
+        for board in board_names:
+            names = [name for name in tdx if name == board or name in board or board in name]
+            members = []
+            for name in sorted(names, key=len, reverse=True):
+                members.extend(_code_key(c) for c in tdx.get(name, []))
+            out[str(board)] = list(dict.fromkeys(c for c in members if c))
+        # 不要用 any(out.values()) 短路的降级：TDX 缺少"通信设备""汽车零部件"
+        # 等常见行业板块，部分匹配不应阻挡其他板块从 board_stocks 补全。
+        missing = [b for b in board_names if not out.get(b)]
+        if not missing:
+            return out
+        # 对缺失板块从 board_stocks 降级补全
+        try:
+            from data import board_stocks
+        except Exception:
+            return out
+        for board in missing:
+            try:
+                rows = board_stocks.fetch_constituents(board, "行业") or []
+                members = [_code_key(row.get("code") or row.get("raw_code")) for row in rows]
+                out[str(board)] = list(dict.fromkeys(c for c in members if c))
+            except Exception:
+                out[str(board)] = []
+        return out
+    try:
         from data import board_stocks
     except Exception:
-        return {}
+        return {str(board): [] for board in board_names}
     out = {}
     for board in board_names:
         try:
             rows = board_stocks.fetch_constituents(board, "行业") or []
-            members = []
-            for row in rows:
-                key = _code_key(row.get("code") or row.get("raw_code"))
-                if key:
-                    members.append(key)
-            out[str(board)] = list(dict.fromkeys(members))
+            members = [_code_key(row.get("code") or row.get("raw_code")) for row in rows]
+            out[str(board)] = list(dict.fromkeys(c for c in members if c))
         except Exception:
             out[str(board)] = []
     return out
@@ -240,7 +499,7 @@ def _step5_pass(code: str, ranked_sectors: list[dict], board_members: dict,
             if chg is not None and chg >= 9.8:
                 zt += 1
         base["board_zt_count"] = zt
-        return base["board_rank"] <= 5 and zt >= 2, base
+        return bool(base["board_rank"] is not None and base["board_rank"] <= 5 and zt >= 2), base
     return False, base
 
 
@@ -412,8 +671,9 @@ def nextday_strong_rank(universe: str = "stock",
         st_map = {}
     st_set = set(st_map)
     if codes:
-        cset = {str(c) for c in codes}
-        spot_all = [s for s in spot_all if str(s.get("code")) in cset]
+        cset = {_code_key(c) for c in codes}
+        spot_all = [s for s in spot_all
+                    if _code_key(s.get("code")) in cset]
 
     if not spot_all:
         base["note"] = "stock_spot 为空，先 /api/refresh 采集"
@@ -425,9 +685,8 @@ def nextday_strong_rank(universe: str = "stock",
     _missing = [f for f in ("turnover_rate", "circulating_market_cap", "pe", "volume_ratio")
                 if not any(s.get(f) is not None for s in spot_all)]
     if _missing:
-        base["note"] = (f"关键字段缺失: {', '.join(_missing)}——"
-                        f"当前 spot 源(新浪)不含这些字段,"
-                        f"设 SCREENER_HTTPS_PROXY 代理后 /api/refresh 走东财可补全")
+        base["note"] = (f"原始 spot 缺少: {', '.join(_missing)}；"
+                        f"本次优先用 TDX 财务概要/行情补全，仍无数据的股票按缺失处理")
 
     median_chg = _median([_to_f(s.get("change_pct")) for s in all_spot])
     base["market_median_chg"] = _nan(median_chg)
@@ -446,22 +705,64 @@ def nextday_strong_rank(universe: str = "stock",
     else:
         cand = spot_all
 
-    codes_k = [str(s.get("code")) for s in cand]
+    # 从这里开始统一使用纯 6 位代码；否则前缀 spot 会让 MA/step3
+    # 的键与后续 item 键分裂，表现为历史形态全部缺失。
+    codes_k = [_code_key(s.get("code")) for s in cand]
+    # 盘口请求可以批量覆盖全部粗筛候选；财务概要仍限前 N，避免逐股财务调用
+    # 把未进入财务小名单的股票误显示为 quote 缺失并影响五因子评分。
+    tdx_codes = codes_k[:_TDX_ENRICH_K]
+    quote_codes = codes_k
 
-    # step3 批量 MA
-    ma_info = _ma_arrange_batch(universe, codes_k, days)
+    # step3 批量 MA + 历史量(供量比)；兼容旧测试/mock 只返 ma_info dict
+    _ma_result = _ma_arrange_batch(universe, codes_k, days)
+    if isinstance(_ma_result, tuple):
+        ma_info, hist_amount = _ma_result
+    else:
+        ma_info, hist_amount = _ma_result, {}
+    # 兼容历史 mock/旧调用返回 sh/sz 前缀键，和候选纯代码统一。
+    ma_info = {_code_key(k): v for k, v in (ma_info or {}).items()}
+    hist_amount = {_code_key(k): v for k, v in (hist_amount or {}).items()}
 
-    # TDX 盘口因子：仅对候选小名单取实时五档，失败时该因子缺失而非零分
+    # TDX 盘口 + 财务字段：实时行情(五档) + 市值/PE/换手/量比机械补全
     quote_by_code = {}
+    fin_by_code = {}
+    pure_codes_k = list(dict.fromkeys(_code_key(c) for c in tdx_codes if _code_key(c)))
+    pure_quote_codes = list(dict.fromkeys(_code_key(c) for c in quote_codes if _code_key(c)))
     try:
-        from data import pytdx_client
-        quote_by_code = {str(q.get("code")): q
-                         for q in pytdx_client.get_quote(codes_k)
+        quote_by_code = {_code_key(q.get("code")): q
+                         for q in pytdx_client.get_quote(pure_quote_codes)
                          if q.get("code")}
     except Exception:
         quote_by_code = {}
+    # 单股失败不影响其余股票；TDX 服务器偶发返回空/异常时保留已成功结果。
+    # 财务概要覆盖全部粗筛候选，确保候选池第 N 只也能有换手率/市值/PE。
+    for c in pure_quote_codes:
+        try:
+            fin_by_code[c] = pytdx_client.get_finance_info(c) or {}
+        except Exception:
+            fin_by_code[c] = {}
 
-    # step5 板块助攻: 行业资金流排名 + 按需取得前5热板块成分股
+    # 字段补全(值优先合并进 spot；新浪源缺 换手/市值/PE/量比 用 TDX 机械算出)
+    spot_by_code_raw = {_code_key(s.get("code")): s for s in all_spot if s.get("code")}
+    _rich_map = {_code_key(c): c for c in codes_k}
+    enriched = []
+    for s in cand:
+        k = _code_key(s.get("code"))
+        if k in _rich_map:
+            # 保留采集快照涨幅供门槛判定；TDX 最新价用于展示与连续评分。
+            s = dict(s)
+            s["_screen_change_pct"] = s.get("change_pct")
+            s = _tdx_rich_enrich(s, quote_by_code, fin_by_code, hist_amount)
+        # spot 可能返回 sh/sz 前缀，内部统一使用纯 6 位代码，避免
+        # step/MA/板块/TDX 结果分别以不同键查找而导致候选被误判。
+        if k:
+            s = dict(s)
+            s["code"] = k
+        enriched.append(s)
+    cand = enriched
+
+    # step5 板块助攻：资金流有效时按行业净流入排名；资金流字段为空/不可用时，
+    # 改用 TDX 板块成员 + 实时行情涨幅构造机械热度，避免 step5 整列缺失。
     try:
         sff = db.query_rows("sector_fund_flow",
                             where="sector_type = ? AND indicator = ?",
@@ -469,11 +770,27 @@ def nextday_strong_rank(universe: str = "stock",
     except Exception:
         sff = []
     ranked_sectors = _rank_sector_flow(sff)
-    top5 = [s["name"] for s in ranked_sectors[:5] if s.get("name")]
-    # 批量取前5板块成员列表(按需,可能触网)
-    board_members = _board_members_batch(top5) if top5 else {}
-    # spot_by_code 索引: 归一化 6 位纯代码 → spot dict
     spot_by_code = {_code_key(s.get("code")): s for s in all_spot if s.get("code")}
+    if not ranked_sectors:
+        try:
+            tdx_blocks = pytdx_client.get_block_members("industry")
+        except Exception:
+            tdx_blocks = {}
+        ranked_sectors = _rank_tdx_blocks(tdx_blocks, spot_by_code,
+                                           quote_by_code)
+    top5 = [s["name"] for s in ranked_sectors[:5] if s.get("name")]
+    # 批量取前5板块成员列表，优先 TDX，失败再用既有板块源。
+    board_members = _board_members_batch(top5) if top5 else {}
+    # TDX 行业文件是本地板块/指数混合快照，不能保证覆盖当前候选股。
+    # 没有可匹配的板块成员时，step5 仅标记为不可用，不把整批候选误判为失败；
+    # 有真实行业资金流或可匹配成员时仍严格执行前5+至少2只涨停门槛。
+    candidate_keys = {_code_key(s.get("code")) for s in cand}
+    board_gate_available = bool(
+        ranked_sectors and any(
+            candidate_keys.intersection(_code_key(c) for c in (board_members.get(name) or []))
+            for name in top5
+        )
+    )
 
     # 先计算每个因子的原始值，再做横截面 rank-pct；不把缺失伪装成 0。
     factor_maps = {name: {} for name in _FACTOR_WEIGHTS}
@@ -484,12 +801,16 @@ def nextday_strong_rank(universe: str = "stock",
         code = str(s.get("code"))
         mi = ma_info.get(code, {})
         s5, bd = _step5_pass(code, ranked_sectors, board_members, spot_by_code)
+        if not board_gate_available:
+            # 板块源不可用时诚实保留空字段，但不让缺失数据阻断其它因子。
+            s5 = True
         board_by_code[code] = bd
         pass_by_code[code] = s5
         factor_maps["price_volume"][code] = _factor_price_volume(s, median_chg)
         factor_maps["liquidity_scale"][code] = _factor_liquidity_scale(s)
         factor_maps["trend"][code] = _factor_trend(mi)
-        factor_maps["quote"][code] = _quote_factor(quote_by_code.get(code))
+        factor_maps["quote"][code] = _quote_factor(
+            quote_by_code.get(_code_key(code)) or quote_by_code.get(code))
         factor_maps["board_assist"][code] = _factor_board(s5, bd)
 
     scores, factor_scores, coverage = _weighted_score(factor_maps, codes_k)
@@ -499,7 +820,10 @@ def nextday_strong_rank(universe: str = "stock",
         name = s.get("name") or code
         mi = ma_info.get(code, {})
         bd = board_by_code.get(code, {})
-        s1 = _step1_pass(s, p)
+        screen_s = dict(s)
+        if screen_s.get("_screen_change_pct") is not None:
+            screen_s["change_pct"] = screen_s["_screen_change_pct"]
+        s1 = _step1_pass(screen_s, p)
         s2 = _step2_pass(s, p, st_set)
         s3 = _step3_pass(mi)
         s4 = _step4_score(s)
@@ -517,17 +841,30 @@ def nextday_strong_rank(universe: str = "stock",
             "board": bd.get("board"), "board_rank": bd.get("board_rank"),
             "board_zt_count": bd.get("board_zt_count"),
             "step1_pass": s1, "step2_pass": s2, "step3_pass": s3,
-            "step4_score": s4, "step5_pass": s5,
+            "step4_score": s4, "step4_pass": s4 > 0,
+            "step5_pass": s5,
             "hard_pass": hard,
             "need_history": mi.get("need_history", False),
             "factor_scores": factor_scores.get(code, {}),
             "score_coverage": coverage.get(code, 0.0),
             "quote_available": code in quote_by_code,
+            "data_source": "tdx" if code in quote_by_code else "stock_spot",
             "score": scores.get(code, 0.0),
         })
 
-    items.sort(key=lambda x: (x["score"], x["hard_pass"]), reverse=True)
-    items = items[:max(0, limit)]
+    # step4 为连续量价分，正分即通过；单独保留五步全通过清单。
+    passed_items = [it for it in items if (
+        it["step1_pass"] and it["step2_pass"] and it["step3_pass"]
+        and it["step4_pass"] and it["step5_pass"]
+    )]
+    passed_items.sort(key=lambda x: (x["score"], x["hard_pass"]), reverse=True)
+    base["passed_items"] = passed_items[:max(0, limit)]
+    diagnostic_items = sorted(items, key=lambda x: (x["score"], x["hard_pass"]), reverse=True)
+    base["all_items"] = diagnostic_items[:max(0, limit)]
+    base["rejected_items"] = [it for it in diagnostic_items if it not in passed_items]
+    if not base["passed_items"]:
+        base["note"] = "当前数据条件下没有五步全部通过的股票"
+    items = base["passed_items"]
     for i, it in enumerate(items):
         it["rank"] = i + 1
 

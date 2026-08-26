@@ -151,13 +151,19 @@ def backtest_signals(universe: str, codes: list[str],
                      signal_types: list[str] | None = None,
                      k_days: int = 5, benchmark: str | None = "sh000300",
                      min_hits: int = 1, stop_loss: float | None = None,
-                     fee_bps: float = 0) -> dict:
+                     fee_bps: float = 0,
+                     execution_mode: str = "close",
+                     open_prices: pd.DataFrame | None = None) -> dict:
     """历史胜率回测：对每信号扫历史每个交易日 t，若 t 日触发则记 t→t+k 收益。
     min_hits≥2 时追加"combo≥N"共振行(同日多信号触发)；stop_loss 为止损比例(如 0.08)，
     用前视 k 日 low 判定是否触及并截断收益；fee_bps 为单边费率(bp)，双边扣。
     合规：历史触发统计事实，非预测，非买卖点。"""
     if not codes:
         return {"error": "需提供 codes(已抓历史的标的)"}
+    if execution_mode not in {"close", "next_open"}:
+        raise ValueError("execution_mode must be 'close' or 'next_open'")
+    if execution_mode == "next_open" and open_prices is None:
+        raise ValueError("next_open mode requires open_prices")
     signal_types = signal_types or ["ma_breakout", "golden_cross", "volume_surge",
                                    "rsi_oversold", "momentum_up"]
     panels = _uni_panels(universe, codes, with_ohlc=stop_loss is not None)
@@ -177,8 +183,14 @@ def backtest_signals(universe: str, codes: list[str],
     rsi = _rsi(close, 14)
     vol_avg5 = amount.rolling(5).mean() if amount is not None else None
     mom20 = close.pct_change(20)
-    # 前视收益：默认 close[t+k]/close[t]-1；stop_loss 时用前视 k 日 low 判止损截断
-    fwd = _forward_returns(close, k_days, stop_loss, fee_bps, low)
+    # 前视收益：默认 close[t+k]/close[t]-1；next_open 使用 t+1 开盘入场、t+k+1 开盘退出
+    if execution_mode == "next_open":
+        op = open_prices.reindex(close.index).reindex(columns=close.columns)
+        fwd = op.shift(-(k_days + 1)) / op.shift(-1) - 1
+        if fee_bps:
+            fwd = fwd - 2 * fee_bps / 1e4
+    else:
+        fwd = _forward_returns(close, k_days, stop_loss, fee_bps, low)
 
     bench_fwd = None
     if benchmark:
@@ -258,4 +270,5 @@ def backtest_signals(universe: str, codes: list[str],
         })
     return {"rows": out, "n_scanned": len(close.columns),
             "k_days": k_days, "signals": eval_keys,
-            "min_hits": min_hits, "stop_loss": stop_loss, "fee_bps": fee_bps}
+            "min_hits": min_hits, "stop_loss": stop_loss, "fee_bps": fee_bps,
+            "execution_mode": execution_mode}

@@ -65,6 +65,63 @@ def test_comments_route(monkeypatch):
     assert "cand_disclaimer" in r.json()
 
 
+def test_resolve_stock_code_exact_and_fuzzy_name(monkeypatch):
+    """TDX 深查输入支持中文名称精确/包含匹配。"""
+    from api import server
+
+    def _q(table, where="", params=(), limit=0, **kw):
+        assert table == "stock_spot"
+        needle = str(params[0] if params else "").strip("%")
+        rows = [{"code": "000001", "name": "平安银行"},
+                {"code": "000002", "name": "万科A"}]
+        return [row for row in rows
+                if needle in row["name"] or needle in row["code"]]
+
+    monkeypatch.setattr(server.db, "query_rows", _q)
+    raw, code = server._resolve_stock_code("平安银行")
+    assert raw == "平安银行" and code == "000001"
+    raw, code = server._resolve_stock_code("平安")
+    assert raw == "平安" and code == "000001"
+    raw, code = server._resolve_stock_code("sz000001")
+    assert raw == "sz000001" and code == "000001"
+    raw, code = server._resolve_stock_code("不存在")
+    assert raw == "不存在" and code is None
+
+
+def test_tdx_routes_accept_fuzzy_name(monkeypatch):
+    """TDX 行情/公司资料路由将中文名称解析为纯代码后再请求。"""
+    from api import server
+
+    monkeypatch.setattr(server.db, "query_rows",
+                        lambda table, **kw: [{"code": "000001", "name": "平安银行"}]
+                        if table == "stock_spot" else [])
+    monkeypatch.setattr(server.pytdx_client, "get_quote",
+                        lambda codes: [{"code": "000001", "price": 11.2}])
+    info_calls = []
+    monkeypatch.setattr(server.pytdx_client, "get_company_info",
+                        lambda code, category: info_calls.append((code, category)) or
+                        {"code": code, "category": category, "ok": True,
+                         "content": "主力追踪", "err": ""})
+
+    quote = client.get("/api/tdx/quote?code=平安")
+    assert quote.status_code == 200
+    assert quote.json()["data"]["code"] == "000001"
+    company = client.get("/api/tdx/company-info?code=平安&category=主力追踪")
+    assert company.status_code == 200
+    assert company.json()["data"]["code"] == "000001"
+    assert info_calls == [("000001", "主力追踪")]
+
+
+def test_tdx_name_not_found_is_explicit(monkeypatch):
+    from api import server
+    monkeypatch.setattr(server.db, "query_rows", lambda *a, **kw: [])
+    r = client.get("/api/tdx/quote-analysis?code=不存在")
+    assert r.status_code == 200
+    body = r.json()["data"]
+    assert body["quote_available"] is False
+    assert body["error"] == "未找到匹配的股票代码"
+
+
 def test_market_route(monkeypatch):
     """市场温度路由返回结构 + disclaimer + 空数据降级。"""
     from data import market

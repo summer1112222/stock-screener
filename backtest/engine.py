@@ -25,22 +25,30 @@ def run_backtest(close: pd.DataFrame, factor: pd.DataFrame,
                  topn: int = 10, freq: str = "M",
                  benchmark: pd.Series | None = None,
                  cost_bps: float = 30.0,
-                 delisted_codes: list[str] | None = None) -> dict:
+                 delisted_codes: list[str] | None = None,
+                 open_prices: pd.DataFrame | None = None,
+                 execution_mode: str = "close") -> dict:
     """topN 等权多组合回测。close/factor 同形(date×code)。
     返回 {equity_curve, benchmark_curve, daily_returns, turnover, rebalance_dates,
     topn, cost_bps, total_cost_drag, delisted_declared}。
     cost_bps 为双边换手成本率(基点)；turnover_d 已含买+卖两侧，drag = tov * cost_bps/10000。
     """
     idx = pd.Index(sorted(close.index.intersection(factor.index)))
+    if execution_mode not in {"close", "next_open"}:
+        raise ValueError("execution_mode must be 'close' or 'next_open'")
+    if execution_mode == "next_open" and open_prices is None:
+        raise ValueError("next_open mode requires open_prices")
     close = close.reindex(idx)
     factor = factor.reindex(idx)
-    daily_ret = close.pct_change()
+    prices = close if execution_mode == "close" else open_prices.reindex(idx).reindex(columns=close.columns)
+    daily_ret = prices.pct_change()
 
     rebal = rebalance_dates(idx, freq)
     if len(rebal) < 2:
         return {"equity_curve": {}, "benchmark_curve": {}, "daily_returns": {},
                 "turnover": None, "rebalance_dates": rebal, "topn": topn,
                 "cost_bps": float(cost_bps), "total_cost_drag": 0.0,
+                "execution_mode": execution_mode,
                 "delisted_declared": len(delisted_codes or [])}
 
     # 每个调仓日的等权 topN 组合(用该日因子截面排名)
@@ -110,5 +118,6 @@ def run_backtest(close: pd.DataFrame, factor: pd.DataFrame,
         "topn": topn,
         "cost_bps": float(cost_bps),
         "total_cost_drag": round(total_cost_drag, 6),
+        "execution_mode": execution_mode,
         "delisted_declared": len(delisted_codes or []),
     }

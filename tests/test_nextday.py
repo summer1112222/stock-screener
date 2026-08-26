@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """nextday 5 步流程单测(step1-5 硬剔除+step4 软打分混合)。
 mock db.query_rows / _ma_arrange_batch / _board_members_batch，不触网。"""
+import pytest
 import screener.nextday as nd
 
 # ------------------------------------------------------------------
@@ -95,6 +96,9 @@ def _setup(monkeypatch):
     monkeypatch.setattr(nd.db, "query_rows", _mock_qr)
     monkeypatch.setattr(nd, "_ma_arrange_batch", _mock_ma)
     monkeypatch.setattr(nd, "_board_members_batch", _mock_board_members)
+    # 次日模块测试不触网：TDX 补全路径另行用 mock 覆盖。
+    monkeypatch.setattr(nd.pytdx_client, "get_quote", lambda codes: [])
+    monkeypatch.setattr(nd.pytdx_client, "get_finance_info", lambda code: {})
     nd._CACHE.clear()
 
 
@@ -106,7 +110,7 @@ def test_basic_5factor(monkeypatch):
     """全通过股(600001)排第一，score 是连续因子合成分。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    assert r["count"] == 8
+    assert r["count"] == 3
     top = r["items"][0]
     assert top["code"] == "600001"
     assert top["hard_pass"] == 4
@@ -123,8 +127,8 @@ def test_sort_order(monkeypatch):
     """排序按因子分降序，再按 hard_pass 降序。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    for i in range(len(r["items"]) - 1):
-        a, b = r["items"][i], r["items"][i + 1]
+    for i in range(len(r["all_items"]) - 1):
+        a, b = r["all_items"][i], r["all_items"][i + 1]
         if a["score"] == b["score"]:
             assert a["hard_pass"] >= b["hard_pass"]
         else:
@@ -139,7 +143,7 @@ def test_step1_fail_low_change(monkeypatch):
     """涨幅<5% → step1 不通过。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(codes=["600001", "600002"], limit=10)
-    b = [i for i in r["items"] if i["code"] == "600002"][0]
+    b = [i for i in r["all_items"] if i["code"] == "600002"][0]
     assert b["step1_pass"] is False
     assert b["hard_pass"] <= 3  # step1 不通过
 
@@ -148,7 +152,7 @@ def test_step2_fail_high_pe(monkeypatch):
     """PE>150 → step2 不通过。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    c = [i for i in r["items"] if i["code"] == "600003"][0]
+    c = [i for i in r["all_items"] if i["code"] == "600003"][0]
     assert c["step2_pass"] is False
 
 
@@ -156,7 +160,7 @@ def test_step2_fail_st(monkeypatch):
     """ST 股票 → step2 不通过。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    g = [i for i in r["items"] if i["code"] == "600007"][0]
+    g = [i for i in r["all_items"] if i["code"] == "600007"][0]
     assert g["step2_pass"] is False
 
 
@@ -164,7 +168,7 @@ def test_step3_fail_bearish(monkeypatch):
     """空头排列 → step3 不通过。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    d = [i for i in r["items"] if i["code"] == "600004"][0]
+    d = [i for i in r["all_items"] if i["code"] == "600004"][0]
     assert d["step3_pass"] is False
 
 
@@ -172,7 +176,7 @@ def test_step4_score_range(monkeypatch):
     """step4_score 在 0-100 之间。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    for it in r["items"]:
+    for it in r["all_items"]:
         assert 0 <= it["step4_score"] <= 100
 
 
@@ -180,7 +184,7 @@ def test_step4_score_low_volume_ratio(monkeypatch):
     """低量比 → step4_score 较低。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    e = [i for i in r["items"] if i["code"] == "600005"][0]
+    e = [i for i in r["all_items"] if i["code"] == "600005"][0]
     # 600005: vol_ratio=1.2, change_pct=6.5
     # a=clip((1.2-1.0)/1.5)=0.133, b=1.0 -> (0.5*0.133+0.5*1)*100=56.67
     assert e["step4_score"] < 80  # 低量比导致低分
@@ -190,7 +194,7 @@ def test_step5_pass_board_top5_with_zt(monkeypatch):
     """板块热度前5且至少2只涨停 → step5 通过。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
-    top = [i for i in r["items"] if i["code"] == "600001"][0]
+    top = [i for i in r["all_items"] if i["code"] == "600001"][0]
     assert top["step5_pass"] is True
     assert top["board"] == "电池"
     assert top["board_rank"] == 1
@@ -202,7 +206,7 @@ def test_step5_fail_not_top5(monkeypatch):
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
     # 600006 在半导体(rank4, top5 但 0 ZT)
-    f = [i for i in r["items"] if i["code"] == "600006"][0]
+    f = [i for i in r["all_items"] if i["code"] == "600006"][0]
     # 半导体 rank 4 top5, 但 0 ZT → step5 不通过
     assert f["step5_pass"] is False
 
@@ -225,8 +229,30 @@ def test_codes_filter(monkeypatch):
     """codes 限定 → 只返回指定股票。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(codes=["600001", "600005"], limit=10)
-    assert r["count"] == 2
-    assert {i["code"] for i in r["items"]} == {"600001", "600005"}
+    assert r["count"] == 1
+    assert {i["code"] for i in r["items"]} == {"600001"}
+
+
+def test_codes_filter_accepts_exchange_prefix(monkeypatch):
+    """codes 带 sh/sz 前缀时仍能匹配 stock_spot 纯代码。"""
+    _setup(monkeypatch)
+    r = nd.nextday_strong_rank(codes=["sh600001"], limit=10)
+    assert r["count"] == 1
+    assert r["all_items"][0]["code"] == "600001"
+
+
+def test_tdx_quote_request_is_capped(monkeypatch):
+    """TDX 行情请求只覆盖粗筛小名单，避免全市场逐只重试。"""
+    _setup(monkeypatch)
+    seen = []
+
+    def _quote(codes):
+        seen.append(list(codes))
+        return []
+
+    monkeypatch.setattr(nd.pytdx_client, "get_quote", _quote)
+    nd.nextday_strong_rank(limit=10)
+    assert sum(len(batch) for batch in seen) <= nd._TDX_ENRICH_K
 
 
 def test_cache_hit(monkeypatch):
@@ -237,7 +263,7 @@ def test_cache_hit(monkeypatch):
     monkeypatch.setattr(nd.db, "query_rows",
                         lambda table, **k: [] if table == "stock_spot" else [])
     r = nd.nextday_strong_rank(limit=10)
-    assert r["count"] == 8
+    assert r["count"] == 3
 
 
 def test_limit_works(monkeypatch):
@@ -245,7 +271,30 @@ def test_limit_works(monkeypatch):
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=3)
     assert r["count"] == 3
-    assert len(r["items"]) == 3
+    assert len(r["all_items"]) == 3
+
+
+def test_only_five_step_passes_are_returned(monkeypatch):
+    """最终结果只保留五步全部通过的股票。"""
+    _setup(monkeypatch)
+    r = nd.nextday_strong_rank(limit=10)
+    assert r["count"] == 3
+    assert {item["code"] for item in r["items"]} == {"600001", "600010", "600011"}
+    for item in r["items"]:
+        assert item["step1_pass"] is True
+        assert item["step2_pass"] is True
+        assert item["step3_pass"] is True
+        assert item["step4_pass"] is True
+        assert item["step5_pass"] is True
+
+
+def test_no_five_step_pass_returns_empty(monkeypatch):
+    """没有五步全通过股票时返回空结果并说明原因。"""
+    _setup(monkeypatch)
+    r = nd.nextday_strong_rank(codes=["600002"], limit=10)
+    assert r["count"] == 0
+    assert r["items"] == []
+    assert "五步" in r.get("note", "")
 
 
 def test_market_median_chg(monkeypatch):
@@ -329,6 +378,18 @@ def test_rank_sector_flow():
     assert ranked[-1]["rank"] == 6
 
 
+def test_rank_tdx_blocks_uses_quote_when_spot_change_missing():
+    """spot 缺涨幅时，TDX quote 的 price/last_close 应补足板块热度。"""
+    blocks = {"新能源": ["600001", "600010"]}
+    spot = {"600001": {"change_pct": None},
+            "600010": {"change_pct": 10.0}}
+    quotes = {"600001": {"price": 11.0, "last_close": 10.0}}
+    ranked = nd._rank_tdx_blocks(blocks, spot, quotes)
+    assert ranked[0]["name"] == "新能源"
+    assert ranked[0]["board_zt_count"] == 2
+    assert ranked[0]["member_coverage"] == 2
+
+
 def test_nan_guard():
     """_nan 过滤 NaN/Inf/None。"""
     import math
@@ -364,4 +425,218 @@ def test_weighted_score_renormalizes_missing():
 def test_exclude_st_false(monkeypatch):
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(codes=["600007"], exclude_st=False)
-    assert r["items"][0]["step2_pass"] is True
+    assert r["all_items"][0]["step2_pass"] is True
+
+
+def test_finance_derived_fields():
+    """TDX 财务概要+行情可补流通市值、总市值、换手率；亏损股 PE 为空。"""
+    r = nd._finance_derived(
+        {"liutongguben": 1_000_000_000, "zongguben": 1_200_000_000,
+         "jinglirun": -100_000_000},
+        {"price": 10.0, "vol": 500_000},
+    )
+    assert r["circulating_market_cap"] == 100.0
+    assert r["total_market_cap"] == 120.0
+    assert r["turnover_rate"] == 5.0
+    assert r["pe"] is None
+
+
+def test_rich_enrich_uses_spot_amount_fallback():
+    """TDX quote 缺 vol/amount 时用新浪成交额推导换手率。"""
+    r = nd._tdx_rich_enrich(
+        {"code": "600001", "latest_price": 10.0, "turnover_amount": 50_000_000},
+        {},
+        {"600001": {"liutongguben": 1_000_000_000}},
+        {},
+    )
+    assert r["turnover_rate"] == 0.5
+
+
+def test_ma_arrange_matches_prefixed_history(monkeypatch):
+    """spot 纯代码也应能取到 stock_daily 的 sh/sz 前缀历史列。"""
+    import pandas as pd
+    from backtest import signals
+
+    captured = {}
+
+    def _uni_panels(universe, codes):
+        captured["codes"] = codes
+        dates = pd.date_range("2026-01-01", periods=60)
+        close = pd.DataFrame(
+            {"sh600001": [10 + i * 0.01 for i in range(60)]},
+            index=dates,
+        )
+        amount = pd.DataFrame({"sh600001": [100.0] * 60}, index=dates)
+        return close, amount
+
+    monkeypatch.setattr(signals, "_uni_panels", _uni_panels)
+    info, hist = nd._ma_arrange_batch("stock", ["600001"], 60)
+    assert captured["codes"] == ["sh600001"]
+    assert info["600001"]["need_history"] is False
+    assert hist["600001"] == [100.0] * 60
+
+
+def test_ma_arrange_auto_fetch_when_missing(monkeypatch):
+    """无历史 → 触发 from-TDX 补拉入库后重算，步3与量比均可算出。"""
+    import pandas as pd
+    from backtest import signals
+
+    panel_calls = []
+
+    def _uni_panels(universe, codes):
+        panel_calls.append(1)
+        if len(panel_calls) == 1:
+            return pd.DataFrame(), pd.DataFrame()
+        dates = pd.date_range("2026-01-01", periods=60)
+        close = pd.DataFrame(
+            {"sh600001": [10 + i * 0.02 for i in range(60)]},
+            index=dates,
+        )
+        amount = pd.DataFrame({"sh600001": [100.0] * 60}, index=dates)
+        return close, amount
+
+    calls = []
+
+    def _fill(uni, codes):
+        calls.extend(codes)
+        # mock 补库成功；第二次 _uni_panels 返回补齐后的面板。
+        return 1
+
+    monkeypatch.setattr(signals, "_uni_panels", _uni_panels)
+    monkeypatch.setattr(nd, "_fill_missing_history", _fill)
+    info, hist = nd._ma_arrange_batch("stock", ["600001"], 60)
+    assert calls == ["600001"]
+    assert info["600001"]["need_history"] is False
+
+
+def test_fill_missing_history_uses_tdx_and_isolates_failures(monkeypatch):
+    """按需补历史走 history.fetch_stock_hist；单股失败不影响其它股票。"""
+    import pandas as pd
+    from data import history
+
+    dates = pd.date_range("2026-01-01", periods=2)
+    calls = []
+
+    def _fetch(symbol, start, end):
+        calls.append(symbol)
+        if symbol == "sz000002":
+            return pd.DataFrame(), False, "tdx unavailable"
+        return pd.DataFrame({
+            "symbol": [symbol, symbol],
+            "date": dates.strftime("%Y-%m-%d"),
+            "open": [10.0, 10.1], "high": [10.2, 10.3],
+            "low": [9.8, 9.9], "close": [10.1, 10.2],
+            "volume": [100.0, 110.0], "amount": [1000.0, 1100.0],
+        }), True, "tdx主源,本地qfq"
+
+    written = []
+    monkeypatch.setattr(history, "fetch_stock_hist", _fetch)
+    monkeypatch.setattr(nd.db, "upsert_rows",
+                        lambda table, rows: written.append((table, list(rows))) or len(written[-1][1]))
+    n = nd._fill_missing_history("stock", ["000001", "000002"])
+    assert n == 1
+    assert sorted(calls) == ["sz000001", "sz000002"]
+    assert len(written) == 1
+    assert written[0][0] == "stock_daily"
+
+
+def test_step5_uses_tdx_block_heat_when_flow_is_missing(monkeypatch):
+    """行业资金流金额全空时，step5 应改用 TDX 成员+行情计算板块热度。"""
+    _setup(monkeypatch)
+
+    def _query(table, where=None, params=None, limit=0, **kw):
+        if table == "sector_fund_flow":
+            return [{"name": "电池", "main_net_inflow": None},
+                    {"name": "新能源", "main_net_inflow": None}]
+        return _mock_qr(table, where=where, params=params, limit=limit, **kw)
+
+    tdx_blocks = {"TDX新能源": ["600001", "600010", "600011"],
+                  "TDX弱板块": ["600002", "600003"]}
+    monkeypatch.setattr(nd.db, "query_rows", _query)
+    monkeypatch.setattr(nd.pytdx_client, "get_block_members",
+                        lambda category="all": tdx_blocks)
+    monkeypatch.setattr(nd, "_board_members_batch",
+                        lambda names: {name: tdx_blocks.get(name, []) for name in names})
+    nd._CACHE.clear()
+
+    r = nd.nextday_strong_rank(codes=["600001", "600010", "600011"], limit=10)
+    top = next(item for item in r["all_items"] if item["code"] == "600001")
+    assert top["board"] == "TDX新能源"
+    assert top["board_rank"] == 1
+    assert top["board_zt_count"] == 2
+    assert top["step5_pass"] is True
+    assert top["factor_scores"]["board_assist"] is not None
+
+
+def test_tdx_quote_availability_handles_prefixed_spot_code(monkeypatch):
+    """spot 使用 sh/sz 前缀时，TDX quote 仍标记为可用。"""
+    _setup(monkeypatch)
+    monkeypatch.setattr(nd.pytdx_client, "get_quote", lambda codes: [
+        {"code": "600001", "price": 31.0, "last_close": 30.0,
+         "vol": 100000, "amount": 120000000},
+    ])
+    nd._CACHE.clear()
+    original = list(_SPOT)
+    try:
+        _SPOT[0]["code"] = "sh600001"
+        r = nd.nextday_strong_rank(codes=["sh600001"], limit=10)
+    finally:
+        _SPOT[0]["code"] = original[0]["code"]
+    item = r["items"][0]
+    assert item["quote_available"] is True
+    assert item["data_source"] == "tdx"
+
+
+def test_tdx_quote_is_primary_candidate_snapshot(monkeypatch):
+    """TDX 行情成功时，次日筛选优先用 TDX 价格与涨跌幅。"""
+    _setup(monkeypatch)
+    monkeypatch.setattr(nd.pytdx_client, "get_quote", lambda codes: [
+        {"code": "600001", "price": 12.0, "last_close": 10.0,
+         "vol": 100000, "amount": 120000000},
+    ])
+    nd._CACHE.clear()
+    r = nd.nextday_strong_rank(codes=["600001"], limit=10)
+    item = r["all_items"][0]
+    assert item["latest_price"] == 12.0
+    assert item["change_pct"] == pytest.approx(20.0)
+    assert item["data_source"] == "tdx"
+
+
+def test_step5_tdx_failure_falls_back_to_board_source(monkeypatch):
+    """TDX 板块文件失败时，仍保留既有 board_stocks 降级链路。"""
+    _setup(monkeypatch)
+    monkeypatch.setattr(nd.pytdx_client, "get_block_members", lambda category="all": {})
+    calls = []
+
+    def _fallback(names, spot_by_code=None):
+        calls.append(list(names))
+        return {name: _BOARD_MEMBERS.get(name, []) for name in names}
+
+    monkeypatch.setattr(nd, "_board_members_batch", _fallback)
+    nd._CACHE.clear()
+    r = nd.nextday_strong_rank(limit=10)
+    top = next(item for item in r["all_items"] if item["code"] == "600001")
+    assert calls and calls[0][0] == "电池"
+    assert top["board"] == "电池"
+    assert top["board_zt_count"] == 2
+
+
+def test_ma_arrange_skip_fetch_when_has_history(monkeypatch):
+    """已有历史 → 不触发 TDX 补拉。"""
+    import pandas as pd
+    from backtest import signals
+
+    def _uni_panels(universe, codes):
+        dates = pd.date_range("2026-01-01", periods=60)
+        close = pd.DataFrame(
+            {"sh600001": [10 + i * 0.01 for i in range(60)]},
+            index=dates,
+        )
+        amount = pd.DataFrame({"sh600001": [100.0] * 60}, index=dates)
+        return close, amount
+
+    monkeypatch.setattr(signals, "_uni_panels", _uni_panels)
+    monkeypatch.setattr(nd, "_fill_missing_history",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应触网")))
+    info, hist = nd._ma_arrange_batch("stock", ["600001"], 60)
+    assert info["600001"]["need_history"] is False

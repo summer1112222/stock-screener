@@ -37,10 +37,19 @@ _TIMEOUT = 8
 _CAT_DAY = 4  # get_security_bars category: 4=日线
 
 
+def _pure_code(code: str) -> str:
+    """统一 TDX 入参：接受 sh/sz/bj 前缀或纯 6 位代码。"""
+    c = str(code or "").strip().lower()
+    for prefix in ("sh", "sz", "bj"):
+        if c.startswith(prefix) and c[len(prefix):].isdigit():
+            return c[len(prefix):]
+    return c
+
+
 def _market(code: str) -> int | None:
     """6 位代码 → 通达信 market 号：5/6/9→沪=1，0/3→深=0，4/8→北交=2。
     北交所 pytdx market 号需实测确认，不确定时返回 None 由调用方降级。"""
-    c = str(code).strip()
+    c = _pure_code(code)
     if len(c) != 6 or not c.isdigit():
         return None
     head = c[0]
@@ -77,15 +86,20 @@ def _get_api():
         if _api is not None and _connected_host:
             # 心跳探测：能取到任意行情即视为活连接
             try:
-                _api.get_security_quotes([(0, "000001")])
-                return _api
+                # 连接未断开不代表行情通道仍可用；部分 TDX 节点会在
+                # TCP 尚存时返回空列表。空响应也必须触发重连，避免
+                # FastAPI 长驻进程一直复用失效连接而新进程却能取到行情。
+                probe = _api.get_security_quotes([(0, "000001")])
+                if probe:
+                    return _api
             except Exception:
-                try:
-                    _api.disconnect()
-                except Exception:
-                    pass
-                _api = None
-                _connected_host = None
+                pass
+            try:
+                _api.disconnect()
+            except Exception:
+                pass
+            _api = None
+            _connected_host = None
         # 重连：轮询服务器池
         api = TdxHq_API()
         for host, port in _SERVERS:
@@ -116,7 +130,7 @@ def get_finance_info(code: str) -> dict:
     code 为 6 位纯代码；失败返空 dict，不让采集流程崩溃。"""
     if not _TDX_OK:
         return {}
-    c = str(code).strip()
+    c = _pure_code(code)
     m = _market(c)
     if m is None:
         return {}
@@ -140,9 +154,10 @@ def get_quote(codes: list[str]) -> list[dict]:
         return []
     pairs = []
     for c in codes:
-        m = _market(c)
+        pure = _pure_code(c)
+        m = _market(pure)
         if m is not None:
-            pairs.append((m, str(c).strip()))
+            pairs.append((m, pure))
     if not pairs:
         return []
     api = _get_api()
@@ -155,12 +170,20 @@ def get_quote(codes: list[str]) -> list[dict]:
             try:
                 df = api.to_df(api.get_security_quotes(batch))
             except Exception:
-                continue
-            if df is None or df.empty:
-                continue
-            for _, r in df.iterrows():
+                # 批量端点失败时仍保留逐只重试机会。
+                df = None
+            rows = [] if df is None or df.empty else list(df.iterrows())
+            # 批量请求偶发只返回空行或不完整结果；对缺失代码逐只重试，
+            # 让次日强势/深查主力优先拿到 TDX 盘口，而不是静默降级为空。
+            valid_codes = set()
+            for _, r in rows:
+                raw_code = r.get("code")
+                if raw_code is not None:
+                    valid_codes.add(str(raw_code).strip())
+                if raw_code is None:
+                    continue
                 out.append({
-                    "code": r.get("code"),
+                    "code": str(raw_code),
                     "price": _nan(r.get("price")),
                     "last_close": _nan(r.get("last_close")),
                     "open": _nan(r.get("open")),
@@ -181,6 +204,40 @@ def get_quote(codes: list[str]) -> list[dict]:
                     "bid_vol4": _nan(r.get("bid_vol4")), "ask_vol4": _nan(r.get("ask_vol4")),
                     "bid_vol5": _nan(r.get("bid_vol5")), "ask_vol5": _nan(r.get("ask_vol5")),
                 })
+            missing = [(m, c) for m, c in batch if c not in valid_codes]
+            for pair in missing:
+                try:
+                    retry_df = api.to_df(api.get_security_quotes([pair]))
+                except Exception:
+                    continue
+                if retry_df is None or retry_df.empty:
+                    continue
+                for _, r in retry_df.iterrows():
+                    raw_code = r.get("code")
+                    if raw_code is None or str(raw_code).strip() in valid_codes:
+                        continue
+                    valid_codes.add(str(raw_code).strip())
+                    out.append({
+                        "code": str(raw_code),
+                        "price": _nan(r.get("price")),
+                        "last_close": _nan(r.get("last_close")),
+                        "open": _nan(r.get("open")),
+                        "high": _nan(r.get("high")),
+                        "low": _nan(r.get("low")),
+                        "vol": _nan(r.get("vol")),
+                        "amount": _nan(r.get("amount")),
+                        "b_vol": _nan(r.get("b_vol")), "s_vol": _nan(r.get("s_vol")),
+                        "bid1": _nan(r.get("bid1")), "ask1": _nan(r.get("ask1")),
+                        "bid2": _nan(r.get("bid2")), "ask2": _nan(r.get("ask2")),
+                        "bid3": _nan(r.get("bid3")), "ask3": _nan(r.get("ask3")),
+                        "bid4": _nan(r.get("bid4")), "ask4": _nan(r.get("ask4")),
+                        "bid5": _nan(r.get("bid5")), "ask5": _nan(r.get("ask5")),
+                        "bid_vol1": _nan(r.get("bid_vol1")), "ask_vol1": _nan(r.get("ask_vol1")),
+                        "bid_vol2": _nan(r.get("bid_vol2")), "ask_vol2": _nan(r.get("ask_vol2")),
+                        "bid_vol3": _nan(r.get("bid_vol3")), "ask_vol3": _nan(r.get("ask_vol3")),
+                        "bid_vol4": _nan(r.get("bid_vol4")), "ask_vol4": _nan(r.get("ask_vol4")),
+                        "bid_vol5": _nan(r.get("bid_vol5")), "ask_vol5": _nan(r.get("ask_vol5")),
+                    })
     return out
 
 
@@ -205,7 +262,7 @@ def get_daily_bars(code: str, count: int = 250) -> pd.DataFrame:
         while got < count:
             want = min(_BATCH, count - got)
             try:
-                bars = api.get_security_bars(_CAT_DAY, m, str(code).strip(), got, want)
+                bars = api.get_security_bars(_CAT_DAY, m, _pure_code(code), got, want)
                 df = api.to_df(bars)
             except Exception:
                 break
@@ -221,8 +278,8 @@ def get_daily_bars(code: str, count: int = 250) -> pd.DataFrame:
     df = df.rename(columns={"vol": "volume", "datetime": "date"})
     df["date"] = df["date"].astype(str).str.slice(0, 10)
     df = df.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
-    df["symbol"] = _project_symbol(code)
-    df["code"] = str(code).strip()
+    df["symbol"] = _project_symbol(_pure_code(code))
+    df["code"] = _pure_code(code)
     keep = [c for c in ("date", "open", "high", "low", "close",
                         "volume", "amount", "symbol", "code") if c in df.columns]
     return df[keep].reset_index(drop=True)
@@ -242,7 +299,8 @@ def get_company_info(code: str, category: str) -> dict:
     if not _TDX_OK:
         base["err"] = _TDX_ERR
         return base
-    m = _market(code)
+    pure = _pure_code(code)
+    m = _market(pure)
     if m is None:
         base["err"] = f"无法识别 market: {code}"
         return base
@@ -252,7 +310,7 @@ def get_company_info(code: str, category: str) -> dict:
         return base
     with _lock:
         try:
-            cats = api.get_company_info_category(m, str(code).strip())
+            cats = api.get_company_info_category(m, pure)
         except Exception as e:
             base["err"] = f"类别查询失败: {e}"
             return base
@@ -268,7 +326,7 @@ def get_company_info(code: str, category: str) -> dict:
     with _lock:
         try:
             content = api.get_company_info_content(
-                m, str(code).strip(),
+                m, pure,
                 target.get("filename"), target.get("start"), target.get("length"))
             base["content"] = content if isinstance(content, str) else str(content)
             base["ok"] = True
@@ -284,7 +342,8 @@ def get_xdxr(code: str) -> pd.DataFrame:
     songzhuangu/peigu/suogu/...（category 1=除权除息,5=股本变化）。"""
     if not _TDX_OK:
         return pd.DataFrame()
-    m = _market(code)
+    pure = _pure_code(code)
+    m = _market(pure)
     if m is None:
         return pd.DataFrame()
     api = _get_api()
@@ -292,7 +351,7 @@ def get_xdxr(code: str) -> pd.DataFrame:
         return pd.DataFrame()
     with _lock:
         try:
-            df = api.to_df(api.get_xdxr_info(m, str(code).strip()))
+            df = api.to_df(api.get_xdxr_info(m, pure))
         except Exception:
             return pd.DataFrame()
     if df is None or df.empty:
@@ -304,7 +363,8 @@ def list_company_categories(code: str) -> list[str]:
     """列某股可取的公司信息类别名（供前端下拉/调试）。"""
     if not _TDX_OK:
         return []
-    m = _market(code)
+    pure = _pure_code(code)
+    m = _market(pure)
     if m is None:
         return []
     api = _get_api()
@@ -312,8 +372,62 @@ def list_company_categories(code: str) -> list[str]:
         return []
     with _lock:
         try:
-            cats = api.get_company_info_category(m, str(code).strip())
+            cats = api.get_company_info_category(m, pure)
         except Exception:
             return []
     return [str(c.get("name")) for c in (cats or [])
             if isinstance(c, dict) and c.get("name")]
+
+
+def get_block_members(category: str = "all") -> dict[str, list[str]]:
+    """从通达信板块文件读取板块→股票代码成员映射。
+
+    category 支持 ``industry``/``concept``/``all``。TDX 的板块文件包含
+    本地板块快照，不含板块资金流；调用方应使用实时行情计算机械热度，不能
+    将此结果描述为机构资金流。获取失败返回空字典，不阻断筛选流程。
+    """
+    if not _TDX_OK:
+        return {}
+    # block.dat=自定义板块+指数组，block_zs.dat=通达信行业分类(行业板块在此)，
+    # block_gn.dat=概念板块。industry 读 block_zs.dat 才能匹配到目标个股。
+    files = {
+        "industry": ("block_zs.dat",),
+        "concept": ("block_gn.dat",),
+        "all": ("block.dat", "block_zs.dat", "block_gn.dat"),
+    }.get(str(category).lower())
+    if not files:
+        return {}
+    api = _get_api()
+    if api is None:
+        return {}
+    try:
+        from pytdx.reader.block_reader import BlockReader, BlockReader_TYPE_FLAT
+    except Exception:
+        return {}
+    out: dict[str, list[str]] = {}
+    try:
+        with _lock:
+            for blockfile in files:
+                meta = api.get_block_info_meta(blockfile) or {}
+                total = int(meta.get("size") or 0)
+                if total <= 0:
+                    continue
+                raw = bytearray()
+                chunk = 0x7530
+                for start in range(0, total, chunk):
+                    piece = api.get_block_info(
+                        blockfile, start, min(chunk, total - start))
+                    if piece:
+                        raw.extend(piece)
+                rows = BlockReader().get_data(raw, BlockReader_TYPE_FLAT)
+                for row in rows:
+                    name = str(row.get("blockname") or "").strip()
+                    code = _pure_code(row.get("code"))
+                    # 文件中偶尔会出现损坏/混入代码的组名；过滤后不猜板名。
+                    if (not name or "\x00" in name or len(name) > 24
+                            or not code.isdigit() or len(code) != 6):
+                        continue
+                    out.setdefault(name, []).append(code)
+    except Exception:
+        return {}
+    return {name: list(dict.fromkeys(codes)) for name, codes in out.items()}
