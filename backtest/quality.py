@@ -45,6 +45,122 @@ def _is_in_session(now: "_dt.datetime | None" = None) -> bool:
     return (930 <= t <= 1130) or (1300 <= t <= 1500)
 
 
+# ------------------------------------------------------------------
+# 数据可信度 / 硬质量门槛 / 风险惩罚（spec 2026-09-05 §3-5）
+# 纯函数，不触网。缺失 vs 负面严格区分：缺失降可信度，负面触发门槛/惩罚。
+# ------------------------------------------------------------------
+_CONF_WEIGHTS = {"spot": .15, "history": .25, "fundamental": .30,
+                 "flow": .20, "research": .10}
+
+
+def _data_confidence(code, spot_row, close, dim_scores,
+                     behavior_days=0, fundamental_ok=None,
+                     research_count=None, universe="stock") -> dict:
+    """逐标的数据可信度：spot/history/fundamental/flow/research 五组件加权。
+    返回 {score, level, components, warnings}。不适用组件记 None 并从分母排除。
+    high>=.75 / medium>=.50 / low<.50。fundamental/research 对 ETF 为 None。
+    dim_scores 用于标注依赖该组件的口径是否可用（写 warning 用）。"""
+    comps, warnings = {}, []
+    # spot：代码/价格/成交额齐全为 1，否则 0
+    sp = spot_row or {}
+    price = sp.get("price")
+    tr = sp.get("turnover_rate")
+    comps["spot"] = 1.0 if (code and price is not None and tr is not None) else 0.0
+
+    # history：有效交易日 <20→0 / 20-59→0.5 / >=60→1
+    n_hist = 0
+    if close is not None and code in getattr(close, "columns", []):
+        n_hist = int(close[code].notna().sum())
+    if n_hist >= 60:
+        comps["history"] = 1.0
+    elif n_hist >= 20:
+        comps["history"] = 0.5
+    else:
+        comps["history"] = 0.0
+        warnings.append("历史有效交易日不足20，口径1/4 可能不可用")
+
+    # fundamental：个股有效财报=1 / spot 代理=0.5 / ETF 或不可用=None
+    if universe == "etf" or fundamental_ok is None:
+        comps["fundamental"] = None
+    else:
+        comps["fundamental"] = 1.0 if fundamental_ok else 0.5
+        if not fundamental_ok:
+            warnings.append("仅 spot 估值代理，非完整财报")
+
+    # flow：>=3 行为日=1 / 1-2=0.5(spot当日) / 0=0
+    if behavior_days >= 3:
+        comps["flow"] = 1.0
+    elif behavior_days >= 1:
+        comps["flow"] = 0.5
+        warnings.append("资金流仅当日，可能为单日脉冲")
+    else:
+        comps["flow"] = 0.0
+        warnings.append("无资金行为数据")
+
+    # research：>=2 研报=1 / 1=0.5 / 0=0 / ETF 或不可用=None
+    if universe == "etf" or research_count is None:
+        comps["research"] = None
+    else:
+        comps["research"] = 1.0 if research_count >= 2 else (0.5 if research_count >= 1 else 0.0)
+
+    # 加权平均 over 适用组件
+    num = den = 0.0
+    for k, w in _CONF_WEIGHTS.items():
+        v = comps[k]
+        if v is None:
+            continue
+        num += w * v
+        den += w
+    score = (num / den) if den else 0.0
+    if score >= .75:
+        level = "high"
+    elif score >= .50:
+        level = "medium"
+    else:
+        level = "low"
+    return {"score": round(score, 4), "level": level,
+            "components": comps, "warnings": warnings}
+
+
+def _quality_gate(item, confidence, fundamental=None, behavior_days=0) -> dict:
+    """硬质量门槛。返回 {hard_pass, risk_flags, warnings}。
+    财务红旗(商誉>30/负债>75/fcf<0.3)→hard_reject；低可信度→hard_reject；
+    单日资金脉冲→risk_flag 但不硬拒(仅作风险惩罚依据)。"""
+    risk_flags, warnings = [], []
+    fnd = fundamental or {}
+    if fnd.get("goodwill_to_equity_pct") and fnd["goodwill_to_equity_pct"] > 30:
+        risk_flags.append("商誉占比过高")
+    if fnd.get("debt_ratio_latest") is not None and fnd["debt_ratio_latest"] > 75:
+        risk_flags.append("高负债率")
+    if fnd.get("fcf_to_netincome") is not None and fnd["fcf_to_netincome"] < 0.3:
+        risk_flags.append("弱FCF")
+    hard_flags = list(risk_flags)
+    if behavior_days == 1:
+        risk_flags.append("资金脉冲(仅单日)")
+        warnings.append("资金流仅1日，不得单独作资金质量依据")
+    hard_pass = not hard_flags and confidence.get("level") != "low"
+    if confidence.get("level") == "low":
+        warnings.append("低数据可信度")
+    return {"hard_pass": bool(hard_pass), "risk_flags": risk_flags, "warnings": warnings}
+
+
+_PENALTY_MAP = [("杠杆", 1.5), ("FCF", 1.5), ("波动", 2.0), ("脉冲", 1.0)]
+
+
+def _risk_penalty(item, gate, dim_scores) -> float:
+    """按 gate 的 risk_flags 叠加惩罚，上限 5.0。hits/raw_resonance 不受影响。"""
+    penalty = 0.0
+    for kw, w in _PENALTY_MAP:
+        if any(kw in f for f in gate.get("risk_flags", [])):
+            penalty += w
+    return min(penalty, 5.0)
+
+
+def _confidence_multiplier(level) -> float:
+    """可信度对共振分的缩放：high=1.0 / medium=.85 / low=.65。"""
+    return {"high": 1.0, "medium": .85, "low": .65}.get(level, 1.0)
+
+
 def _refine_by_quote(pool: list, df_spot, in_session: bool):
     """对小名单 get_quote 取盘口，算 A 流动性深度(+综合分重排) + B/C raw 展示。
     B/C 方向不进排序（合规：方向=择时信号非质量）。
