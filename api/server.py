@@ -922,14 +922,20 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
                    limit: int = Query(10, ge=1, le=100), combo_method: str = Query("greedy"),
                    resonance_mode: str = Query("greedy"),
                    dim_thresh: float = Query(0.7, ge=0.0, le=1.0),
-                   refine: bool = Query(True), refine_pool: int = Query(50)):
+                   refine: bool = Query(True), refine_pool: int = Query(50),
+                   strict_quality: bool = Query(True, description="严格模式：过滤低可信度/未过硬门槛标的"),
+                   min_confidence: float = Query(0.50, ge=0.0, le=1.0,
+                                                 description="严格模式下最低数据可信度分"),
+                   risk_penalty: bool = Query(True, description="按风险旗标调整 adjusted_resonance")):
     from backtest import quality
     res = quality.quality_rank(
         universe=universe, days=days, min_dims=min_dims,
         min_turnover=min_turnover, max_per_board=max_per_board,
         max_corr=max_corr, limit=limit, combo_method=combo_method,
         resonance_mode=resonance_mode,
-        dim_thresh=dim_thresh, refine=refine, refine_pool=refine_pool)
+        dim_thresh=dim_thresh, refine=refine, refine_pool=refine_pool,
+        strict_quality=strict_quality, min_confidence=min_confidence,
+        risk_penalty=risk_penalty)
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
 

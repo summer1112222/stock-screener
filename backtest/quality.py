@@ -61,9 +61,11 @@ def _data_confidence(code, spot_row, close, dim_scores,
     high>=.75 / medium>=.50 / low<.50。fundamental/research 对 ETF 为 None。
     dim_scores 用于标注依赖该组件的口径是否可用（写 warning 用）。"""
     comps, warnings = {}, []
-    # spot：代码/价格/成交额齐全为 1，否则 0
+    # spot：代码/价格/成交额齐全为 1，否则 0（快照价格列是 latest_price）
     sp = spot_row or {}
-    price = sp.get("price")
+    price = sp.get("latest_price")
+    if price is None:
+        price = sp.get("price")
     tr = sp.get("turnover_rate")
     comps["spot"] = 1.0 if (code and price is not None and tr is not None) else 0.0
 
@@ -111,15 +113,38 @@ def _data_confidence(code, spot_row, close, dim_scores,
             continue
         num += w * v
         den += w
-    score = (num / den) if den else 0.0
+    score = round((num / den) if den else 0.0, 4)  # 用 round 后值判 level，避免 0.4999→low 边界漂移
     if score >= .75:
         level = "high"
     elif score >= .50:
         level = "medium"
     else:
         level = "low"
-    return {"score": round(score, 4), "level": level,
+    return {"score": score, "level": level,
             "components": comps, "warnings": warnings}
+
+
+def _conf_inputs(universe, dim_status, ds, days):
+    """从口径分位/状态粗粒度推断 _data_confidence 的输入标量。
+    fundamental: ETF=None; spot 代理降级→False(0.5); 真实 buffett 且该 code 有分→True; 否则 None(不适用)。
+    flow: 口径3 有分→days(视为有行为数据); 否则 0。
+    research: ETF=None; 口径5 可用且该 code 有分→2; 口径5 可用但该 code 无分→0; 口径5 不可用→None。
+    诚实粗粒度：不做额外网络调用，仅用既有分位结果。"""
+    fundamental_ok = None
+    if universe != "etf":
+        st = str(dim_status.get("2", ""))
+        if "spot估值代理" in st or st.startswith("ok(降级"):
+            fundamental_ok = False
+        elif st.startswith("ok") and ds.get(2) is not None:
+            fundamental_ok = True
+    behavior_days = days if ds.get(3) is not None else 0
+    research_count = None
+    if universe != "etf":
+        if ds.get(5) is not None:
+            research_count = 2
+        elif str(dim_status.get("5", "")).startswith("ok"):
+            research_count = 0
+    return behavior_days, fundamental_ok, research_count
 
 
 def _quality_gate(item, confidence, fundamental=None, behavior_days=0) -> dict:
@@ -933,14 +958,20 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
                  max_corr=0.85, limit=20, min_signals=2, limit_pct=9.9,
                  combo_method: str = "greedy",
                  resonance_mode: str = "greedy",
-                 refine: bool = True, refine_pool: int = 50) -> dict:
+                 refine: bool = True, refine_pool: int = 50,
+                 strict_quality: bool = True, min_confidence: float = 0.50,
+                 risk_penalty: bool = True) -> dict:
     """优质筛选主入口。返回 {main, by_dim, dims_available, dim_status,
-    min_dims, refine_status, cand_disclaimer, error}。口径分位见 _dim_scores；
-    共振/组合见 _resonance/_apply_combo。combo_method: "greedy" 等权（默认），
-    "min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。
+    min_dims, refine_status, cand_disclaimer, error, confidence_summary,
+    selection_mode}。口径分位见 _dim_scores；共振/组合见 _resonance/_apply_combo。
+    combo_method: "greedy" 等权（默认），"min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。
     resonance_mode: "greedy"(默认,hits×10+加权均值,数量偏好) / "penalize"(几何均值,短板惩罚)。
     dim_thresh 默认 0.7(提区分度)。weights 默认 _DEFAULT_DIM_WEIGHTS(经验,非IC校准)。
-    refine: 仅个股，盘口精排（盘中按流动性+共振重排 refine_pool 只，盘后仅附 quote 不重排）。"""
+    refine: 仅个股，盘口精排（盘中按流动性+共振重排 refine_pool 只，盘后仅附 quote 不重排）。
+    strict_quality: 严格模式要求 hard_gate_pass 且 data_confidence>=min_confidence 才进 main，
+        否则保留旧包含语义；min_confidence 默认 0.50。risk_penalty: 按风险旗标调整 adjusted_resonance。
+    item 新增 raw_resonance/adjusted_resonance/data_confidence/confidence_level/
+        risk_flags/warnings/hard_gate_pass；resonance 兼容前端，值=adjusted_resonance。"""
     table = _SPOT_TABLE.get(universe)
     if not table:
         return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
@@ -961,7 +992,8 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     in_session = _is_in_session()
     _key = (universe, days, min_dims, dim_thresh, min_turnover, max_per_board,
             max_corr, limit, min_signals, limit_pct, combo_method, resonance_mode,
-            refine, refine_pool, in_session)
+            refine, refine_pool, strict_quality, min_confidence, risk_penalty,
+            in_session)
     _now = _time.time()
     _ttl = 30.0 if in_session else _RESULT_TTL
     _hit = _RESULT_CACHE.get(_key)
@@ -988,13 +1020,44 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     scores, dims_avail, dim_status = _dim_scores(df, universe, days, min_signals, close=close)
     eff_min_dims = min(min_dims, len(dims_avail)) if dims_avail else 0
     enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4, 5)}
+    conf_summary = {"high": 0, "medium": 0, "low": 0, "low_excluded": 0}
     for c in codes:
         ds = scores.get(c, {})
         res, hits = _resonance(ds, dim_thresh, weights, resonance_mode)
         name = df.loc[df["code"].astype(str) == c, "name"].iloc[0] \
             if "name" in df.columns else c
-        item = {"code": c, "name": name, "resonance": _to_float(res),
-                "hits": hits, "dim_scores": ds, "reasons": []}
+        # 数据可信度 + 硬门槛 + 风险调整（spec 2026-09-05）
+        spot_row = None
+        _msk = df["code"].astype(str) == c
+        if _msk.any():
+            spot_row = df[_msk].iloc[0].to_dict()
+        behavior_days, fundamental_ok, research_count = _conf_inputs(
+            universe, dim_status, ds, days)
+        conf = _data_confidence(c, spot_row, close, ds,
+                                behavior_days=behavior_days,
+                                fundamental_ok=fundamental_ok,
+                                research_count=research_count,
+                                universe=universe)
+        # 财务红旗已在 _dim_scores 口径2 的 _bad 预筛剔除，此处传 fundamental=None 不重复判定
+        gate = _quality_gate({"code": c}, conf, fundamental=None,
+                             behavior_days=behavior_days)
+        raw = _to_float(res) or 0.0
+        adj = raw * _confidence_multiplier(conf["level"])
+        if risk_penalty:
+            adj = max(adj - _risk_penalty({}, gate, ds), 0.0)
+        conf_summary[conf["level"]] = conf_summary.get(conf["level"], 0) + 1
+        item = {"code": c, "name": name,
+                "resonance": _to_float(adj),  # 兼容前端，值=adjusted_resonance
+                "raw_resonance": _to_float(raw),
+                "adjusted_resonance": _to_float(adj),
+                "hits": hits, "dim_scores": ds,
+                "data_confidence": conf["score"],
+                "confidence_level": conf["level"],
+                "confidence_components": conf["components"],
+                "risk_flags": gate["risk_flags"],
+                "warnings": conf["warnings"] + gate["warnings"],
+                "hard_gate_pass": gate["hard_pass"],
+                "reasons": []}
         enriched.append(item)
         for d in (1, 2, 3, 4, 5):
             if ds.get(d) is not None:
@@ -1002,8 +1065,19 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     for d in by_dim:
         by_dim[d].sort(key=lambda x: x.get("_pct") or 0, reverse=True)
         by_dim[d] = [{k: v for k, v in x.items() if k != "_pct"} for x in by_dim[d]][:10]
-    main = [it for it in enriched if it["hits"] >= eff_min_dims]
-    main.sort(key=lambda x: x["resonance"] or 0, reverse=True)
+    selected = [it for it in enriched if it["hits"] >= eff_min_dims]
+    rejected_codes = {
+        it["code"] for it in selected
+        if strict_quality and not (it["hard_gate_pass"]
+                                   and (it["data_confidence"] or 0) >= min_confidence)}
+    conf_summary["low_excluded"] = len(rejected_codes)
+    main = [it for it in selected if it["code"] not in rejected_codes]
+    main.sort(key=lambda x: (x["adjusted_resonance"] or 0, x["data_confidence"] or 0),
+              reverse=True)
+    if strict_quality and selected and not main:
+        selection_mode = "degraded"
+    else:
+        selection_mode = "strict" if strict_quality else "loose"
 
     # 盘口精排阶段（仅个股 + refine）
     if not refine:
@@ -1034,6 +1108,8 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     result = {"main": main, "by_dim": by_dim, "dims_available": dims_avail,
               "dim_status": dim_status, "min_dims": eff_min_dims,
               "refine_status": refine_status,
+              "confidence_summary": conf_summary,
+              "selection_mode": selection_mode,
               "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4, 5)},
               "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
     _RESULT_CACHE[_key] = (_now, result)

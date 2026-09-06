@@ -8,11 +8,119 @@ import pandas as pd
 import pytest
 
 from backtest import quality
+from data import db
+
+
+# ------------------------------------------------------------------
+# quality_rank 集成：strict 过滤 / 缓存键 / 降级
+# ------------------------------------------------------------------
+# 精简 spot mock：口径1 无历史、口径2 spot 代理、口径3 top_by_amount 降级
+SPOT = [
+    {"code": "000001", "name": "甲", "latest_price": 10.0, "change_pct": 2.0,
+     "turnover_amount": 1e8, "turnover_rate": 3.0, "main_net_inflow": 5e7,
+     "board": "银行"},
+    {"code": "000002", "name": "乙", "latest_price": 8.0, "change_pct": 1.0,
+     "turnover_amount": 8e7, "turnover_rate": 2.0, "main_net_inflow": 1e7,
+     "board": "地产"},
+]
+
+
+def _mock_pipeline(monkeypatch, history=None):
+    """按 test_quality.py 既有模式 mock 数据源。history=None→空历史(口径1低可信)。"""
+    monkeypatch.setattr(db, "query_rows",
+                        lambda table, **kw: SPOT if table == "stock_spot" else [])
+    import backtest.eval as bt_eval
+    monkeypatch.setattr(bt_eval, "load_panel",
+                        lambda *a, **k: history if history is not None else pd.DataFrame())
+    import backtest.buffett as bt_buf
+    monkeypatch.setattr(bt_buf, "_AK_OK", False)  # 口径2 → spot 代理
+    import screener.smart_money as sm_q
+    monkeypatch.setattr(sm_q, "top_by_amount",
+                        lambda **kw: {"rows": [{"code": "000001", "amount": 1e9}],
+                                      "total": 1})
+
+
+def test_low_confidence_not_in_strict_main(monkeypatch):
+    _mock_pipeline(monkeypatch, history=None)
+    # 000001 confidence=0.5(medium)；min_confidence=0.6 视为低于门槛过滤出 main
+    res = quality.quality_rank("stock", min_dims=2, min_confidence=0.6)
+    assert res["main"] == []
+    assert res["confidence_summary"]["low_excluded"] >= 1
+    assert res["selection_mode"] == "degraded"
+    # 低可信度标的保留在 by_dim（spec: 只进 by_dim 不进 main）
+    assert any(x["code"] == "000001" for x in res["by_dim"].get(3, []))
+
+
+def test_strict_off_keeps_old_inclusion(monkeypatch):
+    _mock_pipeline(monkeypatch, history=None)
+    res = quality.quality_rank("stock", min_dims=2, strict_quality=False)
+    assert any(r["code"] == "000001" for r in res["main"])
+    assert res["selection_mode"] == "loose"
+
+
+def test_high_confidence_stays_in_strict_main(monkeypatch):
+    dates = pd.bdate_range("2022-01-01", periods=60)
+    hist = pd.DataFrame({"000001": [10.0] * 60, "000002": [9.0] * 60}, index=dates)
+    _mock_pipeline(monkeypatch, history=hist)
+    res = quality.quality_rank("stock", min_dims=2)
+    assert any(r["code"] == "000001" for r in res["main"])
+    it = next(r for r in res["main"] if r["code"] == "000001")
+    assert it["data_confidence"] >= 0.50
+    assert "raw_resonance" in it and "adjusted_resonance" in it
+    assert it["resonance"] == it["adjusted_resonance"]
+
+
+def test_new_parameters_are_in_cache_key(monkeypatch):
+    _mock_pipeline(monkeypatch, history=None)
+    quality._RESULT_CACHE.clear()
+    quality.quality_rank("stock", strict_quality=True, risk_penalty=True)
+    quality.quality_rank("stock", strict_quality=False, risk_penalty=False)
+    assert len(quality._RESULT_CACHE) >= 2
+
+
+def test_etf_not_penalized_for_inapplicable_components(monkeypatch):
+    etf = [{"code": "510300", "name": "沪深300ETF", "latest_price": 4.0,
+            "change_pct": 1.0, "turnover_amount": 1e8, "turnover_rate": 2.0,
+            "main_net_inflow": 1e7}]
+    monkeypatch.setattr(db, "query_rows",
+                        lambda table, **kw: etf if table == "etf_spot" else [])
+    import backtest.eval as bt_eval
+    monkeypatch.setattr(bt_eval, "load_panel",
+                        lambda *a, **k: pd.DataFrame())
+    res = quality.quality_rank("etf", min_turnover=5e7, limit_pct=9.9)
+    it = next((x for x in res["main"] if x["code"] == "510300"), None)
+    assert it is not None
+    assert it["confidence_level"] in ("high", "medium")
+
+
+def test_api_quality_passes_confidence_params(monkeypatch):
+    """/api/quality 透传 strict_quality/min_confidence/risk_penalty，且不丢免责声明。"""
+    from fastapi.testclient import TestClient
+    from api import server
+    captured = {}
+
+    def fake_quality_rank(**kw):
+        captured.update(kw)
+        return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
+                "min_dims": 1, "refine_status": "skip",
+                "confidence_summary": {"high": 0, "medium": 0, "low": 0, "low_excluded": 0},
+                "selection_mode": "strict",
+                "cand_disclaimer": "多口径共振机械排序观察清单", "error": None}
+
+    monkeypatch.setattr("backtest.quality.quality_rank", fake_quality_rank)
+    client = TestClient(server.app)
+    r = client.get("/api/quality?strict_quality=false&min_confidence=0.3&risk_penalty=false")
+    assert r.status_code == 200
+    assert captured.get("strict_quality") is False
+    assert captured.get("min_confidence") == 0.3
+    assert captured.get("risk_penalty") is False
+    assert "cand_disclaimer" in r.json()["data"]
+
 
 
 def _spot_row():
-    """有效 spot 行：代码/价格/成交额齐全。"""
-    return {"code": "a", "name": "A", "price": 10.0, "turnover_rate": 0.05}
+    """有效 spot 行：代码/价格/成交额齐全。快照价格列是 latest_price。"""
+    return {"code": "a", "name": "A", "latest_price": 10.0, "turnover_rate": 0.05}
 
 
 def _history(n, code="a"):
@@ -68,7 +176,7 @@ def test_flow_absent_lowers_confidence():
 
 def test_spot_missing_price_zero():
     res = quality._data_confidence(
-        "a", {"code": "a", "price": None, "turnover_rate": None}, _history(60),
+        "a", {"code": "a", "latest_price": None, "turnover_rate": None}, _history(60),
         {1: .8}, behavior_days=5, fundamental_ok=True, research_count=2,
     )
     assert res["components"]["spot"] == 0.0
