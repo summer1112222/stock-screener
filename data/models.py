@@ -307,6 +307,26 @@ CREATE TABLE IF NOT EXISTS fundamentals_cache (
     PRIMARY KEY (code, source)
 );
 
+CREATE TABLE IF NOT EXISTS list_track (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    module TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    rank INTEGER,
+    score REAL,
+    meta_json TEXT,
+    ret_k1 REAL,
+    ret_k3 REAL,
+    ret_k5 REAL,
+    filled_ts TEXT,
+    ts TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(module, mode, date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_list_track_date ON list_track(date);
+
 -- 市场温度日快照(一日一行,date 主键;供趋势 sparkline 与两融环比)
 -- 合规:只存公开市场状态事实(涨跌停/两融/估值),非择时信号。
 CREATE TABLE IF NOT EXISTS market_daily (
@@ -348,6 +368,11 @@ SMART_MONEY_FIELDS = {
 # buffett 财务摘要缓存字段集(payload_json 存整张摘要 JSON，7 天 TTL)
 FINANCIAL_CACHE_FIELDS = {"code", "payload_json", "ts"}
 
+LIST_TRACK_FIELDS = {
+    "module", "mode", "date", "code", "name", "rank", "score", "meta_json",
+    "ret_k1", "ret_k3", "ret_k5", "filled_ts", "ts",
+}
+
 # 表名 ↔ 规范字段集
 TABLE_FIELDS = {
     "industry_board": BOARD_FIELDS,
@@ -363,4 +388,5 @@ TABLE_FIELDS = {
     "st_list": ST_LIST_FIELDS,
     "research_report": RESEARCH_REPORT_FIELDS,
     "fundamentals_cache": FUNDAMENTALS_CACHE_FIELDS,
+    "list_track": LIST_TRACK_FIELDS,
 }

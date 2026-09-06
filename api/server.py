@@ -33,6 +33,7 @@ from backtest import (eval as bt_eval, engine as bt_engine, risk as bt_risk,
                       robust as bt_robust, candidates as bt_cand,
                       signals as bt_sig, buffett as bt_buf,
                       research as bt_research)
+from backtest import tracker as bt_tracker
 
 app = FastAPI(title="A股板块/ETF 筛选器(本地)")
 
@@ -809,6 +810,18 @@ def sm_today(date: str | None = Query(None),
         "cand_disclaimer": SM_CAND_DISCLAIMER})
 
 
+@app.get("/api/smart-money/radar")
+def sm_radar(days: int = Query(5, ge=1, le=90),
+             market: str | None = Query(None),
+             limit: int = Query(50, ge=1, le=500)):
+    from screener.smart_money import radar
+    res = radar(days=days, market=market, limit=limit)
+    return _wrap(res.get("rows", []), {
+        "total": res.get("total", 0), "date": res.get("date"),
+        "days": days, "market": market,
+        "cand_disclaimer": "多通道资金共振机械统计，非买卖信号，盈亏自负。"})
+
+
 @app.post("/api/smart-money/refresh")
 def sm_refresh(channel: str | None = Query(None)):
     """主力动向刷新。channel 逗号分隔时只刷指定通道(单通道按需刷新,标 partial,
@@ -936,6 +949,22 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
         dim_thresh=dim_thresh, refine=refine, refine_pool=refine_pool,
         strict_quality=strict_quality, min_confidence=min_confidence,
         risk_penalty=risk_penalty)
+    # 默认参数组合 → 落库追踪样本(仅机械记录,不改变响应)
+    try:
+        qparams = {"universe": universe, "days": days, "min_dims": min_dims,
+                   "min_turnover": min_turnover, "max_per_board": max_per_board,
+                   "max_corr": max_corr, "limit": limit,
+                   "combo_method": combo_method, "resonance_mode": resonance_mode,
+                   "dim_thresh": dim_thresh, "refine": refine, "refine_pool": refine_pool,
+                   "strict_quality": strict_quality, "min_confidence": min_confidence,
+                   "risk_penalty": risk_penalty}
+        if bt_tracker.is_default_params("quality", qparams) and res.get("main"):
+            bt_tracker.record_list("quality",
+                                   res.get("selection_mode") or "strict",
+                                   _dt.date.today().strftime("%Y-%m-%d"),
+                                   res["main"])
+    except Exception:
+        pass
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
 
@@ -964,8 +993,34 @@ def nextday_strong(universe: str = Query("stock"),
                                       min_mv=min_mv, max_mv=max_mv, max_pe=max_pe,
                                       exclude_st=exclude_st,
                                       selection_mode=selection_mode)
+    # 默认参数组合 → 落库追踪样本：strict 记五步全通过清单,score 记因子分清单
+    try:
+        ndparams = {"limit": limit, "days": days, "min_change_pct": min_change_pct,
+                    "min_turnover": min_turnover, "max_price": max_price,
+                    "min_mv": min_mv, "max_mv": max_mv, "max_pe": max_pe,
+                    "exclude_st": exclude_st}
+        if bt_tracker.is_default_params("nextday", ndparams):
+            today = _dt.date.today().strftime("%Y-%m-%d")
+            bt_tracker.record_list("nextday", "strict", today, res.get("passed_items") or [])
+            bt_tracker.record_list("nextday", "score", today, res.get("all_items") or [])
+    except Exception:
+        pass
     return _wrap(res, {"cand_disclaimer":
                        "次日强势清单——5因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
+
+
+@app.api_route("/api/track/fill", methods=["GET", "POST"])
+def track_fill(limit: int = Query(0, ge=0, le=100000)):
+    """回填 list_track 中未填前视收益(幂等)。只读 stock_daily,不自动拉数据。"""
+    res = bt_tracker.fill_returns(limit=limit)
+    return _wrap(res, {"bt_disclaimer": "历史清单机械追踪统计,非预测,不构成投资建议,盈亏自负。"})
+
+
+@app.get("/api/track/summary")
+def track_summary(module: str | None = Query(None), mode: str | None = Query(None)):
+    """quality/nextday 清单历史追踪汇总(各 k 收益+市场温度分层)。"""
+    res = bt_tracker.summary(module=module, mode=mode)
+    return _wrap(res, {"bt_disclaimer": "历史清单机械追踪统计,非预测,不构成投资建议,盈亏自负。"})
 
 
 @app.get("/api/daily-strong")

@@ -970,6 +970,51 @@ def _apply_combo(main, universe, df_spot, max_per_board, max_corr, limit,
     return kept
 
 
+def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[dict]:
+    """给个股 quality 主清单附主力行为/阶段标签，不改变质量排序与门槛。"""
+    if universe != "stock" or not main:
+        return main
+    from screener import smart_money as sm_query
+    codes = [str(it.get("code")) for it in main[:20] if it.get("code")]
+    try:
+        batch = sm_query._behavior_batch(codes, days=days)
+    except Exception:
+        batch = {}
+    for it in main:
+        code = str(it.get("code"))
+        b = batch.get(code, {})
+        for key in ("streak_inflow", "streak_outflow", "cum_inflow", "margin_accel", "north_cum"):
+            # 对外统一字段名 cum_net；保留 batch 兼容字段读取
+            dst = "cum_net" if key == "cum_inflow" else key
+            it[dst] = _to_float(b.get(key)) if b.get(key) is not None else None
+        it["daily_net"] = None
+        it["data_asof"] = None
+        try:
+            phase = sm_query.main_force_phase(code, days=days)
+            it["mf_phase"] = phase.get("phase")
+            it["mf_confidence"] = _to_float(phase.get("confidence"))
+        except Exception:
+            it["mf_phase"] = None
+            it["mf_confidence"] = None
+        phase = it.get("mf_phase")
+        conf = it.get("mf_confidence") or 0
+        if phase == "出货" and conf >= 0.6:
+            it.setdefault("warnings", []).append(
+                f"主力阶段=出货(置信 {round(conf, 2)})")
+        if phase == "吸筹":
+            it["behavior_group"] = "高质量×资金收集"
+        elif phase == "拉升":
+            it["behavior_group"] = "高质量×主力拉升"
+        elif phase == "出货":
+            it["behavior_group"] = "高质量×主力出货"
+        elif phase == "洗盘":
+            it["behavior_group"] = "高质量×主力洗盘"
+        else:
+            it["behavior_group"] = "质量待观察"
+    return main
+
+
+
 def _build_reasons(item):
     """从已有 dim_scores/hits 机械拼入选理由（叙事化，不引入新判断）。"""
     ds = item.get("dim_scores", {})
@@ -1158,6 +1203,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
 
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)
+    main = _enrich_main_behavior(main, universe, days=days)
 
     def _clean_item(it):
         it["reasons"] = _build_reasons(it)

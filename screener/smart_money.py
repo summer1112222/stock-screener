@@ -154,6 +154,107 @@ def top_by_amount(days: int = 5, market: str | None = None,
 
 # 股数通道：amount 单位是"股"，与金额通道(元)不同量纲，绝不混入金额/强度比较
 _SHARES_CHANNELS = ("十大股东", "高管增减持", "限售解禁")
+_AMOUNT_CHANNELS = ("资金流", "龙虎榜", "北向")
+
+
+def _radar_stats(values: list[float]) -> tuple[float, int, int, float | None]:
+    """Return daily total, inflow/outflow streaks and recent acceleration."""
+    if not values:
+        return 0.0, 0, 0, None
+    si, so = _streak(values)
+    accel = None
+    if len(values) >= 5:
+        recent = float(np.mean(values[-5:]))
+        baseline = float(np.mean(values[-20:])) if len(values) >= 20 else float(np.mean(values))
+        accel = recent - baseline
+    return float(sum(values)), si, so, accel
+
+
+def radar(days: int = 5, market: str | None = None, limit: int = 50) -> dict:
+    """多通道主力共振雷达，只读 smart_money_action，不触网。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    latest = db.query_rows("smart_money_action", where="date <= ?",
+                           params=(today,), order_by="date DESC", limit=1)
+    if not latest:
+        return {"rows": [], "total": 0, "date": None, "days": days, "market": market}
+    end = str(latest[0].get("date"))
+    try:
+        start = (datetime.strptime(end, "%Y-%m-%d") -
+                 timedelta(days=max(int(days) - 1, 0))).strftime("%Y-%m-%d")
+    except ValueError:
+        start = end
+    where = ["date >= ?", "date <= ?"]
+    params: list = [start, end]
+    if market:
+        where.append("market = ?")
+        params.append(market)
+    records = db.query_rows("smart_money_action", where=" AND ".join(where),
+                             params=tuple(params), order_by="", limit=0)
+    spots = {str(r.get("code")): r for r in db.query_rows("stock_spot", limit=0)}
+    grouped: dict[str, dict] = {}
+    for row in records:
+        code = row.get("code")
+        channel = row.get("channel")
+        if not code or not channel:
+            continue
+        code = str(code)
+        item = grouped.setdefault(code, {"code": code, "name": row.get("name") or code,
+                                         "channels": {}, "unlock_flag": False,
+                                         "unlock_as_of": None, "unlock_amount": None})
+        item["name"] = item.get("name") or row.get("name") or code
+        ch = item["channels"].setdefault(channel, {"daily": {}, "latest_date": None,
+                                                     "positive": False, "net": None})
+        date = str(row.get("date") or "")
+        ch["latest_date"] = max(ch["latest_date"] or date, date)
+        amount = _nan(row.get("amount")) or 0.0
+        if channel in _AMOUNT_CHANNELS:
+            ch["daily"][date] = ch["daily"].get(date, 0.0) + float(amount)
+        elif channel == "高管增减持":
+            action = str(row.get("action") or "")
+            ch["positive"] = ch["positive"] or ("增持" in action)
+        elif channel == "限售解禁":
+            item["unlock_flag"] = True
+            as_of = row.get("as_of") or date
+            if not item["unlock_as_of"] or str(as_of) < str(item["unlock_as_of"]):
+                item["unlock_as_of"] = str(as_of)
+                item["unlock_amount"] = _nan(row.get("amount"))
+    out = []
+    for code, item in grouped.items():
+        hits = 0
+        cum_net = 0.0
+        daily_net = 0.0
+        streak_in, streak_out, accel = 0, 0, None
+        data_dates = []
+        for channel, ch in item["channels"].items():
+            if channel in _AMOUNT_CHANNELS:
+                vals = [ch["daily"][d] for d in sorted(ch["daily"])]
+                net, si, so, ac = _radar_stats(vals)
+                ch.update(net=_nan(net), daily_net=_nan(vals[-1] if vals else None),
+                          cum_net=_nan(net), streak_inflow=si, streak_outflow=so,
+                          margin_accel=_nan(ac), daily=[{"date": d, "amount": _nan(ch["daily"][d])}
+                                                       for d in sorted(ch["daily"])],
+                          positive=net > 0)
+                if net > 0:
+                    hits += 1
+                cum_net += net
+                if channel == "资金流":
+                    daily_net, streak_in, streak_out, accel = (vals[-1] if vals else 0.0), si, so, ac
+            if ch.get("latest_date"):
+                data_dates.append(ch["latest_date"])
+        if item["channels"].get("高管增减持", {}).get("positive"):
+            hits += 1
+        spot = spots.get(code, {})
+        turnover = _nan(spot.get("turnover_amount"))
+        intensity = round(cum_net / turnover, 4) if turnover and turnover != 0 else None
+        item.update(channel_hits=hits, daily_net=_nan(daily_net), cum_net=_nan(cum_net),
+                    streak_inflow=streak_in, streak_outflow=streak_out,
+                    margin_accel=_nan(accel), net_intensity=intensity,
+                    data_asof=max(data_dates) if data_dates else None)
+        out.append(item)
+    out.sort(key=lambda x: (x.get("channel_hits", 0), x.get("net_intensity") if x.get("net_intensity") is not None else -1e18,
+                            x.get("cum_net") or 0), reverse=True)
+    return {"rows": out[:max(int(limit), 0)] if limit else out, "total": min(len(out), limit) if limit else len(out),
+            "date": end, "days": days, "market": market}
 
 
 def summarize_by_code(rows: list[dict]) -> dict:
@@ -587,7 +688,7 @@ def _behavior_batch(codes: list[str], days: int = 30) -> dict[str, dict]:
     """
     out: dict[str, dict] = {c: {
         "streak_inflow": None, "streak_outflow": None,
-        "margin_accel": None, "north_cum": None,
+        "cum_inflow": None, "margin_accel": None, "north_cum": None,
     } for c in codes}
     if not codes:
         return out
@@ -619,6 +720,7 @@ def _behavior_batch(codes: list[str], days: int = 30) -> dict[str, dict]:
             si, so = _streak(amounts)
             out[c]["streak_inflow"] = si
             out[c]["streak_outflow"] = so
+            out[c]["cum_inflow"] = round(float(sum(amounts)), 2)
             if len(amounts) >= 5:
                 recent5 = float(np.mean(amounts[-5:]))
                 base_avg = (float(np.mean(amounts[-20:]))
