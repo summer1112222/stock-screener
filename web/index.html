@@ -1500,13 +1500,24 @@ function qsRender(){
     const reasonsTxt=(x.reasons||[]).join('；');
     return `<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td>${phaseTd}<td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td><td class="num">${x.hits||0}</td><td>${[1,2,3,4,5].map(k=>ds2[k]!=null?(+ds2[k]).toFixed(2):'—').join('/')}</td>${wcol}<td style="font-size:11px" title="${reasonsTxt}">${_dimChips(ds2,dimNames)}</td></tr>`;
   }).join(''):'';
+  // 严格容量摘要 + 排除原因中文映射（spec 2026-09-06）
+  const reasonZh={hard_gate:'硬门槛',confidence:'低可信度',risk_flags:'风险标记',min_dims:'口径不足',no_resonance:'无共振分'};
+  const ex=d.excluded_summary||{};
+  const summary=(d.eligible_count!=null||d.requested_limit!=null)?`<div style="font-size:12px;margin:4px 0;color:var(--muted)">请求 <b>${d.requested_limit??'-'}</b> 只 · 严格合格 <b style="color:#16A34A">${d.eligible_count??'-'}</b> 只 · 硬门槛排除 ${ex.hard_gate||0} · 低可信度排除 ${ex.confidence||0} · 口径不足 ${ex.min_dims||0}</div>`:'';
+  const note=(d.selection_status==='insufficient'&&d.selection_note)?`<div style="font-size:12px;margin:4px 0;padding:6px 8px;border:1px solid #F59E0B;border-radius:6px;color:#B45309;background:rgba(245,158,11,.08)">⚠ ${d.selection_note}（非错误：严格口径宁缺毋滥）</div>`:'';
   const byDim=d.by_dim||{};
   const dimHtml=Object.entries(byDim).map(([k,lst])=>{
     if(!lst||!lst.length) return '';
-    const rows=lst.map(x=>`<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${(x.dim_scores||{})[k]!=null?(+(x.dim_scores||{})[k]).toFixed(2):'—'}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td></tr>`).join('');
-    return `<details style="margin-top:8px" open><summary style="cursor:pointer;color:var(--muted);font-size:12px">口径${k} ${dimNames[k]||''} (${lst.length})</summary><table><thead><tr><th>代码</th><th>名称</th><th class="num">分位</th><th class="num">共振</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+    const rows=lst.map(x=>{
+      const exr=(x.exclusion_reasons||[]).map(r=>reasonZh[r]||r).join('、');
+      const st=x.eligibility?'<span style="color:#16A34A;font-size:11px">合格</span>':`<span style="color:#DC2626;font-size:11px" title="${exr}">${exr||'未合格'}</span>`;
+      return `<tr class="clk" data-code="${x.code||''}"><td>${x.code||''}</td><td>${x.name||''}</td><td class="num">${(x.dim_scores||{})[k]!=null?(+(x.dim_scores||{})[k]).toFixed(2):'—'}</td><td class="num">${x.resonance!=null?(+x.resonance).toFixed(2):'—'}</td><td>${st}</td></tr>`;
+    }).join('');
+    return `<details style="margin-top:8px" open><summary style="cursor:pointer;color:var(--muted);font-size:12px">口径${k} ${dimNames[k]||''} (${lst.length}) · 诊断项非严格主清单</summary><table><thead><tr><th>代码</th><th>名称</th><th class="num">分位</th><th class="num">共振</th><th>排除原因</th></tr></thead><tbody>${rows}</tbody></table></details>`;
   }).join('');
-  document.getElementById('qsOut').innerHTML=trs?`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>${dimHtml}`:'<div class="empty">无共振清单(口径不足或历史未拉，先 /api/backtest/fetch；stock 口径2 需 akshare 财务摘要，东财被封时降级 spot 估值代理)</div>';
+  const strictTag=(d.selection_mode==='strict'||d.selection_mode==='degraded')?'<span style="color:#16A34A;font-size:10px;border:1px solid #16A34A;border-radius:4px;padding:0 3px;margin-left:4px" title="过硬门槛+可信度+口径数条件">严格合格</span>':'';
+  const mainHtml=trs?`<div style="font-size:12px;margin:4px 0"><b>主清单 (${main.length})</b>${strictTag}</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`:`<div class="empty">${d.selection_status==='insufficient'?('严格口径下无合格标的。'+(d.selection_note||'')+'下方分口径诊断项供研究排查。'):'无共振清单(口径不足或历史未拉，先 /api/backtest/fetch；stock 口径2 需 akshare 财务摘要，东财被封时降级 spot 估值代理)'}</div>`;
+  document.getElementById('qsOut').innerHTML=summary+note+mainHtml+dimHtml;
   document.querySelectorAll('#qsOut th[data-qk]').forEach(th=>th.onclick=()=>{
     const k=th.dataset.qk;
     if(qsState.sortKey===k){qsState.sortDir=qsState.sortDir==='desc'?'asc':'desc';}
