@@ -186,6 +186,33 @@ def _confidence_multiplier(level) -> float:
     return {"high": 1.0, "medium": .85, "low": .65}.get(level, 1.0)
 
 
+# 阻断严格合格的原因（risk_flags 仅诊断记录，不阻断——2026-09-05 语义：
+# 单日资金脉冲等 risk_flag 是惩罚依据非硬拒，惩罚已体现在 adjusted_resonance）
+_BLOCKING_REASONS = ("hard_gate", "confidence", "min_dims", "no_resonance")
+
+
+def _strict_eligibility(hard_gate_pass, conf_score, min_confidence,
+                        risk_flags, hits, eff_min_dims, resonance_raw):
+    """严格合格判定（spec 2026-09-06）。返回 (eligibility, exclusion_reasons)。
+
+    原因按确定性顺序：hard_gate → confidence → risk_flags → min_dims →
+    no_resonance。eligibility 仅由 _BLOCKING_REASONS 决定；risk_flags
+    出现在原因列表中供诊断展示，但不影响合格。"""
+    reasons = []
+    if not hard_gate_pass:
+        reasons.append("hard_gate")
+    if (_to_float(conf_score) or 0) < min_confidence:
+        reasons.append("confidence")
+    if risk_flags:
+        reasons.append("risk_flags")
+    if hits < eff_min_dims:
+        reasons.append("min_dims")
+    if resonance_raw is None:
+        reasons.append("no_resonance")
+    eligible = not any(r in _BLOCKING_REASONS for r in reasons)
+    return bool(eligible), reasons
+
+
 def _refine_by_quote(pool: list, df_spot, in_session: bool):
     """对小名单 get_quote 取盘口，算 A 流动性深度(+综合分重排) + B/C raw 展示。
     B/C 方向不进排序（合规：方向=择时信号非质量）。
@@ -963,7 +990,10 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
                  risk_penalty: bool = True) -> dict:
     """优质筛选主入口。返回 {main, by_dim, dims_available, dim_status,
     min_dims, refine_status, cand_disclaimer, error, confidence_summary,
-    selection_mode}。口径分位见 _dim_scores；共振/组合见 _resonance/_apply_combo。
+    selection_mode, selection_status, selection_note, eligible_count,
+    requested_limit, excluded_summary}。口径分位见 _dim_scores；共振/组合见
+    _resonance/_apply_combo；严格合格判定见 _strict_eligibility(spec 2026-09-06：
+    strict 只用 eligible 项不补足 limit，item 附 eligibility/exclusion_reasons)。
     combo_method: "greedy" 等权（默认），"min_var" 最小方差权重（风险预算机械分配，非推荐仓位）。
     resonance_mode: "greedy"(默认,hits×10+加权均值,数量偏好) / "penalize"(几何均值,短板惩罚)。
     dim_thresh 默认 0.7(提区分度)。weights 默认 _DEFAULT_DIM_WEIGHTS(经验,非IC校准)。
@@ -972,21 +1002,27 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         否则保留旧包含语义；min_confidence 默认 0.50。risk_penalty: 按风险旗标调整 adjusted_resonance。
     item 新增 raw_resonance/adjusted_resonance/data_confidence/confidence_level/
         risk_flags/warnings/hard_gate_pass；resonance 兼容前端，值=adjusted_resonance。"""
+    def _empty_result(err):
+        # 早退分支与正常响应同形状（spec 2026-09-06 元数据字段不缺省）
+        return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
+                "min_dims": min_dims, "cand_disclaimer": _CAND_DISCLAIMER,
+                "selection_mode": "strict" if strict_quality else "loose",
+                "selection_status": "insufficient", "selection_note": None,
+                "eligible_count": 0, "requested_limit": limit,
+                "excluded_summary": {},
+                "confidence_summary": {"high": 0, "medium": 0, "low": 0,
+                                       "low_excluded": 0},
+                "error": err}
+
     table = _SPOT_TABLE.get(universe)
     if not table:
-        return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
-                "min_dims": min_dims, "cand_disclaimer": _CAND_DISCLAIMER,
-                "error": f"不支持的 universe={universe}"}
+        return _empty_result(f"不支持的 universe={universe}")
     rows = db.query_rows(table)
     if not rows:
-        return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
-                "min_dims": min_dims, "cand_disclaimer": _CAND_DISCLAIMER,
-                "error": f"{table} 为空，先 /api/refresh"}
+        return _empty_result(f"{table} 为空，先 /api/refresh")
     df = _tradable(pd.DataFrame(rows), min_turnover, limit_pct)
     if df.empty:
-        return {"main": [], "by_dim": {}, "dims_available": [], "dim_status": {},
-                "min_dims": min_dims, "cand_disclaimer": _CAND_DISCLAIMER,
-                "error": "tradable 预筛后为空"}
+        return _empty_result("tradable 预筛后为空")
     # 结果缓存：盘中 30s TTL（盘口精排需高频刷新），盘后 5min（计算重避免重复重算）
     import time as _time
     in_session = _is_in_session()
@@ -1041,10 +1077,14 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         # 财务红旗已在 _dim_scores 口径2 的 _bad 预筛剔除，此处传 fundamental=None 不重复判定
         gate = _quality_gate({"code": c}, conf, fundamental=None,
                              behavior_days=behavior_days)
-        raw = _to_float(res) or 0.0
+        res_raw = _to_float(res)
+        raw = res_raw or 0.0
         adj = raw * _confidence_multiplier(conf["level"])
         if risk_penalty:
             adj = max(adj - _risk_penalty({}, gate, ds), 0.0)
+        eligible, excl_reasons = _strict_eligibility(
+            gate["hard_pass"], conf["score"], min_confidence,
+            gate["risk_flags"], hits, eff_min_dims, res_raw)
         conf_summary[conf["level"]] = conf_summary.get(conf["level"], 0) + 1
         item = {"code": c, "name": name,
                 "resonance": _to_float(adj),  # 兼容前端，值=adjusted_resonance
@@ -1057,6 +1097,8 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
                 "risk_flags": gate["risk_flags"],
                 "warnings": conf["warnings"] + gate["warnings"],
                 "hard_gate_pass": gate["hard_pass"],
+                "eligibility": eligible,
+                "exclusion_reasons": excl_reasons,
                 "reasons": []}
         enriched.append(item)
         for d in (1, 2, 3, 4, 5):
@@ -1071,13 +1113,34 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         if strict_quality and not (it["hard_gate_pass"]
                                    and (it["data_confidence"] or 0) >= min_confidence)}
     conf_summary["low_excluded"] = len(rejected_codes)
-    main = [it for it in selected if it["code"] not in rejected_codes]
+    # 严格模式：只用 eligibility 合格项，不以硬门槛失败/低可信度/口径不足补足 limit
+    if strict_quality:
+        main = [it for it in enriched if it["eligibility"]]
+    else:
+        main = list(selected)
     main.sort(key=lambda x: (x["adjusted_resonance"] or 0, x["data_confidence"] or 0),
               reverse=True)
     if strict_quality and selected and not main:
         selection_mode = "degraded"
     else:
         selection_mode = "strict" if strict_quality else "loose"
+
+    # 严格容量元数据（spec 2026-09-06）：合格数 vs 请求数，不足诚实报告不静默
+    eligible_count = sum(1 for it in enriched if it["eligibility"])
+    requested_limit = limit
+    excluded_summary: dict = {}
+    for it in enriched:
+        if not it["eligibility"]:
+            for r in it["exclusion_reasons"]:
+                if r in _BLOCKING_REASONS:
+                    excluded_summary[r] = excluded_summary.get(r, 0) + 1
+    if strict_quality and eligible_count < requested_limit:
+        selection_status = "insufficient"
+        selection_note = (f"严格口径下合格 {eligible_count} 只，少于请求的 "
+                          f"{requested_limit} 只；不以硬门槛未过/低可信度/口径不足"
+                          f"标的补足，诊断项见 by_dim")
+    else:
+        selection_status, selection_note = "ok", None
 
     # 盘口精排阶段（仅个股 + refine）
     if not refine:
@@ -1110,6 +1173,11 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
               "refine_status": refine_status,
               "confidence_summary": conf_summary,
               "selection_mode": selection_mode,
+              "selection_status": selection_status,
+              "selection_note": selection_note,
+              "eligible_count": eligible_count,
+              "requested_limit": requested_limit,
+              "excluded_summary": excluded_summary,
               "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4, 5)},
               "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
     _RESULT_CACHE[_key] = (_now, result)

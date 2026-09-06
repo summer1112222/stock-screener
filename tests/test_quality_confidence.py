@@ -242,3 +242,109 @@ def test_confidence_multiplier_levels():
     assert quality._confidence_multiplier("high") == 1.0
     assert quality._confidence_multiplier("medium") == .85
     assert quality._confidence_multiplier("low") == .65
+
+
+# ------------------------------------------------------------------
+# 严格合格元数据（spec 2026-09-06：eligibility/exclusion_reasons/
+# selection_status/eligible_count/requested_limit/selection_note/excluded_summary）
+# ------------------------------------------------------------------
+def test_strict_eligibility_reasons_order_and_blocking():
+    """全失败输入：原因按确定性顺序，eligibility=False。"""
+    ok, reasons = quality._strict_eligibility(
+        hard_gate_pass=False, conf_score=0.2, min_confidence=0.5,
+        risk_flags=["资金脉冲(仅单日)"], hits=1, eff_min_dims=2, resonance_raw=None)
+    assert ok is False
+    assert reasons == ["hard_gate", "confidence", "risk_flags",
+                       "min_dims", "no_resonance"]
+
+
+def test_strict_eligibility_risk_flags_non_blocking():
+    """risk_flags 仅记录不阻断（2026-09-05 语义：脉冲是惩罚依据非硬拒）。"""
+    ok, reasons = quality._strict_eligibility(
+        hard_gate_pass=True, conf_score=0.8, min_confidence=0.5,
+        risk_flags=["资金脉冲(仅单日)"], hits=3, eff_min_dims=2, resonance_raw=12.0)
+    assert ok is True
+    assert reasons == ["risk_flags"]
+
+
+def test_strict_eligibility_clean_pass():
+    ok, reasons = quality._strict_eligibility(
+        hard_gate_pass=True, conf_score=0.9, min_confidence=0.5,
+        risk_flags=[], hits=2, eff_min_dims=2, resonance_raw=8.0)
+    assert ok is True
+    assert reasons == []
+
+
+def _strict_res(monkeypatch, conf_map=None, history=None, **kw):
+    """集成辅助：默认 2 标的 spot mock；conf_map 可定点覆盖 _data_confidence。"""
+    _mock_pipeline(monkeypatch, history=history)
+    quality._RESULT_CACHE.clear()
+    if conf_map:
+        real = quality._data_confidence
+
+        def fake(code, *a, **k):
+            if code in conf_map:
+                s, lvl = conf_map[code]
+                return {"score": s, "level": lvl, "components": {}, "warnings": []}
+            return real(code, *a, **k)
+        monkeypatch.setattr(quality, "_data_confidence", fake)
+    limit = kw.pop("limit", 5)
+    return quality.quality_rank("stock", min_dims=2, limit=limit, **kw)
+
+
+def test_strict_insufficient_not_padded(monkeypatch):
+    """严格合格不足 limit：不补齐，selection_status=insufficient+note。"""
+    res = _strict_res(monkeypatch, min_confidence=0.6)
+    assert res["selection_status"] == "insufficient"
+    assert res["requested_limit"] == 5
+    assert res["eligible_count"] < 5
+    assert len(res["main"]) <= res["eligible_count"]
+    assert res["selection_note"]
+
+
+def test_hard_gate_reason_isolated(monkeypatch):
+    """low 级别→hard_gate 拒；score≥min_confidence 时不带 confidence 原因。"""
+    res = _strict_res(monkeypatch, conf_map={"000001": (0.40, "low")},
+                      min_confidence=0.3)
+    it = next(x for x in res["by_dim"].get(3, []) if x["code"] == "000001")
+    assert it["eligibility"] is False
+    assert "hard_gate" in it["exclusion_reasons"]
+    assert "confidence" not in it["exclusion_reasons"]
+    assert all(r["code"] != "000001" for r in res["main"])
+
+
+def test_confidence_reason_isolated(monkeypatch):
+    """medium 级别过硬门槛但 score<min_confidence→仅 confidence 原因。"""
+    res = _strict_res(monkeypatch, conf_map={"000001": (0.40, "medium")},
+                      min_confidence=0.6)
+    it = next(x for x in res["by_dim"].get(3, []) if x["code"] == "000001")
+    assert it["eligibility"] is False
+    assert "confidence" in it["exclusion_reasons"]
+    assert "hard_gate" not in it["exclusion_reasons"]
+
+
+def test_excluded_summary_counts_blocking_reasons(monkeypatch):
+    res = _strict_res(monkeypatch, min_confidence=0.6)
+    assert isinstance(res["excluded_summary"], dict)
+    assert res["excluded_summary"].get("confidence", 0) >= 1
+    # risk_flags 非阻断原因，不进排除统计
+    assert "risk_flags" not in res["excluded_summary"]
+
+
+def test_loose_mode_keeps_existing_behavior(monkeypatch):
+    """非严格模式：main 包含语义不变，selection_status 恒 ok。"""
+    res = _strict_res(monkeypatch, strict_quality=False, min_confidence=0.6)
+    assert any(r["code"] == "000001" for r in res["main"])
+    assert res["selection_mode"] == "loose"
+    assert res["selection_status"] == "ok"
+    assert res["selection_note"] is None
+
+
+def test_selection_status_ok_when_enough(monkeypatch):
+    dates = pd.bdate_range("2022-01-01", periods=60)
+    hist = pd.DataFrame({"000001": [10.0] * 60, "000002": [9.0] * 60}, index=dates)
+    res = _strict_res(monkeypatch, history=hist, limit=1)
+    assert res["eligible_count"] >= 1
+    assert res["selection_status"] == "ok"
+    assert res["selection_note"] is None
+    assert all(it["eligibility"] for it in res["main"])
