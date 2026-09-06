@@ -1551,7 +1551,7 @@ async function ndLoad(){
 }
 function ndRender(d){
   const threshold=parseFloat(document.getElementById('ndCover')?.value||'0.5');
-  const items=(d.items||[]).filter(x=>(x.score_coverage||0)>=threshold);
+  const all=d.items||[], items=all.filter(x=>(x.score_coverage||0)>=threshold);
   if(!items.length){ document.getElementById('ndOut').innerHTML='<div class="empty">'+(d.items?.length?'因子覆盖率不足，切换“全部显示”查看':'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或选“全部”放开过滤)')+'</div>'; return; }
   const factors=[
     ['mom_5_1','动量','短中期动量，跳过最近1日隔夜噪声；权重0.30'],
