@@ -9,3 +9,11 @@ venv/
 
 *.stackdump
 data/cache/
+
+# 会话工作流噪声（调试导出/计划残留，反复生成勿提交）
+q.json
+q20.json
+findings.md
+progress.md
+task_plan.md
+C*tdx-fin-review.diff
