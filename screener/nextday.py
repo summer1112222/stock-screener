@@ -345,6 +345,70 @@ def _step3_pass(info: dict) -> bool:
     return info.get("bullish_align") or info.get("volume_breakout")
 
 
+def _explain_step_status(s: dict, mi: dict, bd: dict, p: dict,
+                        step4_score: float, step5_pass: bool) -> tuple[dict, dict]:
+    """生成五步可解释诊断；缺数据与规则未通过明确区分。"""
+    def status(passed, missing=False):
+        return "missing" if missing else ("pass" if passed else "fail")
+
+    reasons = {}
+    statuses = {}
+    chg, tr, price = (_to_f(s.get(k)) for k in
+                      ("change_pct", "turnover_rate", "latest_price"))
+    missing = [name for name, value in (("涨幅", chg), ("换手率", tr), ("价格", price))
+               if value is None]
+    statuses["step1"] = status(_step1_pass(s, p), bool(missing))
+    reasons["step1"] = ("缺少" + "、".join(missing) if missing else
+                         f"涨幅 {chg:.2f}% / 换手 {tr:.2f}% / 价格 {price:.2f}")
+
+    mv, pe = _to_f(s.get("circulating_market_cap")), _to_f(s.get("pe"))
+    missing = [name for name, value in (("流通市值", mv), ("PE", pe)) if value is None]
+    statuses["step2"] = status(_step2_pass(s, p), bool(missing))
+    if missing:
+        reasons["step2"] = "缺少" + "、".join(missing)
+    elif s.get("st_type"):
+        reasons["step2"] = f"ST({s.get('st_type')})"
+    else:
+        reasons["step2"] = f"市值 {mv:.2f}亿 / PE {pe:.2f}"
+
+    history_missing = bool(mi.get("need_history"))
+    statuses["step3"] = status(_step3_pass(mi), history_missing)
+    reasons["step3"] = ("历史日线不足 60 日" if history_missing else
+                         ("多头排列" if mi.get("bullish_align") else
+                          "放量突破" if mi.get("volume_breakout") else
+                          "空头排列或未满足形态"))
+
+    vr = _to_f(s.get("volume_ratio"))
+    missing = [name for name, value in (("量比", vr), ("涨幅", chg)) if value is None]
+    statuses["step4"] = status(step4_score > 0, bool(missing))
+    reasons["step4"] = ("缺少" + "、".join(missing) if missing else
+                         f"量比 {vr:.2f} / 软分 {step4_score:.2f}")
+
+    board_missing = not bd.get("board") or bd.get("board_rank") is None
+    statuses["step5"] = status(step5_pass, board_missing)
+    reasons["step5"] = ("板块成员或热度数据缺失" if board_missing else
+                         f"{bd.get('board')}·热度第 {bd.get('board_rank')}·涨停 {bd.get('board_zt_count') or 0} 只")
+    return statuses, reasons
+
+
+def _data_quality(s: dict, mi: dict, quote_available: bool,
+                  score_coverage: float) -> dict:
+    """汇总结果可用性，不将缺失数据等同于规则否决。"""
+    missing = []
+    for label, key in (("涨幅", "change_pct"), ("换手率", "turnover_rate"),
+                       ("流通市值", "circulating_market_cap"), ("PE", "pe"),
+                       ("量比", "volume_ratio")):
+        if _to_f(s.get(key)) is None:
+            missing.append(label)
+    if mi.get("need_history"):
+        missing.append("历史日线")
+    return {"source": "tdx" if quote_available else "stock_spot",
+            "quote_available": bool(quote_available),
+            "history_available": not bool(mi.get("need_history")),
+            "score_coverage": round(float(score_coverage or 0), 4),
+            "missing": missing}
+
+
 # ------------------------------------------------------------------
 # step4 软打分
 # ------------------------------------------------------------------
@@ -881,6 +945,7 @@ def nextday_strong_rank(universe: str = "stock",
         s4 = _step4_score(s)
         s5 = pass_by_code.get(code, False)
         hard = sum([s1, s2, s3, s5])
+        statuses, reasons = _explain_step_status(s, mi, bd, p, s4, s5)
         items.append({
             "code": code, "name": name,
             "change_pct": _nan(_to_f(s.get("change_pct"))),
@@ -895,6 +960,9 @@ def nextday_strong_rank(universe: str = "stock",
             "step1_pass": s1, "step2_pass": s2, "step3_pass": s3,
             "step4_score": s4, "step4_pass": s4 > 0,
             "step5_pass": s5,
+            "step_status": statuses, "step_reasons": reasons,
+            "data_quality": _data_quality(s, mi, code in quote_by_code,
+                                          coverage.get(code, 0.0)),
             "hard_pass": hard,
             "failed_steps": [name for name, passed in (
                 ("step1", s1), ("step2", s2), ("step3", s3),

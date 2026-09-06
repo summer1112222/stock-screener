@@ -396,6 +396,34 @@ def test_rank_tdx_blocks_uses_quote_when_spot_change_missing():
     assert ranked[0]["member_coverage"] == 2
 
 
+def test_structured_step_explanation_distinguishes_fail_and_missing():
+    """解释字段区分规则未通过与数据缺失。"""
+    p = {"min_change_pct": 5.0, "min_turnover": 3.0, "max_price": 50.0,
+         "min_mv": 10.0, "max_mv": 200.0, "max_pe": 150.0}
+    statuses, reasons = nd._explain_step_status(
+        {"change_pct": 2.0, "turnover_rate": 5.0, "latest_price": 30.0,
+         "circulating_market_cap": 50.0, "pe": 20.0, "volume_ratio": 3.0},
+        {"need_history": True}, {}, p, 50.0, False)
+    assert statuses["step1"] == "fail"
+    assert statuses["step2"] == "pass"
+    assert statuses["step3"] == "missing"
+    assert statuses["step5"] == "missing"
+    assert "涨幅" in reasons["step1"]
+    assert "历史" in reasons["step3"]
+
+
+def test_data_quality_reports_source_and_missing_fields():
+    quality = nd._data_quality(
+        {"change_pct": 6.0, "turnover_rate": None, "pe": 20.0},
+        {"need_history": True}, True, 0.5)
+    assert quality["source"] == "tdx"
+    assert quality["quote_available"] is True
+    assert quality["history_available"] is False
+    assert quality["score_coverage"] == 0.5
+    assert "换手率" in quality["missing"]
+    assert "历史日线" in quality["missing"]
+
+
 def test_nan_guard():
     """_nan 过滤 NaN/Inf/None。"""
     import math
