@@ -249,7 +249,8 @@ def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> tuple[
     out = {c: {"ma5": None, "ma10": None, "ma20": None, "ma60": None,
                "bullish_align": False, "volume_breakout": False,
                "bearish": False, "converged": False, "need_history": False,
-               "last_vol": None, "vol_avg20": None} for c in codes}
+               "last_vol": None, "vol_avg20": None,
+               "close_series": [], "amount_series": []} for c in codes}
     hist_amount: dict[str, list] = {}
     if not codes:
         return out, hist_amount
@@ -297,6 +298,16 @@ def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> tuple[
         if len(s) < 60:
             out[c]["need_history"] = True
             continue
+        # 挂完整序列供连续因子(mom_5_1/sr_10/close_vol_corr)算真实历史，
+        # 而非仅均线代理；amount_series 供量价相关，缺失保持空列表。
+        out[c]["close_series"] = s.tolist()
+        if amount is not None:
+            amount_col = next((col for col in (c, _add_prefix(c), _code_key(c))
+                               if col in amount.columns), None)
+            if amount_col is not None:
+                amt = amount[amount_col].dropna().tolist()
+                if amt:
+                    out[c]["amount_series"] = amt
         ma5 = s.rolling(5).mean().iloc[-1]
         ma10 = s.rolling(10).mean().iloc[-1]
         ma20 = s.rolling(20).mean().iloc[-1]
@@ -507,12 +518,23 @@ def _step5_pass(code: str, ranked_sectors: list[dict], board_members: dict,
 # 连续五因子评分
 # ------------------------------------------------------------------
 
+# 连续五因子评分(量价范式，贴近次日强势 T+1 追涨)
+# 因子来自开源量化/券商研报常见量价范式，公式透明、低相关、可用 stock_daily 历史重建：
+#   mom_5_1       短中期动量(跳过最近1日隔夜噪声，看真实历史收盘)
+#   rel_strength  横截面相对强度(当日涨幅 - 全市场中位数)
+#   sr_10         波动率归一收益(近10日日收益均值/标准差，同收益奖波动小)
+#   close_vol_corr 量价共振(近20日 close 与成交额的相关，价升量增方向)
+#   liq_turnover  流动性质量(流通市值充足 + 换手适中，过滤极端小盘与过度拥挤)
+# 权重为经验先验，需用本地历史研究(IC/分层)验证，不代表预测能力。
+# IC 校准(2026-09-06, 692 只/1619 交易日)：mom_5_1 是唯一 1 日强正 IC(+0.023, 胜率 54%)→提至 0.30；
+# close_vol_corr 双窗口负 IC(1 日 -0.007 / 5 日 -0.018)→由 0.20 大降至 0.10(逆着信号)；
+# sr_10 弱正(1 日 +0.007)、5 日转负→降至 0.15。rel_strength/liq_turnover 无法用 OHLCV 回测，维持。
 _FACTOR_WEIGHTS = {
-    "price_volume": 0.25,
-    "liquidity_scale": 0.20,
-    "trend": 0.25,
-    "quote": 0.15,
-    "board_assist": 0.15,
+    "mom_5_1": 0.30,
+    "rel_strength": 0.20,
+    "sr_10": 0.15,
+    "close_vol_corr": 0.10,
+    "liq_turnover": 0.15,
 }
 
 
@@ -555,78 +577,104 @@ def _weighted_score(factor_maps: dict[str, dict[str, float | None]],
         details[code] = {name: round(float(pct_maps[name][code]) * 100, 2)
                          if pct_maps[name].get(code) is not None else None
                          for name in _FACTOR_WEIGHTS}
+        # 兼容旧诊断键(板块助攻)；新因子不再参与评分，但保留键供前端/测试读取。
+        details[code].setdefault("board_assist", None)
         coverage[code] = round(denom / total, 4)
     return scores, details, coverage
 
 
-def _factor_price_volume(s, market_median: float | None) -> float | None:
-    """实时量价原始分：涨幅温和、量比充分且跑赢市场。"""
-    chg, vr = _to_f(s.get("change_pct")), _to_f(s.get("volume_ratio"))
-    if chg is None and vr is None:
+def _series(mi: dict | None, key: str) -> list:
+    """从 ma_info 取历史序列；缺/非 list 返空列表。"""
+    v = (mi or {}).get(key)
+    return v if isinstance(v, list) else []
+
+
+def _factor_mom_5_1(s, ma_info: dict | None = None) -> float | None:
+    """短中期动量(代理 5-1 动量): 最新收盘相对 5 日前收盘。
+
+    跳过最近 1 日隔夜噪声，看 5 日真实趋势。无历史序列时退化为当日涨幅归一。
+    """
+    closes = _series(ma_info, "close_series")
+    if len(closes) >= 7:
+        prev = closes[-6]
+        cur = closes[-1]
+        if prev and prev > 0:
+            return _clip((cur / prev - 0.95) / 0.15)
+    chg = _to_f(s.get("change_pct"))
+    if chg is None:
         return None
-    volume = _clip((vr - 1.0) / 2.0) if vr is not None else 0.0
-    # 3%-7% 是观察区间，过热涨幅不直接奖励。
-    temper = 1.0 if chg is None or 3.0 <= chg <= 7.0 else max(0.0, 1.0 - abs(chg - 5.0) / 10.0)
-    relative = _clip((chg - (market_median or 0.0) + 5.0) / 10.0) if chg is not None else 0.0
-    return 0.45 * temper + 0.35 * volume + 0.20 * relative
+    return _clip((chg + 5.0) / 15.0)
 
 
-def _factor_liquidity_scale(s) -> float | None:
-    """流动性/规模原始分：换手和流通市值处于可观察区间更高。"""
+def _factor_relative_strength(s, market_median: float | None = None,
+                              ma_info: dict | None = None) -> float | None:
+    """横截面相对强度: 个股当日涨幅相对全市场中位数的强弱。"""
+    chg = _to_f(s.get("change_pct"))
+    if chg is None:
+        return None
+    base = market_median if market_median is not None else 0.0
+    return _clip((chg - base + 5.0) / 10.0)
+
+
+def _factor_sr_10(s, ma_info: dict | None = None) -> float | None:
+    """波动率归一收益: 近10日日收益均值/标准差(夏普式)。
+
+    同收益下奖励低波动(波动大、同等收益分低)。缺序列 → None(不伪造 0)。
+    """
+    closes = _series(ma_info, "close_series")
+    if len(closes) < 11:
+        return None
+    rets = []
+    for i in range(1, len(closes)):
+        p, c = closes[i - 1], closes[i]
+        if p and p > 0:
+            rets.append(c / p - 1.0)
+    if len(rets) < 10:
+        return None
+    rets = rets[-10:]
+    m = sum(rets) / len(rets)
+    var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
+    sd = math.sqrt(var)
+    if sd <= 0:
+        return _clip(m / 0.05)
+    return _clip(m / sd / 1.0 + 0.5)
+
+
+def _factor_close_vol_corr(s, ma_info: dict | None = None) -> float | None:
+    """量价共振: 近20日 close 与 amount 的皮尔逊相关 + 价升量增方向。
+
+    相关为正(价升量增)得分高，为负(价升量缩)低分。缺任一序列 → None。
+    """
+    closes = _series(ma_info, "close_series")
+    amounts = _series(ma_info, "amount_series")
+    n = min(len(closes), len(amounts))
+    if n < 20:
+        return None
+    closes = closes[-20:]
+    amounts = amounts[-20:]
+    mc = sum(closes) / len(closes)
+    ma = sum(amounts) / len(amounts)
+    num = sum((x - mc) * (y - ma) for x, y in zip(closes, amounts))
+    den_c = sum((x - mc) ** 2 for x in closes) ** 0.5
+    den_a = sum((y - ma) ** 2 for y in amounts) ** 0.5
+    if den_c <= 0 or den_a <= 0:
+        return 0.5
+    corr = num / (den_c * den_a)
+    return _clip(corr / 1.0 + 0.5)
+
+
+def _factor_liq_turnover(s, ma_info: dict | None = None) -> float | None:
+    """流动性质量: 流通市值充足 + 换手适中。
+
+    市值越大越易成交(非流动性越低)，换手适中过滤极端小盘与过度拥挤。
+    """
     mv, tr = _to_f(s.get("circulating_market_cap")), _to_f(s.get("turnover_rate"))
     if mv is None and tr is None:
         return None
-    mv_score = _clip(1.0 - abs(mv - 100.0) / 100.0) if mv is not None else 0.0
-    tr_score = _clip(1.0 - abs(tr - 6.0) / 8.0) if tr is not None else 0.0
-    return (0.55 * mv_score + 0.45 * tr_score
-            if mv is not None and tr is not None else mv_score + tr_score)
+    mv_score = _clip(mv / 300.0) if mv is not None else 0.5
+    tr_score = _clip(1.0 - abs(tr - 6.0) / 10.0) if tr is not None else 0.5
+    return 0.6 * mv_score + 0.4 * tr_score
 
-
-def _factor_trend(ma_info: dict) -> float | None:
-    """历史趋势原始分；无至少60日历史时明确缺失。"""
-    if not ma_info or ma_info.get("need_history"):
-        return None
-    parts = []
-    if ma_info.get("bullish_align"):
-        parts.append(1.0)
-    elif ma_info.get("bearish"):
-        parts.append(0.0)
-    else:
-        parts.append(0.45)
-    if ma_info.get("volume_breakout"):
-        parts.append(1.0)
-    elif ma_info.get("vol_avg20"):
-        parts.append(_clip((_to_f(ma_info.get("last_vol")) or 0.0) /
-                           max(_to_f(ma_info.get("vol_avg20")) or 1.0, 1.0) / 2.0))
-    if ma_info.get("ma60") and ma_info.get("ma5"):
-        parts.append(_clip((_to_f(ma_info["ma5"]) / max(_to_f(ma_info["ma60"]), 1e-9) - 0.9) / 0.3))
-    return float(np.mean(parts)) if parts else None
-
-
-def _quote_factor(q: dict | None) -> float | None:
-    """TDX 五档/内外盘供求原始分，方向仅作为观察因子。"""
-    if not q or _to_f(q.get("price")) is None:
-        return None
-    bvol, svol = _to_f(q.get("b_vol")), _to_f(q.get("s_vol"))
-    active = ((bvol - svol) / (bvol + svol)
-              if bvol is not None and svol is not None and bvol + svol > 0 else None)
-    bid = sum((_to_f(q.get(f"bid_vol{i}")) or 0.0) * (_to_f(q.get(f"bid{i}")) or 0.0)
-              for i in range(1, 6))
-    ask = sum((_to_f(q.get(f"ask_vol{i}")) or 0.0) * (_to_f(q.get(f"ask{i}")) or 0.0)
-              for i in range(1, 6))
-    imbalance = (bid - ask) / (bid + ask) if bid + ask > 0 else None
-    values = [x for x in (active, imbalance) if x is not None]
-    return float(np.mean([(x + 1.0) / 2.0 for x in values])) if values else None
-
-
-def _factor_board(assisted: bool, info: dict) -> float | None:
-    """板块热度+涨停扩散；板块数据不可用时返回缺失而非惩罚。"""
-    rank, zt = info.get("board_rank"), info.get("board_zt_count")
-    if rank is None and zt is None:
-        return None
-    heat = _clip((6.0 - float(rank)) / 5.0) if _to_f(rank) is not None else 0.0
-    spread = _clip(float(zt or 0) / 4.0) if zt is not None else 0.0
-    return 0.65 * heat + 0.35 * spread
 
 
 # ------------------------------------------------------------------
@@ -806,12 +854,11 @@ def nextday_strong_rank(universe: str = "stock",
             s5 = True
         board_by_code[code] = bd
         pass_by_code[code] = s5
-        factor_maps["price_volume"][code] = _factor_price_volume(s, median_chg)
-        factor_maps["liquidity_scale"][code] = _factor_liquidity_scale(s)
-        factor_maps["trend"][code] = _factor_trend(mi)
-        factor_maps["quote"][code] = _quote_factor(
-            quote_by_code.get(_code_key(code)) or quote_by_code.get(code))
-        factor_maps["board_assist"][code] = _factor_board(s5, bd)
+        factor_maps["mom_5_1"][code] = _factor_mom_5_1(s, mi)
+        factor_maps["rel_strength"][code] = _factor_relative_strength(s, median_chg)
+        factor_maps["sr_10"][code] = _factor_sr_10(s, mi)
+        factor_maps["close_vol_corr"][code] = _factor_close_vol_corr(s, mi)
+        factor_maps["liq_turnover"][code] = _factor_liq_turnover(s, mi)
 
     scores, factor_scores, coverage = _weighted_score(factor_maps, codes_k)
     items = []
@@ -844,6 +891,10 @@ def nextday_strong_rank(universe: str = "stock",
             "step4_score": s4, "step4_pass": s4 > 0,
             "step5_pass": s5,
             "hard_pass": hard,
+            "failed_steps": [name for name, passed in (
+                ("step1", s1), ("step2", s2), ("step3", s3),
+                ("step4", s4 > 0), ("step5", s5),
+            ) if not passed],
             "need_history": mi.get("need_history", False),
             "factor_scores": factor_scores.get(code, {}),
             "score_coverage": coverage.get(code, 0.0),
@@ -859,12 +910,21 @@ def nextday_strong_rank(universe: str = "stock",
     )]
     passed_items.sort(key=lambda x: (x["score"], x["hard_pass"]), reverse=True)
     base["passed_items"] = passed_items[:max(0, limit)]
-    diagnostic_items = sorted(items, key=lambda x: (x["score"], x["hard_pass"]), reverse=True)
+    diagnostic_items = sorted(
+        items,
+        key=lambda x: (x["hard_pass"], x["score"], x["score_coverage"],
+                       x.get("change_pct") or -99),
+        reverse=True,
+    )
     base["all_items"] = diagnostic_items[:max(0, limit)]
     base["rejected_items"] = [it for it in diagnostic_items if it not in passed_items]
-    if not base["passed_items"]:
-        base["note"] = "当前数据条件下没有五步全部通过的股票"
-    items = base["passed_items"]
+    if base["passed_items"]:
+        base["selection_mode"] = "strict"
+        items = base["passed_items"]
+    else:
+        base["selection_mode"] = "fallback"
+        base["note"] = "当前数据条件下没有五步全部通过的股票，以下为接近通过的观察清单"
+        items = diagnostic_items[:max(0, limit)]
     for i, it in enumerate(items):
         it["rank"] = i + 1
 

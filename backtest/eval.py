@@ -54,11 +54,13 @@ def compute_factor(close: pd.DataFrame, factor_key: str,
     """
     params = params or {}
     n = int(params.get("n", 20))
+    m = re.search(r"_(\d+)$", factor_key)
+    nn = int(m.group(1)) if m else n  # momentum_5 / volatility_20 从 key 解析窗口
     if factor_key.startswith("momentum"):
-        return close.pct_change(n)
+        return close.pct_change(nn)
     if factor_key.startswith("volatility"):
         ret = close.pct_change()
-        return ret.rolling(n).std()
+        return ret.rolling(nn).std()
     if factor_key.startswith("turnover"):
         base = amount if amount is not None else volume
         if base is None:
@@ -85,6 +87,26 @@ def compute_factor(close: pd.DataFrame, factor_key: str,
             return pd.DataFrame(index=close.index, columns=close.columns)
         dr = close.pct_change()
         return (dr.abs() / amount.replace(0, np.nan)).rolling(nn).mean()
+    if factor_key.startswith("sharpe"):
+        # 波动率归一收益: 近 n 日日收益均值/标准差(夏普式)。前视安全(只用 <=t)。
+        ret = close.pct_change()
+        mu = ret.rolling(n, min_periods=max(2, n)).mean()
+        sd = ret.rolling(n, min_periods=max(2, n)).std()
+        return mu / sd.replace(0, np.nan)
+    if factor_key.startswith("vol_corr"):
+        # 量价共振: 近 n 日 close 与 amount 的滚动皮尔逊相关, 归一到 [0,1]。
+        # amount 缺失或序列恒定时相关未定义 → 中性 0.5, 而非 NaN/越界。
+        nn = n
+        m = re.search(r"_(\d+)$", factor_key)
+        if m:
+            nn = int(m.group(1))
+        if amount is None:
+            return pd.DataFrame(index=close.index, columns=close.columns)
+        num = (close * amount).rolling(nn, min_periods=2).mean() - close.rolling(nn, min_periods=2).mean() * amount.rolling(nn, min_periods=2).mean()
+        den_c = close.rolling(nn, min_periods=2).std()
+        den_a = amount.rolling(nn, min_periods=2).std()
+        corr = num / (den_c * den_a).replace(0, np.nan)
+        return (corr.clip(-1, 1) + 1.0) / 2.0
     raise ValueError(f"未知 factor_key: {factor_key}")
 
 

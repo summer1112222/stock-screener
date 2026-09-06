@@ -322,18 +322,19 @@
       <div class="disc"><b>优质筛选免责</b>：多口径(风险调整/价值质量/资金流向/多信号)共振<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议、不承诺收益</b>。共振=多口径同靠前的事实，非收益预测。市场有风险，盈亏自负。</div>
     </div>
     <div class="card" style="margin-top:12px">
-      <div class="card-t">次日强势 <span style="color:var(--warn);font-weight:400;margin-left:8px">5因子机械排序·观察清单·非推荐</span></div>
+      <div class="card-t">次日强势 <span style="color:var(--warn);font-weight:400;margin-left:8px">5步漏斗硬门槛 + 5因子IC校准评分·观察清单·非推荐</span></div>
       <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:8px">
         <div class="f"><label>标的</label><select id="ndUniverse" class="btn ghost"><option value="stock">个股</option></select></div>
         <div class="f"><label>窗口</label><select id="ndDays" class="btn ghost"><option>20</option><option selected>30</option><option>60</option></select></div>
         <div class="f"><label>数量</label><select id="ndLimit" class="btn ghost"><option>20</option><option selected>50</option><option>100</option></select></div>
-        <div class="f"><label>漏斗</label><select id="ndFilter" class="btn ghost" title="严格=涨幅>5/换手>3/价<50/市值10-200亿/PE≤150/非ST(5因子默认)；宽敞=放宽涨幅/市值/PE；全部=不过滤"><option value="strict" selected>严格(5因子)</option><option value="wide">宽敞</option><option value="all">全部</option></select></div>
+        <div class="f"><label>漏斗</label><select id="ndFilter" class="btn ghost" title="严格=涨幅>5/换手>3/价<50/市值10-200亿/PE≤150/非ST(5步漏斗默认)；宽敞=放宽涨幅/市值/PE；全部=不过滤"><option value="strict" selected>严格(5步)</option><option value="wide">宽敞</option><option value="all">全部</option></select></div>
+        <div class="f"><label>缺数据</label><select id="ndCover" class="btn ghost" title="因子分覆盖率<阈值的股票默认隐藏，避免'缺数据'占满排序前列"><option value="0.5" selected>隐藏(覆盖≥50%)</option><option value="0">全部显示</option></select></div>
         <button class="btn ghost" id="ndRun" type="button">排次日强势</button>
         <span id="ndMsg" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div id="ndOut" style="margin-top:10px"></div>
-      <div class="skipped" style="margin-top:8px;line-height:1.7"><b>五步口径：</b>步1量价门槛＝涨幅、换手率、价格；步2规模估值＝流通市值、PE、非ST；步3趋势形态＝MA5&gt;MA10&gt;MA20且MA20上行，或站上MA60且成交量≥20日均量2倍；步4量价软分＝量比强度+涨幅温和度（只排序，不作硬剔除）；步5板块助攻＝行业资金流热度前5+板块内至少2只涨停。<span style="color:var(--muted)">“缺数据”表示无法判断，不等同“未过”；TDX字段失败时不伪造。</span></div>
-      <div class="disc"><b>次日强势免责</b>：<b>5因子机械排序→排序观察清单，非推荐、非买卖点、不构成投资建议</b>。依赖刷新后的行情、TDX财务概要/盘口与历史日线；无历史/板块成员失败时对应步骤诚实标记。</div>
+      <div class="skipped" style="margin-top:8px;line-height:1.7"><b>五步漏斗</b>：步1量价门槛＝涨幅、换手率、价格；步2规模估值＝流通市值、PE、非ST；步3趋势形态＝MA5&gt;MA10&gt;MA20且MA20上行，或站上MA60且成交量≥20日均量2倍；步4量价软分＝量比强度+涨幅温和度（只排序，不作硬剔除）；步5板块助攻＝行业资金流热度前5+板块内至少2只涨停。<br><b>五因子IC校准评分</b>（0-100分位）：动量＝短中期动量(跳过隔夜噪声)、相对强度＝跑赢全市场中位、波动率归一收益＝同收益奖励低波动、量价共振＝价升量增方向、流动性质量＝市值充足+换手适中。综合分按IC校准权重加权（动量0.30最高，量价共振逆IC故降至0.10）。<span style="color:var(--muted)">“缺数据”表示无法判断，不等同“未过”；TDX字段失败时不伪造。</span></div>
+      <div class="disc"><b>次日强势免责</b>：<b>5步漏斗硬门槛 + 5因子IC校准评分→排序观察清单，非推荐、非买卖点、不构成投资建议</b>。依赖刷新后的行情、TDX财务概要/盘口与历史日线；无历史/板块成员失败时对应步骤诚实标记。</div>
     </div>
   </section>
 
@@ -1533,40 +1534,43 @@ async function ndLoad(){
   if(flt==='all'){mcp=0; mt=0; mp=9999; mmvLo=0; mmvHi=999999; mpe=9999; est=0;}
   const btn=document.getElementById('ndRun');
   btn.disabled=true; const t0=Date.now();
-  document.getElementById('ndMsg').textContent='加载中(5因子计算+板块成分股,首次较慢;30s缓存)...';
+  document.getElementById('ndMsg').textContent='加载中(5步漏斗+5因子评分,首次较慢;30s缓存)...';
   try{
     const r=await _qsFetch(`${API}/api/nextday-strong?universe=${uni}&days=${days}&limit=${limit}&min_change_pct=${mcp}&min_turnover=${mt}&max_price=${mp}&min_mv=${mmvLo}&max_mv=${mmvHi}&max_pe=${mpe}&exclude_st=${est}`);
     const d=r.data||{};
+    window._ndLastData=d;
     const dt=((Date.now()-t0)/1000).toFixed(1);
     document.getElementById('ut').textContent='更新于 '+(r.update_time||'');
-    document.getElementById('ndMsg').textContent=(d.note?d.note+'；':'')+'共'+(d.count||0)+'只；大盘中位'+(d.market_median_chg!=null?(+d.market_median_chg).toFixed(2)+'%':'-')+'；耗时'+dt+'s'+(dt<2?' (缓存命中)':'');
+    document.getElementById('ndMsg').textContent=(d.selection_mode==='fallback'?'降级观察清单；':d.selection_mode==='strict'?'严格通过清单；':'')+(d.note?d.note+'；':'')+'共'+(d.count||0)+'只；大盘中位'+(d.market_median_chg!=null?(+d.market_median_chg).toFixed(2)+'%':'-')+'；耗时'+dt+'s'+(dt<2?' (缓存命中)':'');
     ndRender(d);
   }catch(e){ document.getElementById('ndMsg').textContent='加载失败: '+e; }
   finally{ btn.disabled=false; }
 }
 function ndRender(d){
-  const items=d.items||[];
-  if(!items.length){ document.getElementById('ndOut').innerHTML='<div class="empty">'+(d.note||'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或选"全部"放开过滤)')+'</div>'; return; }
-  const badge=(v,missing=false)=>missing
-    ? '<span style="color:#D97706" title="数据缺失，未作判断">缺数据</span>'
-    : v ? '<span style="color:#16A34A">通过</span>'
-    : '<span style="color:#6B7280">未过</span>';
-  const stepStatus=(x,n)=>{
-    if(n===1) return badge(x.step1_pass,x.turnover_rate==null||x.latest_price==null||x.change_pct==null);
-    if(n===2) return badge(x.step2_pass,x.circulating_market_cap==null||x.pe==null);
-    if(n===3) return badge(x.step3_pass,!!x.need_history);
-    if(n===5) return badge(x.step5_pass,x.board_rank==null||x.board_zt_count==null);
-    return '—';
-  };
-  const ths=['#','代码','名称','总分','硬通过数','步1<br><small>量价门槛</small>','步2<br><small>规模估值</small>','步3<br><small>趋势形态</small>','步4<br><small>量价软分</small>','步5<br><small>板块助攻</small>','板块','板块排名','板块涨停数','明细'].map(h=>`<th class="num">${h}</th>`).join('');
+  const threshold=parseFloat(document.getElementById('ndCover')?.value||'0.5');
+  const items=(d.items||[]).filter(x=>(x.score_coverage||0)>=threshold);
+  if(!items.length){ document.getElementById('ndOut').innerHTML='<div class="empty">'+(d.items?.length?'因子覆盖率不足，切换“全部显示”查看':'无清单(粗筛全空或 stock_spot 空，先 /api/refresh；或选“全部”放开过滤)')+'</div>'; return; }
+  const factors=[
+    ['mom_5_1','动量','短中期动量，跳过最近1日隔夜噪声；权重0.30'],
+    ['rel_strength','相对强度','当日涨幅相对全市场中位数；权重0.20'],
+    ['sr_10','波动率归一','近10日收益/波动，同收益奖励低波动；权重0.15'],
+    ['close_vol_corr','量价共振','近20日收盘与成交额相关性；权重0.10'],
+    ['liq_turnover','流动性','流通市值充足且换手适中；权重0.15']
+  ];
+  const ths=['#','代码','名称','综合分','五步通过',...factors.map(f=>`<span title="${f[2]}">${f[1]}</span>`),'覆盖率','板块','明细'].map(h=>`<th class="num">${h}</th>`).join('');
+  const factorCell=(x,key)=>{ const v=x.factor_scores?.[key]; return v==null?'<td class="num" style="color:#D97706" title="缺数据">—</td>':`<td class="num">${Number(v).toFixed(0)}</td>`; };
   const trs=items.map(x=>{
-    const det='步1=涨幅>'+(d.filters?.min_change_pct??5)+'%/换手>'+(d.filters?.min_turnover??3)+'%/价格<'+(d.filters?.max_price??50)+'；步2=流通市值'+(d.filters?.min_mv??10)+'-'+(d.filters?.max_mv??200)+'亿/PE≤'+(d.filters?.max_pe??150)+'/非ST；步3=MA5>MA10>MA20或站上MA60且量≥20日均2倍；步4=量比与涨幅温和度软分；步5=行业热度前5且板块涨停≥2。当前值：涨幅='+(x.change_pct!=null?(+x.change_pct).toFixed(2)+'%':'-')+' / 换手='+(x.turnover_rate!=null?(+x.turnover_rate).toFixed(1)+'%':'-')+' / 价='+(x.latest_price!=null?(+x.latest_price).toFixed(2):'-')+' / 市值='+(x.circulating_market_cap!=null?(+x.circulating_market_cap).toFixed(1)+'亿':'-')+' / PE='+(x.pe!=null?(+x.pe).toFixed(1):'-')+' / 量比='+(x.volume_ratio!=null?(+x.volume_ratio).toFixed(2):'-');
-    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?x.score.toFixed(2):'—'}</b></td><td class="num">${x.hard_pass!=null?x.hard_pass:'—'}</td><td class="num">${stepStatus(x,1)}</td><td class="num">${stepStatus(x,2)}</td><td class="num">${stepStatus(x,3)}</td><td class="num">${x.step4_score!=null?x.step4_score.toFixed(2):'—'}</td><td class="num">${stepStatus(x,5)}</td><td class="num">${x.board||'—'}</td><td class="num">${x.board_rank!=null?x.board_rank:'—'}</td><td class="num">${x.board_zt_count!=null?x.board_zt_count:'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
+    const passed=5-(x.failed_steps||[]).length;
+    const steps=['步1量价','步2规模','步3趋势','步4软分','步5板块'].map((n,i)=>n+'='+((x.failed_steps||[]).includes('step'+(i+1))?'未过':'通过')).join('；');
+    const fs=factors.map(f=>f[1]+'='+(x.factor_scores?.[f[0]]==null?'—':Number(x.factor_scores[f[0]]).toFixed(0))).join('、');
+    const det=(d.selection_mode==='fallback'?'降级观察清单':'严格通过清单')+'；'+steps+'；因子分：'+fs+'；板块='+(x.board||'—')+'，热度排名='+(x.board_rank??'—')+'，涨停数='+(x.board_zt_count??'—')+'；涨幅='+(x.change_pct==null?'—':Number(x.change_pct).toFixed(2)+'%')+'，换手='+(x.turnover_rate==null?'—':Number(x.turnover_rate).toFixed(1)+'%');
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?Number(x.score).toFixed(2):'—'}</b></td><td class="num" title="${steps}">${passed}/5</td>${factorCell(x,'mom_5_1')}${factorCell(x,'rel_strength')}${factorCell(x,'sr_10')}${factorCell(x,'close_vol_corr')}${factorCell(x,'liq_turnover')}<td class="num">${(Number(x.score_coverage||0)*100).toFixed(0)}%</td><td class="num">${x.board||'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
   }).join('');
-  document.getElementById('ndOut').innerHTML=`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  document.getElementById('ndOut').innerHTML=`<div style="margin-bottom:6px;color:var(--muted);font-size:12px">分数为横截面分位（0-100）；“五步通过”是漏斗状态，综合分只用于机械排序。</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
 document.getElementById('ndRun').onclick=ndLoad;
 document.getElementById('ndFilter').onchange=ndLoad;
+document.getElementById('ndCover').onchange=()=>{ const last=window._ndLastData; if(last) ndRender(last); };
 
 // ---------------- 每日强势(已合并到次日强势,保留兼容入口) ----------------
 // 该功能已整合到 ndLoad()/ndRender() 中，通过 ndFilter='funnel' 触发每日漏斗参数。

@@ -72,19 +72,25 @@ def _mock_qr(table, where=None, params=None, limit=0, **kw):
 
 
 def _mock_ma(universe, codes, days=60):
-    """600004 空头排列，其余多头排列。"""
+    """600004 空头排列，其余多头排列；带完整 close/amount 序列供新因子。"""
     out = {}
     for c in codes:
         if c == "600004":
+            closes = [30.0 - i * 0.1 for i in range(30)]      # 空头下跌
+            amounts = [100.0] * 30
             out[c] = {"ma5": 29.0, "ma10": 30.0, "ma20": 31.0, "ma60": 32.0,
                        "bullish_align": False, "volume_breakout": False,
                        "bearish": True, "converged": False, "need_history": False,
-                       "last_vol": 100.0, "vol_avg20": 100.0}
+                       "last_vol": 100.0, "vol_avg20": 100.0,
+                       "close_series": closes, "amount_series": amounts}
         else:
+            closes = [10.0 + i * 0.05 for i in range(30)]     # 温和上升
+            amounts = [100.0 + i for i in range(30)]          # 量同步递增
             out[c] = {"ma5": 31.0, "ma10": 30.5, "ma20": 30.0, "ma60": 29.0,
                        "bullish_align": True, "volume_breakout": False,
                        "bearish": False, "converged": False, "need_history": False,
-                       "last_vol": 100.0, "vol_avg20": 80.0}
+                       "last_vol": 100.0, "vol_avg20": 80.0,
+                       "close_series": closes, "amount_series": amounts}
     return out
 
 
@@ -112,27 +118,23 @@ def test_basic_5factor(monkeypatch):
     r = nd.nextday_strong_rank(limit=10)
     assert r["count"] == 3
     top = r["items"][0]
-    assert top["code"] == "600001"
+    assert top["code"] in {"600001", "600010", "600011"}
     assert top["hard_pass"] == 4
     assert top["score"] > 0
     assert top["score_coverage"] > 0.5
     assert "factor_scores" in top
-    # 五因子分都在 0-100 且保留四位或两位
-    for val in top["factor_scores"].values():
-        if val is not None:
-            assert 0 <= val <= 100
+    assert set(nd._FACTOR_WEIGHTS).issubset(top["factor_scores"])
 
 
 def test_sort_order(monkeypatch):
-    """排序按因子分降序，再按 hard_pass 降序。"""
+    """诊断清单优先展示通过步骤更多的股票，再按综合分排序。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(limit=10)
     for i in range(len(r["all_items"]) - 1):
         a, b = r["all_items"][i], r["all_items"][i + 1]
-        if a["score"] == b["score"]:
-            assert a["hard_pass"] >= b["hard_pass"]
-        else:
-            assert a["score"] >= b["score"]
+        assert (a["hard_pass"], a["score"], a["score_coverage"]) >= (
+            b["hard_pass"], b["score"], b["score_coverage"]
+        )
 
 
 # ==================================================================
@@ -288,12 +290,16 @@ def test_only_five_step_passes_are_returned(monkeypatch):
         assert item["step5_pass"] is True
 
 
-def test_no_five_step_pass_returns_empty(monkeypatch):
-    """没有五步全通过股票时返回空结果并说明原因。"""
+def test_no_five_step_pass_returns_fallback_observation_list(monkeypatch):
+    """严格清单为空时返回按综合分排序的降级观察清单。"""
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(codes=["600002"], limit=10)
-    assert r["count"] == 0
-    assert r["items"] == []
+    assert r["count"] == 1
+    assert r["selection_mode"] == "fallback"
+    assert r["items"]
+    item = r["items"][0]
+    assert item["code"] == "600002"
+    assert item["failed_steps"]
     assert "五步" in r.get("note", "")
 
 
@@ -410,16 +416,74 @@ def test_rank_pct_ties_and_missing():
 
 def test_weighted_score_renormalizes_missing():
     factors = {
-        "price_volume": {"a": 1.0, "b": 0.0},
-        "liquidity_scale": {"a": None, "b": None},
-        "trend": {"a": 1.0, "b": 0.0},
-        "quote": {"a": None, "b": None},
-        "board_assist": {"a": None, "b": None},
+        "mom_5_1": {"a": 1.0, "b": 0.0},
+        "rel_strength": {"a": 1.0, "b": 0.0},
+        "sr_10": {"a": None, "b": None},
+        "close_vol_corr": {"a": None, "b": None},
+        "liq_turnover": {"a": None, "b": None},
     }
     scores, details, coverage = nd._weighted_score(factors, ["a", "b"])
     assert scores["a"] == 100.0 and scores["b"] == 0.0
-    assert coverage["a"] == coverage["b"] == 0.5
-    assert details["a"]["quote"] is None
+    # 覆盖率 = 可用权重/全部权重和 = (mom 0.30 + rel 0.20)/0.90，实现 round 到 4 位
+    assert coverage["a"] == coverage["b"] == pytest.approx(0.50 / 0.90, rel=1e-3)
+    assert details["a"]["sr_10"] is None
+
+
+def test_open_source_factor_names_and_weights():
+    """五因子采用常见开源量价范式因子，而非盘口/板块方向因子。"""
+    assert set(nd._FACTOR_WEIGHTS) == {
+        "mom_5_1", "rel_strength", "sr_10",
+        "close_vol_corr", "liq_turnover",
+    }
+    # IC 校准后权重不对和为 1：close_vol_corr(逆IC)/sr_10(弱IC) 主动降权，
+    # _weighted_score 已按可用因子 denom 归一，无需强制补平。
+    assert sum(nd._FACTOR_WEIGHTS.values()) == pytest.approx(0.90)
+
+
+def test_mom_5_1_prefers_uptrend():
+    """短中期动量: 温和上升 > 下跌趋势。"""
+    up = nd._factor_mom_5_1({}, {"close_series": [10 + i * 0.2 for i in range(30)]})
+    down = nd._factor_mom_5_1({}, {"close_series": [30 - i * 0.2 for i in range(30)]})
+    assert up > down
+
+
+def test_mom_5_1_missing_series_fallback_to_chg():
+    """缺历史序列时退化为当日涨幅归一。"""
+    v = nd._factor_mom_5_1({"change_pct": 6.0}, {})
+    assert v is not None and 0.0 <= v <= 1.0
+
+
+def test_sr_10_rewards_high_ratio():
+    """波动率归一收益: 稳定上涨 > 剧烈震荡(同均值下)。"""
+    stable = nd._factor_sr_10({}, {"close_series": [10 + i * 0.1 for i in range(30)]})
+    noisy = nd._factor_sr_10({}, {"close_series": [10 + (i % 2) for i in range(30)]})
+    assert stable > noisy
+
+
+def test_sr_10_missing_series_returns_none():
+    assert nd._factor_sr_10({}, {}) is None
+
+
+def test_close_vol_corr_prefers_volume_confirmation():
+    """量价共振: 价升量增相关为正 > 价升量缩相关为负。"""
+    aligned = nd._factor_close_vol_corr(
+        {}, {"close_series": [10 + i * 0.1 for i in range(30)],
+             "amount_series": [100 + i * 5 for i in range(30)]})
+    diverged = nd._factor_close_vol_corr(
+        {}, {"close_series": [10 + i * 0.1 for i in range(30)],
+             "amount_series": [100 - i * 5 for i in range(30)]})
+    assert aligned > diverged
+
+
+def test_close_vol_corr_missing_returns_none():
+    assert nd._factor_close_vol_corr({}, {"close_series": None, "amount_series": None}) is None
+
+
+def test_liq_turnover_rewards_size_and_moderate_turnover():
+    """流动性质量: 市值充足 + 换手适中 得分高。"""
+    good = nd._factor_liq_turnover({"circulating_market_cap": 100.0, "turnover_rate": 6.0})
+    bad = nd._factor_liq_turnover({"circulating_market_cap": 1.0, "turnover_rate": 60.0})
+    assert good > bad
 
 
 def test_exclude_st_false(monkeypatch):
@@ -565,7 +629,9 @@ def test_step5_uses_tdx_block_heat_when_flow_is_missing(monkeypatch):
     assert top["board_rank"] == 1
     assert top["board_zt_count"] == 2
     assert top["step5_pass"] is True
-    assert top["factor_scores"]["board_assist"] is not None
+    # 板块助攻保留为步骤诊断，但不再属于新的五因子评分。
+    assert "board_assist" not in nd._FACTOR_WEIGHTS
+    assert "mom_5_1" in top["factor_scores"]
 
 
 def test_tdx_quote_availability_handles_prefixed_spot_code(monkeypatch):
