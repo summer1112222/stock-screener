@@ -287,6 +287,12 @@
           <option value="actor">按席位</option>
           <option value="code">按个股</option>
         </select>
+        <select id="smSort" class="btn ghost" style="font-size:12px" title="排序:强度=主力净额/成交额(默认,跨市值可比);绝对净额=金额大小;通道数=覆盖;正向占比=正向金额通道/可用金额通道。股数通道(十大股东/高管/解禁)不参与金额比较;点列头可临时改排序">
+          <option value="intensity">排序:强度</option>
+          <option value="amount">排序:绝对净额</option>
+          <option value="channels">排序:通道数</option>
+          <option value="positive_ratio">排序:正向占比</option>
+        </select>
       </div>
       <div class="skipped" id="smMsg"></div>
       <div id="smOut" style="margin-top:10px"></div>
@@ -1162,7 +1168,7 @@ async function bfTop(order='priority'){
 document.getElementById('bfTop').onclick=()=>bfTop('priority');
 
 // ---------------- 主力动向(观察清单·非推荐) ----------------
-const smState = {raw:[], chip:'all', q:'', viewMode:'flow'};
+const smState = {raw:[], chip:'all', q:'', viewMode:'flow', sortMetric:'intensity'};
 function smChannelsHtml(channels){
   return Object.entries(channels||{}).map(([k,v])=>{
     const stale=v&&v.stale;
@@ -1231,7 +1237,7 @@ async function smLoad(){
     const datestr = r.date?('数据日期 '+r.date+' · '):'';
     document.getElementById('ut').textContent=datestr+'更新于 '+(r.update_time||'');
     smState.chip='all'; smState.q='';
-    document.getElementById('smSearch').value=''; const _sv=document.getElementById('smView'); if(_sv){_sv.value='flow';} smState.viewMode='flow'; smState.sortKey=null; smState.sortDir=null;
+    document.getElementById('smSearch').value=''; const _sv=document.getElementById('smView'); if(_sv){_sv.value='flow';} const _ss=document.getElementById('smSort'); if(_ss){_ss.value='intensity';} smState.viewMode='flow'; smState.sortMetric='intensity'; smState.sortKey=null; smState.sortDir=null;
     smRender();
   }finally{ document.getElementById('smLoading').textContent=''; }
 }
@@ -1267,52 +1273,96 @@ function smRender(){
     trs=shown.map(x=>`<tr><td>${x.actor}</td><td class="num">${fmtNum(x.amount)}</td><td class="num">${x.n}</td></tr>`).join('');
     note=`<div class="skipped">按席位聚合，前 ${shown.length} (共 ${arr.length} 席位)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}</div>`;
   }else if(vm==='code'){
-    // 按个股聚合：每只股票各通道累计净额分列(前3通道元,后3通道股;分列避跨单位混排)
-    const cSK=smState.sortKey||'龙虎榜', cSD=smState.sortDir||'desc';
+    // 按个股聚合：金额通道(龙虎榜/资金流/北向,元)与股数通道(十大股东/高管/解禁,股)
+    // 分列避跨单位混排；metric 排序语义与后端 screener.smart_money.summarize_by_code 一致
+    const cSK=smState.sortKey, cSD=smState.sortDir||'desc';   // 列头点击→临时排序覆盖 metric
+    const metric=smState.sortMetric||'intensity';
     const cArrow=k=>cSK===k?(cSD==='desc'?' ▼':' ▲'):'';
+    const _nullLast=(va,vb,desc)=>{const na=va==null,nb=vb==null;if(na&&nb)return 0;if(na)return 1;if(nb)return -1;return desc?vb-va:va-vb;};
     const m={};
-    rows.forEach(x=>{const c=x.code||'';if(!c)return;if(!m[c])m[c]={code:c,name:x.name||'',market:x.market||'',byCh:{}};const ch=x.channel||'';if(!m[c].byCh[ch])m[c].byCh[ch]={amt:0,n:0};m[c].byCh[ch].amt+=(x.amount||0);m[c].byCh[ch].n+=1;});
+    rows.forEach(x=>{const c=x.code||'';if(!c)return;if(!m[c])m[c]={code:c,name:x.name||'',market:x.market||'',byCh:{}};const ch=x.channel||'';if(!m[c].byCh[ch])m[c].byCh[ch]={amt:0,n:0,hasAmt:false,ints:[]};const d0=m[c].byCh[ch];if(x.amount!=null&&!isNaN(x.amount)){d0.amt+=x.amount;d0.hasAmt=true;}d0.n+=1;if(x.net_intensity!=null&&!isNaN(x.net_intensity)&&!_SHARES_CH.includes(ch))d0.ints.push(x.net_intensity);});
     let arr=Object.values(m);
+    // 单位隔离：强度/绝对净额/正向占比只聚合金额通道；股数通道只计通道数不入金额比较
+    arr.forEach(o=>{let ints=[],absSum=0,avail=0,pos=0;Object.entries(o.byCh).forEach(([ch,v])=>{if(_SHARES_CH.includes(ch))return;ints.push(...v.ints);if(v.hasAmt){avail++;absSum+=v.amt;if(v.amt>0)pos++;}});
+      o.metrics={intensity:ints.length?Math.max(...ints):null,abs:Math.abs(absSum),nch:Object.keys(o.byCh).length,avail:avail,pos:pos,ratio:avail?pos/avail:null};});
     const CH_COLS=[['龙虎榜','龙虎榜净额'],['资金流','资金流净额'],['北向','北向净额'],['十大股东','十大股东(股)'],['高管增减持','高管(股)'],['限售解禁','解禁(股)']];
     const _val=o=>{const v=o.byCh[cSK];return v?v.amt:0;};
+    const _mKey={intensity:'intensity',amount:'abs',channels:'nch',positive_ratio:'ratio'}[metric]||'intensity';
     arr.sort((a,b)=>{
-      if(['code','name','market'].includes(cSK)){const va=String(a[cSK]??''),vb=String(b[cSK]??'');return cSD==='desc'?vb.localeCompare(va):va.localeCompare(vb);}
-      const va=Math.abs(_val(a)),vb=Math.abs(_val(b));return cSD==='desc'?vb-va:va-vb;
+      if(cSK){
+        if(['code','name','market'].includes(cSK)){const va=String(a[cSK]??''),vb=String(b[cSK]??'');return cSD==='desc'?vb.localeCompare(va):va.localeCompare(vb);}
+        const va=Math.abs(_val(a)),vb=Math.abs(_val(b));return cSD==='desc'?vb-va:va-vb;
+      }
+      return _nullLast(a.metrics[_mKey],b.metrics[_mKey],cSD==='desc');   // 缺强度→排有强度行之后,不当0
     });
     const shown=arr.slice(0,CAP);
+    const M_COLS=[['intensity','强度'],['channels','通道数'],['positive_ratio','正向占比']];
+    const mArrow=k=>(!cSK&&metric===k)?' ▼':'';
     const baseThs=[['code','代码'],['name','名称'],['market','市场']].map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${cArrow(k)}</th>`).join('');
+    const mThs=M_COLS.map(([k,h])=>`<th class="num" data-mk="${k}" style="cursor:pointer;user-select:none" title="点击按此指标排序(股数通道不参与)">${h}${mArrow(k)}</th>`).join('');
     const chThs=CH_COLS.map(([ch,h])=>`<th class="num" data-sk="${ch}" style="cursor:pointer;user-select:none">${h}${cArrow(ch)}</th>`).join('');
-    ths=baseThs+chThs+`<th class="num">信号通道</th>`;
+    ths=baseThs+mThs+chThs+`<th class="num">信号通道</th>`;
     trs=shown.map(o=>{
       const tds=CH_COLS.map(([ch])=>{const v=o.byCh[ch];return `<td class="num">${v?_amtUnit(ch,v.amt):'—'}</td>`;}).join('');
+      // 金额通道诊断列：强度(最强金额通道 net_intensity)/通道覆盖数/正向金额通道占比,缺值显 — 不当 0
+      const M=o.metrics;
+      const iTxt=M.intensity!=null?(M.intensity*100).toFixed(2)+'%':'—';
+      const iCol=M.intensity==null?'var(--muted)':(M.intensity>=0?'#16A34A':'#F59E0B');
+      const rTxt=M.ratio!=null?`${M.pos}/${M.avail}·${(M.ratio*100).toFixed(0)}%`:'—';
+      const mtds=`<td class="num" style="color:${iCol}">${iTxt}</td><td class="num">${M.nch}</td><td class="num">${rTxt}</td>`;
       // 机械计数:龙虎榜/资金流/北向/高管/十大股东 amount>0计流入/<0计流出;限售解禁单标"解禁"不参与流入流出(正值=抛压,语义反向)
       let inflow=0,outflow=0;['龙虎榜','资金流','北向','高管增减持','十大股东'].forEach(ch=>{const v=o.byCh[ch];if(v&&v.amt){if(v.amt>0)inflow++;else if(v.amt<0)outflow++;}});
       const unlock=o.byCh['限售解禁']&&o.byCh['限售解禁'].amt;
       const sig=(inflow?`<span style="color:#16A34A">↑${inflow}</span>`:'')+(outflow?` <span style="color:#F59E0B">↓${outflow}</span>`:'')+(unlock?` <span style="color:#5C6884">解禁</span>`:'')||'—';
-      return `<tr class="clk" data-code="${o.code}"><td>${o.code}</td><td>${o.name}</td><td>${o.market||''}</td>${tds}<td>${sig}</td></tr>`;
+      return `<tr class="clk" data-code="${o.code}"><td>${o.code}</td><td>${o.name}</td><td>${o.market||''}</td>${mtds}${tds}<td>${sig}</td></tr>`;
     }).join('');
-    note=`<div class="skipped">按个股聚合(各通道累计净额分列),前 ${shown.length} (共 ${arr.length} 只)。前3通道单位元、后3单位股(分列避跨单位混排);<b>信号通道=机械计数(↑净流入通道数/↓净流出/解禁标注),非方向买卖信号</b></div>`;
+    const mLabel={intensity:'强度(金额通道最强净额/成交额)',amount:'绝对净额(金额通道)',channels:'通道数',positive_ratio:'正向金额通道占比'}[metric]||'强度';
+    note=`<div class="skipped">按个股聚合,前 ${shown.length} (共 ${arr.length} 只)，排序:${cSK?('列头 '+cSK+' '+cSD):(mLabel+' '+(cSD==='desc'?'降序':'升序')+'，缺强度排最后显 — 不当0')}。金额通道单位元、股数通道单位股(分列避跨单位混排,股数通道不入强度/金额/占比比较);<b>信号通道=机械计数(↑净流入通道数/↓净流出/解禁标注),非方向买卖信号</b></div>`;
   }else{
-    let sr=[...rows].sort((a,b)=>SK==='amount'?_cmp(a,b,'amount'):_TXT_COLS.includes(SK)?_scmp(a,b,SK):_cmp(a,b,'amount'));
+    const metric=smState.sortMetric||'intensity';
+    // flow 逐行:intensity=net_intensity 降序(缺强度排最后,显 — 不当0);amount=|净额|;
+    // channels/positive_ratio 不适用逐行流水→回退 intensity(安全默认)
+    const fM=(metric==='amount')?'amount':'intensity';
+    const FK=smState.sortKey||(fM==='amount'?'amount':'net_intensity');
+    const fArrow=k=>FK===k?((smState.sortDir||'desc')==='desc'?' ▼':' ▲'):'';
+    const _nullLast=(va,vb,desc)=>{const na=va==null||isNaN(va),nb=vb==null||isNaN(vb);if(na&&nb)return 0;if(na)return 1;if(nb)return -1;return desc?vb-va:va-vb;};
+    let sr=[...rows].sort((a,b)=>{
+      if(smState.sortKey){
+        if(_TXT_COLS.includes(smState.sortKey))return _scmp(a,b,smState.sortKey);
+        const va=smState.sortKey==='amount'?Math.abs(a.amount||0):a[smState.sortKey];
+        const vb=smState.sortKey==='amount'?Math.abs(b.amount||0):b[smState.sortKey];
+        return _nullLast(va,vb,SD==='desc');
+      }
+      if(fM==='amount')return _nullLast(Math.abs(a.amount||0),Math.abs(b.amount||0),true);
+      return _nullLast(a.net_intensity,b.net_intensity,true);
+    });
     const shown=sr.slice(0,CAP);
     const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
       ?"<span style='color:var(--muted);font-size:12px'>北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>":'';
     const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额'],['net_intensity','强度']];
-    ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${_arrow(k)}</th>`).join('');
+    ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${fArrow(k)}</th>`).join('');
     trs=shown.map(x=>{const ni=x.net_intensity;const niTxt=ni!=null?(ni*100).toFixed(2)+'%':'—';const niCol=ni==null?'var(--muted)':(ni>=0?'#16A34A':'#F59E0B');return `<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${_amtUnit(x.channel,x.amount)}</td><td class="num" style="color:${niCol}">${niTxt}</td></tr>`;}).join('');
-    note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${cols.find(c=>c[0]===SK)?.[1]||'净额'} ${SD}，其余折叠防卡顿</div>`:'')+'<div class="skipped">强度=主力净额/当日成交额(占当日成交比),操盘手跨市值可比维度,正绿负橙,机械归一化非买卖信号</div>';
+    const sortLabel=smState.sortKey?(cols.find(c=>c[0]===smState.sortKey)?.[1]||smState.sortKey)+' '+SD:(fM==='amount'?'绝对净额 降序':'强度 降序(缺强度排最后)');
+    note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${sortLabel}，其余折叠防卡顿</div>`:`<div class="skipped">排序:${sortLabel}(共 ${rows.length} 条)</div>`)+'<div class="skipped">强度=主力净额/当日成交额(占当日成交比),操盘手跨市值可比维度,正绿负橙,机械归一化非买卖信号</div>';
   }
   document.getElementById('smOut').innerHTML = trs?(note+`<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`):(note||'<div class="empty">无当日主力动向(先点"刷新主力动向"采集；东财被封通道显示未采集)</div>');
   document.querySelectorAll('#smOut th[data-sk]').forEach(th=>th.onclick=()=>{
     const k=th.dataset.sk;
-    if(SK===k){ smState.sortDir = SD==='desc'?'asc':'desc'; }
+    if(smState.sortKey===k){ smState.sortDir = (smState.sortDir||'desc')==='desc'?'asc':'desc'; }
     else { smState.sortKey=k; smState.sortDir = _TXT_COLS.includes(k)?'asc':'desc'; }
+    smRender();
+  });
+  // 指标列头点击→切换 sortMetric(清列头临时排序)
+  document.querySelectorAll('#smOut th[data-mk]').forEach(th=>th.onclick=()=>{
+    smState.sortMetric=th.dataset.mk; smState.sortKey=null; smState.sortDir=null;
+    const sel=document.getElementById('smSort'); if(sel)sel.value=th.dataset.mk;
     smRender();
   });
 }
 document.getElementById('smSearch').oninput=e=>{smState.q=e.target.value;smRender();};
 document.getElementById('smDays').onchange=()=>smLoad();
 document.getElementById('smView').onchange=e=>{smState.viewMode=e.target.value;smState.sortKey=null;smState.sortDir=null;smRender();};
+document.getElementById('smSort').onchange=e=>{smState.sortMetric=e.target.value;smState.sortKey=null;smState.sortDir=null;smRender();};
 document.getElementById('smRefresh').onclick=smRefresh;
 // 游资营业部统计(龙虎榜席位级,on-demand)
 async function smSeatsLoad(){

@@ -540,3 +540,48 @@ def test_refresh_all_channels_no_partial(monkeypatch, tmp_path):
     report = sm.refresh_today("2026-07-25")
     assert "partial" not in report
     assert all(not v.get("skipped") for v in report["channels"].values())
+
+
+# ---------- summarize_by_code：按个股聚合纯函数（spec 2026-09-06 强度排序） ----------
+# 金额通道(龙虎榜/资金流/北向)参与强度/金额/正向占比比较；股数通道(十大股东/
+# 高管增减持/限售解禁)只计通道数，绝不混入金额比较（单位隔离）。
+def _row(code, channel, amount, intensity, name="甲"):
+    return {"code": code, "name": name, "channel": channel,
+            "amount": amount, "net_intensity": intensity}
+
+
+def test_summarize_share_channels_excluded_from_amount():
+    rows = [
+        _row("000001", "龙虎榜", 1e8, 0.10),
+        _row("000001", "资金流", -5e7, -0.05),
+        _row("000001", "十大股东", 2e9, 0.50),   # 股数通道：大额+高强度都不得混入
+    ]
+    s = smq.summarize_by_code(rows)["000001"]
+    assert s["abs_amount"] == 5e7                 # |1e8-5e7|，不含 2e9
+    assert s["amount_intensity"] == 0.10          # 金额通道最强(最大)强度，不含 0.50
+    assert s["n_channels"] == 3                   # 覆盖数含全部通道
+    assert s["n_amount_channels"] == 2
+    assert s["n_positive"] == 1
+    assert s["positive_ratio"] == 0.5             # 正向金额通道/可用金额通道
+
+
+def test_summarize_missing_intensity_is_none_not_zero():
+    rows = [_row("000002", "资金流", 1e7, None)]
+    s = smq.summarize_by_code(rows)["000002"]
+    assert s["amount_intensity"] is None          # 缺强度不当 0
+    assert s["n_positive"] == 1 and s["positive_ratio"] == 1.0
+
+
+def test_summarize_only_share_channels():
+    rows = [_row("000003", "高管增减持", 5e6, 0.2)]
+    s = smq.summarize_by_code(rows)["000003"]
+    assert s["n_channels"] == 1 and s["n_amount_channels"] == 0
+    assert s["abs_amount"] == 0.0
+    assert s["amount_intensity"] is None
+    assert s["positive_ratio"] is None            # 无可用金额通道→None 非 0
+
+
+def test_summarize_empty_and_bad_rows():
+    assert smq.summarize_by_code([]) == {}
+    assert smq.summarize_by_code([{"code": None, "channel": "资金流"},
+                                  {"channel": "资金流"}]) == {}

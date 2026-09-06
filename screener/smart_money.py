@@ -152,6 +152,58 @@ def top_by_amount(days: int = 5, market: str | None = None,
     return {"rows": pool, "total": len(pool)}
 
 
+# 股数通道：amount 单位是"股"，与金额通道(元)不同量纲，绝不混入金额/强度比较
+_SHARES_CHANNELS = ("十大股东", "高管增减持", "限售解禁")
+
+
+def summarize_by_code(rows: list[dict]) -> dict:
+    """按 code 聚合主力动向行的纯函数（spec 2026-09-06 强度排序后端对照实现，
+    不触网不查库；前端 code 视图 JS 聚合与此语义一致）。
+
+    返回 {code: {code, name, n_channels, n_amount_channels, abs_amount,
+    amount_intensity, n_positive, positive_ratio}}：
+    - n_channels：全部通道覆盖数（含股数通道，只做计数不入金额比较）；
+    - abs_amount：金额通道(龙虎榜/资金流/北向)净额合计的绝对值（元）；
+    - amount_intensity：金额通道行 net_intensity 的最大值（最强净强度）；
+      缺强度→None 不当 0（排序时应排在有强度行之后，展示 —）；
+    - n_positive / positive_ratio：正向金额通道数 / 可用金额通道数，
+      通道净额>0 计正向；无可用金额通道→None 非 0。
+    机械统计，非买卖信号。"""
+    out: dict[str, dict] = {}
+    for r in rows or []:
+        code = r.get("code")
+        if not code:
+            continue
+        code = str(code)
+        s = out.setdefault(code, {"code": code, "name": r.get("name"), "_ch": {}})
+        if not s.get("name") and r.get("name"):
+            s["name"] = r["name"]
+        ch = r.get("channel")
+        if not ch:
+            continue
+        d = s["_ch"].setdefault(ch, {"amt": 0.0, "has_amt": False, "ints": []})
+        a = _nan(r.get("amount"))
+        if a is not None:
+            d["amt"] += a
+            d["has_amt"] = True
+        ni = _nan(r.get("net_intensity"))
+        if ni is not None and ch not in _SHARES_CHANNELS:
+            d["ints"].append(ni)
+    for s in out.values():
+        chs = s.pop("_ch")
+        s["n_channels"] = len(chs)
+        amt_chs = {k: v for k, v in chs.items() if k not in _SHARES_CHANNELS}
+        avail = [v for v in amt_chs.values() if v["has_amt"]]
+        s["n_amount_channels"] = len(avail)
+        s["abs_amount"] = round(abs(sum(v["amt"] for v in avail)), 2)
+        ints = [i for v in amt_chs.values() for i in v["ints"]]
+        s["amount_intensity"] = round(max(ints), 4) if ints else None
+        s["n_positive"] = sum(1 for v in avail if v["amt"] > 0)
+        s["positive_ratio"] = (round(s["n_positive"] / len(avail), 4)
+                               if avail else None)
+    return out
+
+
 def unlock_by_month(month: str | None = None, code: str | None = None) -> dict:
     """限售解禁按 as_of 月份查(channel=限售解禁)。
     month 形如 2026-07;不传取当月。code 非空则再按 code 过滤。as_of 升序。
