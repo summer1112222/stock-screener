@@ -328,7 +328,8 @@
         <div class="f"><label>窗口</label><select id="ndDays" class="btn ghost"><option>20</option><option selected>30</option><option>60</option></select></div>
         <div class="f"><label>数量</label><select id="ndLimit" class="btn ghost"><option>20</option><option selected>50</option><option>100</option></select></div>
         <div class="f"><label>漏斗</label><select id="ndFilter" class="btn ghost" title="严格=涨幅>5/换手>3/价<50/市值10-200亿/PE≤150/非ST(5步漏斗默认)；宽敞=放宽涨幅/市值/PE；全部=不过滤"><option value="strict" selected>严格(5步)</option><option value="wide">宽敞</option><option value="all">全部</option></select></div>
-        <div class="f"><label>缺数据</label><select id="ndCover" class="btn ghost" title="因子分覆盖率<阈值的股票默认隐藏，避免'缺数据'占满排序前列"><option value="0.5" selected>隐藏(覆盖≥50%)</option><option value="0">全部显示</option></select></div>
+        <div class="f"><label>筛选模式</label><select id="ndMode" class="btn ghost" title="严格要求五步全部通过；仅评分按因子综合分排序但保留失败步骤"><option value="strict" selected>严格观察</option><option value="score">仅评分</option></select></div>
+        <div class="f"><label>缺数据</label><select id="ndCover" class="btn ghost" title="因子分覆盖率<阈值的股票默认隐藏，避免'缺数据'占满排序前列"><option value="0.5" selected>隐藏(覆盖≥50%)</option><option value="0.7">隐藏(覆盖≥70%)</option><option value="0">全部显示</option></select></div>
         <button class="btn ghost" id="ndRun" type="button">排次日强势</button>
         <span id="ndMsg" style="font-size:12px;color:var(--muted)"></span>
       </div>
@@ -1523,7 +1524,7 @@ document.getElementById('qsCombo').onchange=qsLoad;
 document.getElementById('qsResMode').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch
 
-// ---------------- 次日强势(5因子机械排序) ----------------
+// ---------------- 次日强势(五步漏斗 + 五因子评分) ----------------
 async function ndLoad(){
   const uni=document.getElementById('ndUniverse').value;
   const days=document.getElementById('ndDays').value;
@@ -1532,11 +1533,13 @@ async function ndLoad(){
   let mcp=5, mt=3, mp=50, mmvLo=10, mmvHi=200, mpe=150, est=1;
   if(flt==='wide'){mcp=1; mt=1.5; mp=80; mmvLo=5; mmvHi=300; mpe=200; est=0;}
   if(flt==='all'){mcp=0; mt=0; mp=9999; mmvLo=0; mmvHi=999999; mpe=9999; est=0;}
+  const mode=document.getElementById('ndMode').value;
   const btn=document.getElementById('ndRun');
   btn.disabled=true; const t0=Date.now();
   document.getElementById('ndMsg').textContent='加载中(5步漏斗+5因子评分,首次较慢;30s缓存)...';
+  const url=`${API}/api/nextday-strong?universe=${uni}&days=${days}&limit=${limit}&selection_mode=${mode}&min_change_pct=${mcp}&min_turnover=${mt}&max_price=${mp}&min_mv=${mmvLo}&max_mv=${mmvHi}&max_pe=${mpe}&exclude_st=${est}`;
   try{
-    const r=await _qsFetch(`${API}/api/nextday-strong?universe=${uni}&days=${days}&limit=${limit}&min_change_pct=${mcp}&min_turnover=${mt}&max_price=${mp}&min_mv=${mmvLo}&max_mv=${mmvHi}&max_pe=${mpe}&exclude_st=${est}`);
+    const r=await _qsFetch(url);
     const d=r.data||{};
     window._ndLastData=d;
     const dt=((Date.now()-t0)/1000).toFixed(1);
@@ -1560,16 +1563,17 @@ function ndRender(d){
   const ths=['#','代码','名称','综合分','五步通过',...factors.map(f=>`<span title="${f[2]}">${f[1]}</span>`),'覆盖率','板块','明细'].map(h=>`<th class="num">${h}</th>`).join('');
   const factorCell=(x,key)=>{ const v=x.factor_scores?.[key]; return v==null?'<td class="num" style="color:#D97706" title="缺数据">—</td>':`<td class="num">${Number(v).toFixed(0)}</td>`; };
   const trs=items.map(x=>{
-    const passed=5-(x.failed_steps||[]).length;
+    const hard=(x.hard_pass??Math.max(0,5-(x.failed_steps||[]).length-(x.step4_pass?1:0)));
     const steps=['步1量价','步2规模','步3趋势','步4软分','步5板块'].map((n,i)=>n+'='+((x.failed_steps||[]).includes('step'+(i+1))?'未过':'通过')).join('；');
     const fs=factors.map(f=>f[1]+'='+(x.factor_scores?.[f[0]]==null?'—':Number(x.factor_scores[f[0]]).toFixed(0))).join('、');
     const det=(d.selection_mode==='fallback'?'降级观察清单':'严格通过清单')+'；'+steps+'；因子分：'+fs+'；板块='+(x.board||'—')+'，热度排名='+(x.board_rank??'—')+'，涨停数='+(x.board_zt_count??'—')+'；涨幅='+(x.change_pct==null?'—':Number(x.change_pct).toFixed(2)+'%')+'，换手='+(x.turnover_rate==null?'—':Number(x.turnover_rate).toFixed(1)+'%');
-    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?Number(x.score).toFixed(2):'—'}</b></td><td class="num" title="${steps}">${passed}/5</td>${factorCell(x,'mom_5_1')}${factorCell(x,'rel_strength')}${factorCell(x,'sr_10')}${factorCell(x,'close_vol_corr')}${factorCell(x,'liq_turnover')}<td class="num">${(Number(x.score_coverage||0)*100).toFixed(0)}%</td><td class="num">${x.board||'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?Number(x.score).toFixed(2):'—'}</b></td><td class="num" title="${steps}">硬门槛 ${hard}/4 · 软分 ${x.step4_pass?'通过':'未过'}</td>${factorCell(x,'mom_5_1')}${factorCell(x,'rel_strength')}${factorCell(x,'sr_10')}${factorCell(x,'close_vol_corr')}${factorCell(x,'liq_turnover')}<td class="num">${(Number(x.score_coverage||0)*100).toFixed(0)}%</td><td class="num">${x.board||'—'}</td><td style="font-size:11px" title="${det}">${det}</td></tr>`;
   }).join('');
   document.getElementById('ndOut').innerHTML=`<div style="margin-bottom:6px;color:var(--muted);font-size:12px">分数为横截面分位（0-100）；“五步通过”是漏斗状态，综合分只用于机械排序。</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
 document.getElementById('ndRun').onclick=ndLoad;
 document.getElementById('ndFilter').onchange=ndLoad;
+document.getElementById('ndMode').onchange=ndLoad;
 document.getElementById('ndCover').onchange=()=>{ const last=window._ndLastData; if(last) ndRender(last); };
 
 // ---------------- 每日强势(已合并到次日强势,保留兼容入口) ----------------

@@ -951,10 +951,10 @@ def nextday_strong(universe: str = Query("stock"),
                    max_mv: float = Query(200.0, ge=10.0, le=100000.0),
                    max_pe: float = Query(150.0, ge=0.0, le=10000.0),
                    exclude_st: bool = Query(True),
+                   selection_mode: str = Query("strict", pattern="^(strict|score)$"),
                    codes: str = Query("")):
     """次日强势 5 步流程：强势门槛、风险剔除、均线/放量形态、量价软分、
-    行业板块助攻。前后四步是硬通过数，第四步按量比和涨幅温和度排序；
-    返回机械排序观察清单，不构成投资建议。板块成分股按需取得，失败诚实降级。"""
+    返回机械排序观察清单；strict 要求五步全部通过，score 仅按因子分排序并保留步骤诊断，均不构成投资建议。板块成分股按需取得，失败诚实降级。"""
     from screener import nextday
     cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
     res = nextday.nextday_strong_rank(universe=universe, codes=cl,
@@ -962,7 +962,8 @@ def nextday_strong(universe: str = Query("stock"),
                                       min_change_pct=min_change_pct,
                                       min_turnover=min_turnover, max_price=max_price,
                                       min_mv=min_mv, max_mv=max_mv, max_pe=max_pe,
-                                      exclude_st=exclude_st)
+                                      exclude_st=exclude_st,
+                                      selection_mode=selection_mode)
     return _wrap(res, {"cand_disclaimer":
                        "次日强势清单——5因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
 

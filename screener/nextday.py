@@ -689,17 +689,22 @@ def nextday_strong_rank(universe: str = "stock",
                         max_price: float = 50.0,
                         min_mv: float = 10.0, max_mv: float = 200.0,
                         max_pe: float = 150.0,
-                        exclude_st: bool = True) -> dict:
+                        exclude_st: bool = True,
+                        selection_mode: str = "strict") -> dict:
     """次日强势五因子连续评分，兼容保留旧步骤诊断字段。
 
     五因子先横截面 rank-pct，再按可用因子重归一加权；旧 step 字段仅用于
     解释筛选条件，不再主导排序。TDX 盘口失败时 quote 因子诚实缺失。
     """
+    if selection_mode not in {"strict", "score"}:
+        selection_mode = "strict"
     p = {"min_change_pct": min_change_pct, "min_turnover": min_turnover,
          "max_price": max_price, "min_mv": min_mv, "max_mv": max_mv,
-         "max_pe": max_pe, "exclude_st": exclude_st}
+         "max_pe": max_pe, "exclude_st": exclude_st,
+         "selection_mode": selection_mode}
     key = (universe, tuple(codes or []), limit, days, min_change_pct,
-           min_turnover, max_price, min_mv, max_mv, max_pe, exclude_st)
+           min_turnover, max_price, min_mv, max_mv, max_pe, exclude_st,
+           selection_mode)
     now = datetime.now()
     hit = _CACHE.get(key)
     if hit and (now - hit[0]).total_seconds() < _CACHE_TTL:
@@ -918,13 +923,17 @@ def nextday_strong_rank(universe: str = "stock",
     )
     base["all_items"] = diagnostic_items[:max(0, limit)]
     base["rejected_items"] = [it for it in diagnostic_items if it not in passed_items]
-    if base["passed_items"]:
+    if selection_mode == "score":
+        selected_items = sorted(items, key=lambda x: (x["score"], x["score_coverage"]), reverse=True)
+        base["selection_mode"] = "score"
+    elif base["passed_items"]:
         base["selection_mode"] = "strict"
-        items = base["passed_items"]
+        selected_items = base["passed_items"]
     else:
         base["selection_mode"] = "fallback"
         base["note"] = "当前数据条件下没有五步全部通过的股票，以下为接近通过的观察清单"
-        items = diagnostic_items[:max(0, limit)]
+        selected_items = diagnostic_items
+    items = selected_items[:max(0, limit)]
     for i, it in enumerate(items):
         it["rank"] = i + 1
 
