@@ -13,10 +13,14 @@ from typing import Any
 import pandas as pd
 
 
-def series_to_rows(panel: pd.DataFrame, factor_name: str, version: str) -> list[dict]:
+def series_to_rows(panel: pd.DataFrame, factor_name: str, version: str,
+                   params: dict | None = None) -> list[dict]:
     """把以 code 为列、date 为索引的因子面板转成快照长表行。
 
     空值(NaN)行被跳过，不写入快照，避免污染覆盖语义。
+    date 统一归一为 YYYY-MM-DD（真实 DatetimeIndex 下 str(Timestamp) 会带 00:00:00，
+    破坏 read_snapshots 的 date>=/<= 字符串过滤）。params 显式透传计算参数，
+    缺省为 None（不伪造 window=5），供追溯时由调用方如实声明。
     """
     rows: list[dict] = []
     for code in panel.columns:
@@ -26,11 +30,18 @@ def series_to_rows(panel: pd.DataFrame, factor_name: str, version: str) -> list[
                 continue
             rows.append({
                 "code": str(code),
-                "date": str(date_val),
+                "date": _iso_date(date_val),
                 "value": float(value),
-                "params": {"window": 5},
+                "params": params,
             })
     return rows
+
+
+def _iso_date(x) -> str:
+    """把 date/Timestamp/np.datetime64/str 统一为 YYYY-MM-DD 字符串。"""
+    if hasattr(x, "strftime"):
+        return x.strftime("%Y-%m-%d")
+    return str(x)[:10]
 
 
 def compute_mom_5_1(close: pd.DataFrame) -> pd.DataFrame:

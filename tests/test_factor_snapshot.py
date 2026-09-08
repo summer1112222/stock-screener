@@ -35,3 +35,27 @@ def test_factor_snapshot_schema_is_created_by_db_init():
     # 表可查询且字段可用（结构由 SCHEMA_SQL 创建，不依赖迁移）
     assert db.query_rows("factor_definition", limit=1) is not None
     assert db.query_rows("factor_snapshot", limit=1) is not None
+
+
+def test_read_snapshots_tolerates_malformed_params_json():
+    version = "corrupt-v1"
+    db.upsert_rows("factor_snapshot", [{
+        "factor_name": "mom_5_1", "factor_version": version,
+        "code": "000009", "date": "2026-09-08", "value": 0.1,
+        "params_json": "{not-json", "created_ts": "2026-09-08T00:00:00",
+    }])
+    rows = read_snapshots("mom_5_1", version)
+    assert len(rows) == 1
+    assert rows[0]["value"] == 0.1
+    assert rows[0].get("params") is None  # 损坏 params 不阻断整批读
+
+
+def test_read_snapshots_batches_large_code_filter():
+    version = "batch-v1"
+    write_snapshots("mom_5_1", version, [
+        {"code": "000001", "date": "2026-09-08", "value": 0.2},
+    ])
+    codes = [f"{i:06d}" for i in range(1, 1200)]  # > SQLite 变量上限(~999)
+    rows = read_snapshots("mom_5_1", version, codes=codes)
+    assert len(rows) == 1
+    assert rows[0]["code"] == "000001"

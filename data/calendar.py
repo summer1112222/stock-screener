@@ -76,7 +76,10 @@ def previous_trading_day(day: str | date | datetime) -> str:
 
 
 def last_n_trading_days(end: str | date | datetime, n: int) -> list[str]:
-    """返回截止 end（含，按交易日序列）的最近 n 个交易日，降序（近→远）。"""
+    """返回截止 end（含，按交易日序列）的最近 n 个交易日，升序（旧→新）。
+
+    n<=0 返回空表。升序便于按 [开始, 结束] 窗口切片；调用方按最近取时自行取末元素。
+    """
     out: list[str] = []
     d = _to_date(end)
     while len(out) < n:
@@ -85,6 +88,14 @@ def last_n_trading_days(end: str | date | datetime, n: int) -> list[str]:
         d -= timedelta(days=1)
     out.reverse()
     return out
+
+
+def latest_trading_day(day: str | date | datetime) -> str:
+    """返回 day 当天或之前最近的交易日（YYYY-MM-DD）。周末/节假日回落到前一交易日。"""
+    d = _to_date(day)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -99,17 +110,21 @@ _SESSION_END = (15, 0)
 
 
 def _in_window(now: datetime, start: tuple[int, int], end: tuple[int, int]) -> bool:
+    # 闭区间 [start, end]，与旧 backtest.quality._is_in_session 的 930<=t<=1500 语义对齐
     t = (now.hour, now.minute)
-    return start <= t < end
+    return start <= t <= end
 
 
 def is_market_session(now: datetime | None = None) -> bool:
-    """判断当前时间是否处于 A 股盘中时段（09:30-11:30、13:00-15:00）。
+    """判断当前时间是否处于 A 股盘中时段（09:30-11:30、13:00-15:00，含端点）。
 
     now 缺省使用 datetime.now()；仅回测等需要注入时间时显式传入。
+    纯 date(无时分)输入按 00:00 处理为非盘中，不抛异常。
     """
     if now is None:
         now = datetime.now()
+    if isinstance(now, date) and not isinstance(now, datetime):
+        now = datetime.combine(now, datetime.min.time())
     # 非交易日的任何时刻都不算盘中
     if not is_trading_day(now):
         return False

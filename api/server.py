@@ -81,6 +81,16 @@ def meta():
 import datetime as _dt
 
 
+def _track_date() -> str:
+    """清单追踪记录归属的交易日：今日非交易日(周末/节假日)回落到前一交易日，
+    避免把当日清单归到无行情日期导致 fill_returns 错配到更早数据。"""
+    try:
+        from data.calendar import latest_trading_day
+        return latest_trading_day(_dt.date.today())
+    except Exception:
+        return _dt.date.today().strftime("%Y-%m-%d")
+
+
 def _domain_status(rows, latest, stale=False, has_old=True):
     """三态：red(空/失败) > yellow(stale 或非当日有旧) > green(当日非空)。"""
     if rows is None:
@@ -961,7 +971,7 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
         if bt_tracker.is_default_params("quality", qparams) and res.get("main"):
             bt_tracker.record_list("quality",
                                    res.get("selection_mode") or "strict",
-                                   _dt.date.today().strftime("%Y-%m-%d"),
+                                   _track_date(),
                                    res["main"])
     except Exception:
         pass
@@ -1000,7 +1010,7 @@ def nextday_strong(universe: str = Query("stock"),
                     "min_mv": min_mv, "max_mv": max_mv, "max_pe": max_pe,
                     "exclude_st": exclude_st}
         if bt_tracker.is_default_params("nextday", ndparams):
-            today = _dt.date.today().strftime("%Y-%m-%d")
+            today = _track_date()
             bt_tracker.record_list("nextday", "strict", today, res.get("passed_items") or [])
             bt_tracker.record_list("nextday", "score", today, res.get("all_items") or [])
     except Exception:

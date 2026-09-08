@@ -13,12 +13,17 @@ import json
 from data import db
 
 _CHUNK = 500
+#: 单个 IN 子句可承载的变量数上限(低于 SQLite ~999 变量上限)，超大 code 集分批。
+_IN_BATCH = 900
 
 
 def _row_to_snap(row: dict) -> dict:
     snap = dict(row)
     if snap.get("params_json"):
-        snap["params"] = json.loads(snap["params_json"])
+        try:
+            snap["params"] = json.loads(snap["params_json"])
+        except (ValueError, TypeError):
+            snap["params"] = None  # 单条损坏参数不阻断整批读
     return snap
 
 
@@ -67,10 +72,27 @@ def read_snapshots(
     if end:
         where += " AND date<=?"
         params.append(end)
-    rows = db.query_rows(
-        "factor_snapshot",
-        where=where,
-        params=tuple(params),
-        order_by="code ASC, date ASC",
-    )
+    if codes and len(codes) > _IN_BATCH:
+        # 超大 code 集分批查询合并，避免超 SQLite 变量上限整体报错
+        rows: list[dict] = []
+        for i in range(0, len(codes), _IN_BATCH):
+            chunk = codes[i:i + _IN_BATCH]
+            ph = ",".join("?" * len(chunk))
+            w = f"factor_name=? AND factor_version=? AND code IN ({ph})"
+            p: list = [factor_name, factor_version, *chunk]
+            if start:
+                w += " AND date>=?"
+                p.append(start)
+            if end:
+                w += " AND date<=?"
+                p.append(end)
+            rows.extend(db.query_rows("factor_snapshot", where=w, params=tuple(p)))
+        rows.sort(key=lambda r: (str(r.get("code")), str(r.get("date"))))
+    else:
+        rows = db.query_rows(
+            "factor_snapshot",
+            where=where,
+            params=tuple(params),
+            order_by="code ASC, date ASC",
+        )
     return [_row_to_snap(r) for r in rows]

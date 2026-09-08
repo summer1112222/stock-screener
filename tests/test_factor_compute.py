@@ -46,3 +46,22 @@ def test_factor_compute_write_and_read_roundtrip():
     assert len(got) == 1
     assert round(got[0]["value"], 6) == 0.2
     assert got[0]["date"] == "2026-09-06"
+
+
+def test_series_to_rows_normalizes_datetime_index_to_iso_date():
+    # 真实 _uni_panels 产 DatetimeIndex；str(Timestamp) 会带 00:00:00，须归一
+    df = _panel()[["000001"]].copy()
+    df.index = pd.to_datetime(df.index)
+    rows = series_to_rows(df, "000001", "v1")
+    assert rows[0]["date"] == "2026-09-01"
+    assert rows[-1]["date"] == "2026-09-06"
+    assert all(len(r["date"]) == 10 for r in rows)
+
+
+def test_series_to_rows_carries_explicit_params_not_hardcoded_window():
+    df = _panel()[["000001"]].copy()
+    df.index = pd.to_datetime(df.index)
+    explicit = series_to_rows(df, "000001", "v1", params={"window": 10})
+    assert explicit[0]["params"] == {"window": 10}
+    no_params = series_to_rows(df, "000001", "v1")
+    assert no_params[0]["params"] is None
