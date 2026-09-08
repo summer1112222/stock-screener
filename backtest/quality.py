@@ -13,6 +13,7 @@ import numpy as np
 import datetime as _dt
 import pandas as pd
 
+from data import calendar as market_calendar
 from data import db
 
 _SPOT_TABLE = {"stock": "stock_spot", "etf": "etf_spot"}
@@ -35,14 +36,12 @@ ETF_BENCHMARK_MAP = {
 
 
 def _is_in_session(now: "_dt.datetime | None" = None) -> bool:
-    """best-effort 判 A 股交易时段：周一至周五 9:30-11:30 / 13:00-15:00。
-    节假日无历：误判盘中时 get_quote 返回收盘盘口，上层降级为盘后语义，不崩。
-    now=None 取当前本地时间；测试可注入 mock datetime。"""
-    now = now or _dt.datetime.now()
-    if now.weekday() >= 5:  # 周六5/周日6
-        return False
-    t = now.hour * 100 + now.minute
-    return (930 <= t <= 1130) or (1300 <= t <= 1500)
+    """best-effort 判 A 股交易时段（工作日 9:30-11:30 / 13:00-15:00）。
+
+    收敛到 data/calendar.is_market_session（含法定节假日历）；节假日误判盘中时
+    get_quote 返回收盘盘口，上层降级为盘后语义，不崩。now=None 取当前本地时间；
+    测试可注入 mock datetime。"""
+    return market_calendar.is_market_session(now)
 
 
 # ------------------------------------------------------------------

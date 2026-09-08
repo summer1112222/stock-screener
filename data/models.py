@@ -94,6 +94,16 @@ STOCK_SPOT_ALIASES = {
     "量比": "volume_ratio", "volume_ratio": "volume_ratio",
 }
 
+# 因子定义/快照规范字段
+FACTOR_DEFINITION_FIELDS = {
+    "factor_name", "version", "description", "frequency", "source_fields",
+    "formula", "created_ts",
+}
+FACTOR_SNAPSHOT_FIELDS = {
+    "factor_name", "factor_version", "code", "date", "value",
+    "params_json", "created_ts",
+}
+
 # ST 全名单规范字段
 ST_LIST_FIELDS = {
     "code", "name", "st_type", "latest_price", "change_pct",
@@ -267,6 +277,32 @@ CREATE TABLE IF NOT EXISTS smart_money_action (
 );
 CREATE INDEX IF NOT EXISTS idx_sm_date  ON smart_money_action(date);
 CREATE INDEX IF NOT EXISTS idx_sm_code  ON smart_money_action(code);
+;
+
+-- 因子注册表：定义/版本/口径元数据，供因子快照可追溯
+CREATE TABLE IF NOT EXISTS factor_definition (
+    factor_name TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    description TEXT,
+    frequency TEXT,
+    source_fields TEXT,
+    formula TEXT,
+    created_ts TEXT
+);
+
+-- 因子快照表：code×date×factor 的中间计算产物，保存版本与参数便于复用/IC 研究
+CREATE TABLE IF NOT EXISTS factor_snapshot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    factor_name TEXT NOT NULL,
+    factor_version TEXT NOT NULL,
+    code TEXT NOT NULL,
+    date TEXT NOT NULL,
+    value REAL,
+    params_json TEXT,
+    created_ts TEXT,
+    UNIQUE(factor_name, factor_version, code, date)
+);
+CREATE INDEX IF NOT EXISTS idx_factor_snap_key ON factor_snapshot(factor_name, factor_version, code, date);
 CREATE INDEX IF NOT EXISTS idx_sm_actor ON smart_money_action(actor);
 
 -- buffett 财务摘要缓存(按 code 单行存整张最新摘要 JSON，7 天 TTL)
@@ -389,4 +425,6 @@ TABLE_FIELDS = {
     "research_report": RESEARCH_REPORT_FIELDS,
     "fundamentals_cache": FUNDAMENTALS_CACHE_FIELDS,
     "list_track": LIST_TRACK_FIELDS,
+    "factor_definition": FACTOR_DEFINITION_FIELDS,
+    "factor_snapshot": FACTOR_SNAPSHOT_FIELDS,
 }
