@@ -25,6 +25,7 @@ import numpy as np
 
 from data import db
 from data import pytdx_client
+from screener.indicators import ma_alignment
 
 _SCAN_K = 200       # 粗筛后精算上限(按涨幅降序)
 _TDX_ENRICH_K = 40  # TDX 实时/财务补全只覆盖前 N 名，避免全市场请求压力
@@ -308,11 +309,12 @@ def _ma_arrange_batch(universe: str, codes: list[str], days: int = 60) -> tuple[
                 amt = amount[amount_col].dropna().tolist()
                 if amt:
                     out[c]["amount_series"] = amt
-        ma5 = s.rolling(5).mean().iloc[-1]
-        ma10 = s.rolling(10).mean().iloc[-1]
-        ma20 = s.rolling(20).mean().iloc[-1]
-        ma60 = s.rolling(60).mean().iloc[-1]
-        ma20_prev = s.rolling(20).mean().iloc[-6] if len(s) >= 6 else ma20
+        aligned = ma_alignment(s, (5, 10, 20, 60))
+        ma5 = aligned["ma5"].iloc[-1]
+        ma10 = aligned["ma10"].iloc[-1]
+        ma20 = aligned["ma20"].iloc[-1]
+        ma60 = aligned["ma60"].iloc[-1]
+        ma20_prev = aligned["ma20"].iloc[-6] if len(s) >= 6 else ma20
         last_close = s.iloc[-1]
         out[c].update({"ma5": _nan(ma5), "ma10": _nan(ma10), "ma20": _nan(ma20),
                        "ma60": _nan(ma60)})
