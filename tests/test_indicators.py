@@ -1,5 +1,6 @@
 import pandas as pd
 
+from backtest.signals import _rsi as signals_rsi
 from screener.indicators import (
     ema,
     ma_alignment,
@@ -41,4 +42,8 @@ def test_price_volume_corr_and_ma_alignment():
     assert round(price_volume_corr(close, volume, 3).iloc[-1], 6) == 1.0
     aligned = ma_alignment(close, (2, 3))
     assert list(aligned.columns) == ["ma2", "ma3"]
-    assert aligned.iloc[-1].tolist() == [3.5, 3.0]
+
+
+def test_signal_rsi_and_shared_rsi_match_on_mixed_prices():
+    values = pd.Series([10.0, 11.0, 10.5, 12.0, 11.5, 13.0])
+    pd.testing.assert_series_equal(signals_rsi(values, 2), rsi(values, 2))

@@ -21,14 +21,12 @@ import pandas as pd
 
 from data import db
 from data.history import _UNIVERSE
+from screener.indicators import rsi as _shared_rsi
 
 
 def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(n).mean()
-    loss = (-delta.clip(upper=0)).rolling(n).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    """统一委托指标层计算 RSI。"""
+    return _shared_rsi(close, n)
 
 
 def _pivot(df, key, col):
