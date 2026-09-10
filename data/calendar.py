@@ -9,6 +9,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+try:
+    #: A 股所在东八区；容器时区非 Asia/Shanghai(如 UTC)时,盘中判定须显式用 CST,
+    #: 否则 datetime.now() 取容器本地时间会误判盘中/盘后(quality 缓存 TTL 30s/300s
+    #: 依赖此判定,误判致缓存永不命中→每次冷算 67s 触发前端超时)。
+    _CST: "ZoneInfo | None" = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _CST = None  # 无 tzdata(系统+pip 均无)→退回 naive datetime.now() 不崩
 
 # ---------------------------------------------------------------------------
 # 交易日序列
@@ -122,7 +131,7 @@ def is_market_session(now: datetime | None = None) -> bool:
     纯 date(无时分)输入按 00:00 处理为非盘中，不抛异常。
     """
     if now is None:
-        now = datetime.now()
+        now = datetime.now(_CST)  # 优先 CST;容器非 Asia/Shanghai 时区(如 UTC)的关键修复
     if isinstance(now, date) and not isinstance(now, datetime):
         now = datetime.combine(now, datetime.min.time())
     # 非交易日的任何时刻都不算盘中

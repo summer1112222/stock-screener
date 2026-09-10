@@ -9,5 +9,6 @@ uvicorn[standard]>=0.27.0
 pandas>=2.0.0
 lxml>=4.9.0       # pd.read_html 解析引擎(板块成分股/资金流 THS 静态表)；pandas3.0 默认走 html5lib 未装即崩,需显式 flavor='lxml'
 requests>=2.31.0
+tzdata>=2024.1     # zoneinfo IANA 时区数据(slim 镜像无系统 tzdata,供 calendar.is_market_session 显式取 Asia/Shanghai)
 pyyaml>=6.0
 pytest>=7.0.0
