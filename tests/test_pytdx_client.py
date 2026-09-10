@@ -201,6 +201,54 @@ def test_get_daily_bars_off(monkeypatch):
     assert t.get_daily_bars("000001", 100).empty
 
 
+# ---------- to_df(None) 伪非空守卫(数据拉取崩溃根因) ----------
+class _NoneBarsApi:
+    """模拟真实 pytdx:to_df(None) 返回伪非空 {'value':None} 单行 df(绕过 .empty
+    空守卫),to_df([]) 返空 df。get_security_bars/get_security_quotes 返 None
+    模拟 tdx 服务器 flaky/无数据场景(容器内常见,旧实现致 get_daily_bars KeyError
+    崩、get_quote 返全 None 字段行)。"""
+
+    def to_df(self, data):
+        if data is None:
+            return pd.DataFrame([{"value": None}])  # 真实 pytdx 行为
+        if isinstance(data, list) and not data:
+            return pd.DataFrame()
+        return pd.DataFrame(data)
+
+    def get_security_bars(self, cat, mkt, code, start, want):
+        return None  # 服务器 flaky→无数据
+
+    def get_security_quotes(self, pairs):
+        return None
+
+    def get_xdxr_info(self, mkt, pure):
+        return None
+
+
+def test_get_daily_bars_none_raw_returns_empty_not_crash(monkeypatch):
+    """tdx 返 None bars 时 get_daily_bars 优雅返空,不 KeyError 崩(history 拉取根因)。"""
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    monkeypatch.setattr(t, "_get_api", lambda: _NoneBarsApi())
+    df = t.get_daily_bars("000001", 100)
+    assert df.empty, "None bars 应返空 DataFrame 降级,不崩溃"
+
+
+def test_get_quote_none_raw_returns_empty_not_bogus_rows(monkeypatch):
+    """tdx 批量返 None 时 get_quote 返空列表,不返全 None 字段的伪行。"""
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    monkeypatch.setattr(t, "_get_api", lambda: _NoneBarsApi())
+    q = t.get_quote(["sz000001"])
+    assert q == [], "None quotes 应返空列表,不返全 None 字段伪行"
+
+
+def test_get_xdxr_none_raw_returns_empty(monkeypatch):
+    """tdx 返 None xdxr 时返空 DataFrame,不返伪非空 {'value'} df。"""
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    monkeypatch.setattr(t, "_get_api", lambda: _NoneBarsApi())
+    df = t.get_xdxr("000001")
+    assert df.empty, "None xdxr 应返空 DataFrame"
+
+
 # ---------- history 备援 ----------
 def test_fetch_stock_hist_tdx_fallback(monkeypatch, tmp_path):
     """akshare 不可用 → tdx 主源(raw+本地 qfq),落 stock_daily,symbol=sz000001。"""

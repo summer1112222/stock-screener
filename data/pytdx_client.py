@@ -127,6 +127,22 @@ def _nan(v):
         return None
 
 
+def _to_df_safe(api, raw) -> "pd.DataFrame":
+    """``api.to_df`` 守卫:pytdx ``to_df(None)`` 返回**伪非空** ``{'value': None}``
+    单行 DataFrame(把 None 包成一行),绕过 ``.empty`` 空守卫 → 下游 ``df["date"]``
+    KeyError 崩 ``get_daily_bars``、``get_quote`` 返回全 None 字段行。
+
+    raw 为 None/空时直接返空 DataFrame;to_df 抛异常也返空。调用方原有的
+    ``if df is None or df.empty`` 守卫因此对 None raw 正确生效(旧实现对 None raw
+    拿到伪非空 df 致守卫失效)。"""
+    if not raw:
+        return pd.DataFrame()
+    try:
+        return api.to_df(raw)
+    except Exception:
+        return pd.DataFrame()
+
+
 # ---------- 公开接口 ----------
 
 def get_finance_info(code: str) -> dict:
@@ -172,11 +188,11 @@ def get_quote(codes: list[str]) -> list[dict]:
         for i in range(0, len(pairs), 80):
             batch = pairs[i:i + 80]
             try:
-                df = api.to_df(api.get_security_quotes(batch))
+                df = _to_df_safe(api, api.get_security_quotes(batch))
             except Exception:
                 # 批量端点失败时仍保留逐只重试机会。
-                df = None
-            rows = [] if df is None or df.empty else list(df.iterrows())
+                df = pd.DataFrame()
+            rows = [] if (df is None or df.empty) else list(df.iterrows())
             # 批量请求偶发只返回空行或不完整结果；对缺失代码逐只重试，
             # 让次日强势/深查主力优先拿到 TDX 盘口，而不是静默降级为空。
             valid_codes = set()
@@ -211,7 +227,7 @@ def get_quote(codes: list[str]) -> list[dict]:
             missing = [(m, c) for m, c in batch if c not in valid_codes]
             for pair in missing:
                 try:
-                    retry_df = api.to_df(api.get_security_quotes([pair]))
+                    retry_df = _to_df_safe(api, api.get_security_quotes([pair]))
                 except Exception:
                     continue
                 if retry_df is None or retry_df.empty:
@@ -267,7 +283,7 @@ def get_daily_bars(code: str, count: int = 250) -> pd.DataFrame:
             want = min(_BATCH, count - got)
             try:
                 bars = api.get_security_bars(_CAT_DAY, m, _pure_code(code), got, want)
-                df = api.to_df(bars)
+                df = _to_df_safe(api, bars)
             except Exception:
                 break
             if df is None or df.empty:
@@ -279,9 +295,15 @@ def get_daily_bars(code: str, count: int = 250) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True)
-    df = df.rename(columns={"vol": "volume", "datetime": "date"})
-    df["date"] = df["date"].astype(str).str.slice(0, 10)
-    df = df.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    # 列守卫:pytdx 版本差异/异常返回可能不含 datetime/vol 列,直接 rename→df["date"]
+    # 会 KeyError 崩(旧实现对 None bars 经 to_df 得伪非空 {'value'} df 致此路径必崩)。
+    if "datetime" in df.columns:
+        df = df.rename(columns={"vol": "volume", "datetime": "date"})
+    elif "date" not in df.columns:
+        return pd.DataFrame()  # 无可识别日期列,放弃(降级上游 akshare 备援)
+    if "date" in df.columns:
+        df["date"] = df["date"].astype(str).str.slice(0, 10)
+        df = df.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
     df["symbol"] = _project_symbol(_pure_code(code))
     df["code"] = _pure_code(code)
     keep = [c for c in ("date", "open", "high", "low", "close",
@@ -355,10 +377,13 @@ def get_xdxr(code: str) -> pd.DataFrame:
         return pd.DataFrame()
     with _lock:
         try:
-            df = api.to_df(api.get_xdxr_info(m, pure))
+            df = _to_df_safe(api, api.get_xdxr_info(m, pure))
         except Exception:
             return pd.DataFrame()
     if df is None or df.empty:
+        return pd.DataFrame()
+    # 守卫:伪非空 {'value'} df(to_df(None) 产物)无 xdxr 数据列→返空
+    if "category" not in df.columns and "year" not in df.columns:
         return pd.DataFrame()
     return df.reset_index(drop=True)
 
