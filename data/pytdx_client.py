@@ -82,7 +82,9 @@ def _get_api():
     global _api, _connected_host
     if not _TDX_OK:
         return None
-    with _lock:
+    if not _lock.acquire(timeout=_TIMEOUT):
+        return None
+    try:
         if _api is not None and _connected_host:
             # 心跳探测：能取到任意行情即视为活连接
             try:
@@ -111,6 +113,8 @@ def _get_api():
             except Exception:
                 continue
         return None
+    finally:
+        _lock.release()
 
 
 def _nan(v):

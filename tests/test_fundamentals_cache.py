@@ -1,6 +1,8 @@
 # tests/test_fundamentals_cache.py
 # -*- coding: utf-8 -*-
 """fundamentals 完整财报按需采集+缓存测试。"""
+import time
+import threading
 from datetime import datetime, timedelta
 from types import ModuleType
 
@@ -94,3 +96,21 @@ def test_ak_ok_false_skips_net(monkeypatch, tmp_path):
     monkeypatch.setattr(fundamentals, "ak", _mock_ak(_net))
     df, stale = fundamentals.fetch("600519", "cashflow")
     assert df is None and called["n"] == 0
+
+
+def test_parse_tdx_with_timeout_daemon(monkeypatch):
+    """底层 parse 卡死 > timeout 时，守卫必须在 timeout 内返回 None。
+
+    根因：旧实现 with ThreadPoolExecutor + shutdown(wait=True) 的 __exit__ 会
+    `wait=True` 等底层卡死的 parse 线程跑完，抵消 .result(timeout) 的超时——
+    pytdx 全挂时每只实际仍卡满 ~40s（_TDX_PARSE_TIMEOUT 失效），冷 quality 的
+    analyze_many deadline 因 prefetch 内每只 40s 而失真，/api/quality 冷路径必超时。
+    改 daemon 线程 + join(timeout) 后：到点即返 None，卡死线程后台自灭不阻塞。"""
+    monkeypatch.setattr(fundamentals, "_TDX_PARSE_TIMEOUT", 0.1)
+    monkeypatch.setattr(fundamentals, "parse_tdx_financial",
+                        lambda code: time.sleep(0.5) or {})
+    t0 = time.time()
+    r = fundamentals._parse_tdx_with_timeout("600519")
+    dt = time.time() - t0
+    assert r is None, "超时应返 None"
+    assert dt < 0.35, f"守卫应在 timeout 内返回(实际 {dt:.2f}s，旧 with 实现需 0.5s)"

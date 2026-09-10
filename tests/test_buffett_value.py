@@ -269,28 +269,27 @@ def test_reasons_include_iv_and_mos(monkeypatch, tmp_path):
 
 
 def test_analyze_many_deadline_returns_partial(monkeypatch):
-    """deadline_s 到点返已完成部分、放弃慢项，不等全部(防 akshare 被封时 200s 挂起)。"""
+    """deadline_s 在串行缓存分析中按 code 边界截断，未开始的慢项不处理。"""
     import time
     buffett = sys.modules.get("backtest.buffett") or __import__("backtest.buffett", fromlist=["x"])
 
     def _fake_analyze(c):
         if c.startswith("slow"):
-            time.sleep(1.5)  # 模拟 akshare 被封耗满超时的慢调用
+            time.sleep(1.5)
             return {"code": c, "pe": 10.0}
-        return {"code": c, "pe": 10.0}  # 快速成功
+        time.sleep(0.05)  # fast 也耗一点，让累计耗时越过 deadline
+        return {"code": c, "pe": 10.0}
 
     monkeypatch.setattr(buffett, "analyze", _fake_analyze)
-    # prefetch_financial 走真实 pytdx(假码慢连)→mock 为 no-op(本测试只测 deadline 机制)
-    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes: None)
-    codes = ["fast1", "fast2", "fast3", "fast4", "slow1", "slow2", "slow3", "slow4", "slow5"]
+    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes, deadline_s=None: None)
+    codes = ["fast1", "fast2", "fast3", "fast4", "slow1", "slow2"]
     t0 = time.time()
-    out = buffett.analyze_many(codes, deadline_s=0.4)
+    out = buffett.analyze_many(codes, deadline_s=0.12)  # fast×0.05=0.2 全跑超预算→在 slow 前截断
     dt = time.time() - t0
-    assert dt < 1.2, f"deadline 未生效，耗时 {dt:.2f}s"
+    assert dt < 0.6, f"deadline 应在启动慢项前截断，耗时 {dt:.2f}s"
     got = {r["code"] for r in out}
-    assert {"fast1", "fast2", "fast3", "fast4"} <= got, f"快项应全部返回: {got}"
-    # slow 在 0.4s 截止前未完成 → 不在结果里(若等全部则需 1.5s 且全部返回)
-    assert not any(c.startswith("slow") for c in got), "slow 应被 deadline 截断未返回"
+    assert got, "应返回部分已完成 fast"
+    assert not any(c.startswith("slow") for c in got), "慢项应在 deadline 前未启动"
 
 
 def test_analyze_many_no_deadline_waits_all(monkeypatch):
@@ -303,7 +302,7 @@ def test_analyze_many_no_deadline_waits_all(monkeypatch):
         seen.append(c)
         return {"code": c, "pe": 10.0}
     monkeypatch.setattr(buffett, "analyze", _fake_analyze)
-    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes: None)
+    monkeypatch.setattr(buffett, "prefetch_financial", lambda codes, deadline_s=None: None)
     out = buffett.analyze_many(["a", "b", "c"])  # 默认 None
     assert {r["code"] for r in out} == {"a", "b", "c"}
     assert len(seen) == 3

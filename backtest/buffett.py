@@ -795,15 +795,20 @@ def shortlist_by_turnover(min_turnover: float = 5e8, k: int = 80,
     return df["code"].tolist()
 
 
-def prefetch_financial(codes: list[str]) -> None:
+def prefetch_financial(codes: list[str], deadline_s: float | None = None) -> None:
     """串行预解析所有 code 的 tdx 财报,填 abstract+三大表缓存(含缺源空 df 哨兵)。
 
     单线程串行 parse 避免在 analyze_many 的 8 worker 并发下争用 pytdx 单 TCP 连接 Lock
     (并发时 parse_tdx_financial 单次 0.15s 膨胀至 ~1-3s 的重连抖动,N 只并发 deadline 40s
     仅完成~16)。预热后并行 analyze 阶段全缓存命中 0 次 pytdx。已有新鲜 abstract 缓存的
     code 跳过(暖跑秒回)。abstract=None 的 code 也预填三大表哨兵,使其 fundamentals.fetch
-    命中哨兵返 None 秒回(否则 analyze 内 fetch×3 各重 parse 一次=4× 冗余 TCP)。"""
+    命中哨兵返 None 秒回(否则 analyze 内 fetch×3 各重 parse 一次=4× 冗余 TCP)。
+    deadline_s 为批量预取预算；到点停止预取，让调用方及时进入部分结果降级流程。"""
+    import time as _time
+    started = _time.monotonic()
     for c in codes:
+        if deadline_s is not None and _time.monotonic() - started >= max(deadline_s, 0.0):
+            break
         _, st = _cache_get(c, allow_stale=False)
         if st == "hit":
             continue  # 新鲜 abstract 缓存→跳过(暖跑秒回)
@@ -844,18 +849,24 @@ def prefetch_financial(codes: list[str]) -> None:
 
 
 def analyze_many(codes: list[str], deadline_s: float | None = None) -> list[dict]:
-    """并发 analyze（max_workers=8）；单只超时由 fetch_abstract 的 _AK_TIMEOUT 兜底。
+    """批量 analyze；单只超时由 fetch_abstract 的 _AK_TIMEOUT 兜底。
 
-    deadline_s: 总体截止秒数(从调用起算)。到点后用 as_completed 返回**已完成**的
-        部分结果、放弃未完成项——避免 akshare 全被封时 N×_AK_TIMEOUT/8workers
-        长阻塞(ex.map 干等全部完成，80只shortlist最坏~200s)。None=不限(旧行为)。
-        quality 口径2 传 60s：拿到部分 buffett 分位也比 200s 挂起强，quality
+    deadline_s: 总体截止秒数(从调用起算)。到点后停止,返回**已完成**的部分结果——
+        避免 akshare 全被封时 N×_AK_TIMEOUT 长阻塞(80只shortlist最坏~200s)。
+        None=不限(旧行为,8 worker 并发)。
+        quality 口径2 传 40s：拿到部分 buffett 分位也比 200s 挂起强，quality
         仍可凭口径1/3/4 + 部分口径2 产出有效主清单。
-    """
+
+    deadline 路径**不调 prefetch_financial**：串行 analyze 循环自身经 fetch_abstract
+    解析并填 abstract+三大表缓存(与 prefetch 同一缓存键),prefetch 在串行路径是
+    纯重复劳动,且会耗尽 deadline 预算致 analyze 循环立即 break→返回空列表
+    (优质筛选项口径2 永远降级 spot 估值代理的根因)。串行无 8 worker 并发,
+    prefetch 原始价值(消除 pytdx 单连接 Lock 争用)在串行路径不存在。
+    prefetch 仍供 None 路径(warmup 全量预热)与直接调用使用。"""
     out = []
-    # 串行预解析填缓存,避免 8 worker 并发争用 pytdx 单连接 Lock 致 parse 抖动
-    # (并发 parse 0.15s→1-3s,N 只 deadline 40s 仅完成~16;预热后并行阶段全缓存命中)
-    prefetch_financial(codes)
+    import time as _time
+    started = _time.monotonic()
+
     def _one(c):
         try:
             r = analyze(c)
@@ -864,28 +875,26 @@ def analyze_many(codes: list[str], deadline_s: float | None = None) -> list[dict
         except Exception:
             pass
         return None
+
     if deadline_s is None:
+        # 无截止：全量预取填缓存(暖跑秒回),再 8 worker 并发 analyze。
+        prefetch_financial(codes)
         with ThreadPoolExecutor(max_workers=8) as ex:
             for r in ex.map(_one, codes):
                 if r is not None:
                     out.append(r)
         return out
-    # 有截止时间：submit 全部 + as_completed 边收边到点停，放弃未完成(不阻塞等全部)
-    from concurrent.futures import as_completed
-    import time as _time
-    remain = max(deadline_s, 0.001)
-    ex = ThreadPoolExecutor(max_workers=8)
-    try:
-        futs = {ex.submit(_one, c): c for c in codes}
-        try:
-            for fut in as_completed(futs, timeout=remain):
-                r = fut.result()  # _one 内已吞异常，返 None 或 dict
-                if r is not None:
-                    out.append(r)
-        except FuturesTimeout:
-            pass  # 截止到，返回已完成部分(其余放弃)
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)  # 不阻塞等残余线程(≤20s自亡)
+    # 有截止时间：串行逐只 analyze,受总体预算约束。
+    # 串行无线程池→不残留非 daemon 僵尸线程(旧 8 worker+shutdown(wait=False) 的根因);
+    # 不调 prefetch→预算全用于 analyze,fetch_abstract 自填缓存供下次暖跑秒回;
+    # 到点即止返回部分结果。deadline_s 已是 float(非 None),无需 max 守卫。
+    budget = float(deadline_s)
+    for c in codes:
+        if _time.monotonic() - started >= budget:
+            break
+        r = _one(c)
+        if r is not None:
+            out.append(r)
     return out
 
 

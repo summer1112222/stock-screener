@@ -284,3 +284,34 @@ def test_get_block_members_reads_full_file_and_normalizes(monkeypatch):
     assert result == {"新能源": ["600001", "000002"]}
     # 行业板块读 block_zs.dat，而不是 block.dat（后者只有指数/自定义组）
     assert api.calls == [("meta", "block_zs.dat"), ("data", "block_zs.dat", 0, 3)]
+
+
+def test_get_api_lock_timeout_on_contention(monkeypatch):
+    """锁被卡死线程占住时，_get_api 应在 timeout 内降级返 None，不无限阻塞。
+
+    根因：旧实现 with _lock 的 acquire 无 timeout，tdx 全挂时重连循环在锁内
+    占满 5×_TIMEOUT(40s)，且若被卡死线程持锁则其他请求永久等待，冷 /api/quality
+    并发请求全部堵死。加 acquire(timeout) 后超时即降级，不让请求无限排队。"""
+    import threading
+    import time
+
+    class _HeldLock:
+        def acquire(self, blocking=True, timeout=-1):
+            return False  # 永不获取成功，模拟卡死线程持锁
+        def release(self):
+            pass
+
+    held = _HeldLock()
+    monkeypatch.setattr(t, "_lock", held)
+    monkeypatch.setattr(t, "_TDX_OK", True)
+    monkeypatch.setattr(t, "_TIMEOUT", 0.2)
+    box = {}
+    worker = threading.Thread(target=lambda: box.setdefault("r", t._get_api()),
+                              daemon=True)
+    t0 = time.time()
+    worker.start()
+    worker.join(timeout=1.0)
+    dt = time.time() - t0
+    assert not worker.is_alive(), "锁争用应在 timeout 内返回而非无限阻塞"
+    assert box.get("r") is None, "锁超时应降级返 None"
+    assert dt < 1.0, f"应快速降级(实际 {dt:.2f}s)"

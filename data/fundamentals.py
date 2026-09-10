@@ -180,16 +180,25 @@ def parse_tdx_financial(code: str) -> dict | None:
 
 
 def _parse_tdx_with_timeout(code: str) -> dict | None:
-    """parse_tdx_financial 的超时守卫:ThreadPoolExecutor 包装,超 _TDX_PARSE_TIMEOUT 返 None。
-    pytdx 单 TCP 连接 _get_api 最坏 5 服务器×8s≈40s/次,tdx 全挂时无此守卫会致
-    prefetch_financial(80 只)×40s≈53min 长卡死(analyze_many 的 deadline_s 计时在 prefetch 之后,
-    约束不到 prefetch)。超时→None→上游 fetch/fetch_abstract 走 akshare 备援或计熔断
-    (_note_fetch(False)),不无限阻塞。正常 tdx 可用时 parse ~0.6s/只,新建/销毁单 worker 池开销可忽略。"""
-    try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(parse_tdx_financial, code).result(timeout=_TDX_PARSE_TIMEOUT)
-    except (FuturesTimeout, Exception):
-        return None
+    """parse_tdx_financial 的超时守卫，超时立即返回 None。
+
+    使用 daemon 线程而非 ``with ThreadPoolExecutor``：后者退出上下文时会
+    ``shutdown(wait=True)``，即使 ``Future.result(timeout=...)`` 已超时，仍会
+    等待底层卡死的网络线程，导致超时失效并阻塞 quality。"""
+    import threading as _threading
+
+    result = {}
+
+    def _run():
+        try:
+            result["value"] = parse_tdx_financial(code)
+        except Exception:
+            result["value"] = None
+
+    worker = _threading.Thread(target=_run, name="tdx-financial", daemon=True)
+    worker.start()
+    worker.join(timeout=max(float(_TDX_PARSE_TIMEOUT), 0.0))
+    return result.get("value") if not worker.is_alive() else None
 
 
 def _strip_prefix(code: str) -> str:
