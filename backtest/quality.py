@@ -970,7 +970,13 @@ def _apply_combo(main, universe, df_spot, max_per_board, max_corr, limit,
 
 
 def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[dict]:
-    """给个股 quality 主清单附主力行为/阶段标签，不改变质量排序与门槛。"""
+    """给个股 quality 主清单附主力行为/阶段标签，不改变质量排序与门槛。
+
+    时间预算 20s：mf_phase 标签是可选诊断,不应阻塞核心 quality 响应。finshare
+    被封时 main_force_phase→behavior_series 每只 ~7-15s 重试,20 只累计 140-300s
+    致前端 90s AbortController 超时;超预算停止富集,标签降级 None(优雅)。
+    finshare 熔断(smart_money._finshare_blocked)进一步在连续失败后秒退。"""
+    import time as _time
     if universe != "stock" or not main:
         return main
     from screener import smart_money as sm_query
@@ -979,6 +985,7 @@ def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[di
         batch = sm_query._behavior_batch(codes, days=days)
     except Exception:
         batch = {}
+    deadline = _time.monotonic() + 20.0  # 标签富集总预算 20s,超时停止
     for it in main:
         code = str(it.get("code"))
         b = batch.get(code, {})
@@ -988,6 +995,13 @@ def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[di
             it[dst] = _to_float(b.get(key)) if b.get(key) is not None else None
         it["daily_net"] = None
         it["data_asof"] = None
+        if _time.monotonic() >= deadline:
+            # 超预算:剩余标的不再调 main_force_phase(触网慢),标签降级 None
+            it["mf_phase"] = None
+            it["mf_confidence"] = None
+            it["behavior_group"] = "质量待观察(富集超时)"
+            it.setdefault("warnings", []).append("主力阶段标签因富集超时未取")
+            continue
         try:
             phase = sm_query.main_force_phase(code, days=days)
             it["mf_phase"] = phase.get("phase")

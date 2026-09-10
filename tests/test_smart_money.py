@@ -585,3 +585,60 @@ def test_summarize_empty_and_bad_rows():
     assert smq.summarize_by_code([]) == {}
     assert smq.summarize_by_code([{"code": None, "channel": "资金流"},
                                   {"channel": "资金流"}]) == {}
+
+
+# ---------- finshare 熔断(quality 前端超时根因守卫) ----------
+def test_finshare_circuit_breaker_skips_when_blocked(monkeypatch):
+    """finshare 熔断打开时 _finshare_fund_flow_series 秒返 None,不触网。
+
+    根因:finshare get_money_flow_stock 走 eastmoney 被封每只 ~7-15s 重试,
+    quality._enrich_main_behavior 对 top20 逐个调 main_force_phase→behavior_series
+    →_finshare_fund_flow_series,累计 140-300s 致前端 90s 超时。
+    连续≥2 失败→熔断 10min,后续秒退。"""
+    import time as _t
+    monkeypatch.setattr(smq, "_FS_BLOCKED_UNTIL", _t.time() + 600)
+    assert smq._finshare_blocked() is True
+    # 熔断期:不 import finshare,不调 get_money_flow_stock
+    called = []
+    monkeypatch.setattr(smq, "_note_fs_fetch", lambda ok: called.append(ok))
+    r = smq._finshare_fund_flow_series("000001", 30)
+    assert r is None
+    assert called == [], "熔断期不应触发 _note_fs_fetch(秒退不触网)"
+
+
+def test_finshare_circuit_breaker_triggers_after_two_fails(monkeypatch):
+    """连续 2 次网络失败后熔断打开(对齐 buffett.akshare_blocked 阈值)。
+
+    模拟真实 eastmoney 被封:finshare 可 import,get_money_flow_stock 抛
+    ConnectionError(每只 ~7-15s 重试)。熔断前 2 次累计失败→打开,后续秒退。"""
+    import sys, time as _t
+    import types
+    monkeypatch.setattr(smq, "_FS_BLOCKED_UNTIL", 0.0)
+    monkeypatch.setattr(smq, "_FS_FAILS", 0)
+    # 注入伪 finshare 模块:get_money_flow_stock 抛网络异常(模拟 eastmoney 被封)
+    fake_fs = types.ModuleType("finshare")
+
+    def _boom(code):
+        raise ConnectionError("RemoteDisconnected")
+    fake_fs.get_money_flow_stock = _boom
+    monkeypatch.setitem(sys.modules, "finshare", fake_fs)
+    smq._finshare_fund_flow_series("000001", 30)  # fail 1
+    assert smq._FS_FAILS == 1 and not smq._finshare_blocked()
+    smq._finshare_fund_flow_series("000002", 30)  # fail 2 → 熔断
+    assert smq._FS_FAILS == 2 and smq._finshare_blocked(), "连续 2 失败应熔断"
+    # 熔断后秒退,不再调 get_money_flow_stock
+    calls = []
+    fake_fs.get_money_flow_stock = lambda c: calls.append(c) or None
+    t0 = _t.time()
+    r = smq._finshare_fund_flow_series("000003", 30)
+    assert r is None and _t.time() - t0 < 0.1 and calls == [], "熔断期秒退不触网"
+
+
+def test_finshare_success_resets_fail_count(monkeypatch):
+    """finshare 成功归零失败计数(熔断休眠,仅被封时触发)。"""
+    monkeypatch.setattr(smq, "_FS_BLOCKED_UNTIL", 0.0)
+    monkeypatch.setattr(smq, "_FS_FAILS", 5)  # 已接近熔断
+    # 模拟成功:直接设 ok=True
+    smq._note_fs_fetch(True)
+    assert smq._FS_FAILS == 0
+    assert not smq._finshare_blocked()

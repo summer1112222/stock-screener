@@ -542,12 +542,40 @@ def _streak(amounts: list[float]) -> tuple[int, int]:
     return 0, 0
 
 
+# ---------- finshare 熔断(对齐 buffett.akshare_blocked 模式) ----------
+# finshare get_money_flow_stock 走 eastmoney,出口 IP 被封时每只 ~7-15s
+# 重试+cooldown。quality._enrich_main_behavior 对主清单 top20 逐个调
+# main_force_phase→behavior_series→_finshare_fund_flow_series,累计
+# 140-300s 致前端 90s AbortController 超时"TypeError: Failed to fetch"。
+# 连续≥2 失败→熔断 10min,跳过按需补历史(DB 有资金流记录仍正常读,不受影响)。
+_FS_FAILS = 0
+_FS_BLOCKED_UNTIL = 0.0
+
+
+def _finshare_blocked() -> bool:
+    return _time_mod.time() < _FS_BLOCKED_UNTIL
+
+
+def _note_fs_fetch(ok: bool) -> None:
+    global _FS_FAILS, _FS_BLOCKED_UNTIL
+    if ok:
+        _FS_FAILS = 0
+        return
+    _FS_FAILS += 1
+    if _FS_FAILS >= 2:
+        _FS_BLOCKED_UNTIL = _time_mod.time() + 600  # 熔断 10min
+
+
 def _finshare_fund_flow_series(code: str, days: int) -> dict | None:
     """finshare 个股资金流历史按需补（仅 behavior_series 表无资金流记录时调）。
 
     fs.get_money_flow_stock(code) 取主力净额(main_net,元)序列，截近 days 日。
     不走东财 push2 被封端点（实测可用）。finshare 未装/失败/空→None（上层保持
-    原行为）。返回与 behavior_series channels 项同构 dict，附 source=finshare。"""
+    原行为）。返回与 behavior_series channels 项同构 dict，附 source=finshare。
+    熔断:连续≥2 失败→_FS_BLOCKED_UNTIL 10min 内秒返 None(避免 20 只×7-15s
+    重试拖垮 quality 前端超时);成功归零。DB 有资金流记录的 code 不走此路。"""
+    if _finshare_blocked():
+        return None
     try:
         import finshare as fs
     except Exception:
@@ -555,11 +583,15 @@ def _finshare_fund_flow_series(code: str, days: int) -> dict | None:
     try:
         df = fs.get_money_flow_stock(code)
     except Exception:
+        _note_fs_fetch(False)
         return None
     if df is None or getattr(df, "empty", True) or "main_net" not in df.columns:
+        _note_fs_fetch(False)  # 空/异常结果亦计失败(eastmoney 被封常快速返空)
         return None
     if "trade_time" not in df.columns:
+        _note_fs_fetch(False)
         return None
+    _note_fs_fetch(True)  # 成功重置熔断计数
     dates = [sm_data._norm_date(v) for v in df["trade_time"].tolist()]
     amounts = []
     for x in df["main_net"].tolist():
