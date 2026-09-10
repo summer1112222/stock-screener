@@ -48,6 +48,7 @@ except Exception:
 _ENDPOINTS = [
     ("fund_etf_spot_em", lambda: ak.fund_etf_spot_em() if ak else (_ for _ in ()).throw(ImportError())),
     ("stock_zh_index_value_csindex", lambda: ak.stock_zh_index_value_csindex(symbol="000300") if ak else (_ for _ in ()).throw(ImportError())),
+    ("fund_etf_fund_info_em", lambda: ak.fund_etf_fund_info_em(symbol="513100") if ak else (_ for _ in ()).throw(ImportError())),
 ]
 
 def _probe(name, fn):
@@ -300,10 +301,12 @@ git commit -m "feat(etf-screen): 短清单量价横截面 rank 评分(复用现�
 - Test: `tests/test_etf_screen.py`
 
 **Interfaces:**
-- Consumes: `data.history._UNIVERSE["ETF"]`（etf_daily）、`db.query_rows("etf_spot", limit=0)`、tdx `pytdx_client.get_quote(codes)`、Phase 0 结果 json。
+- Consumes: `data.history._UNIVERSE["ETF"]`（etf_daily）、`db.query_rows("etf_spot", limit=0)`（仅 latest_price/turnover_rate/turnover_amount，**表无 nav/fund_scale 列，见 pre-flight Ruling**）、tdx `pytdx_client.get_quote(codes)`、Phase 0 结果 json。
 - Produces:
   - `_probe_flags() -> dict`：读 `etf_source_probe.json`（缺省全 False）。
-  - `_fetch_index_valuation(code) -> dict | None`：指数估值分位（Phase 0 后按源实现；单测注入）。
+  - `_fetch_index_valuation(code) -> dict | None`：指数估值分位（`{"pe_pct": float, "div_yield": float|None}`，Phase 0 后按源实现；单测注入）。
+  - `_fetch_qdii_premium(code) -> float | None`：QDII 溢价率（`(nav-price)/price` 的绝对语义，Phase 0 后按源实现；单测注入；失败→None）。**不读 etf_spot.nav（表无此列）。**
+  - `_fetch_quality_meta(code) -> dict | None`：`{"fund_scale": 亿, "fee_bps": int|None, "tracking_err": float|None}`（Phase 0 后按源实现；单测注入；失败→None 该维度中性）。
   - `fund_premium(market_price, nav) -> float | None`：`(price-nav)/nav`，任缺→None。
   - `etf_screen_rank(universe="ETF", mode="long", codes=None, limit=50, days=365)` -> dict（`long_term`/`short_term` 两清单 + `disclaimer` 外字段）。
   - `_CACHE` 30s、`_nan`。
@@ -319,20 +322,19 @@ def test_fund_premium():
     assert es.fund_premium(None, 1.00) is None
 
 def test_etf_screen_rank_mode_long_returns_quality_and_valuation(monkeypatch):
-    import json, pandas as pd, numpy as np
+    import pandas as pd, numpy as np
     idx = pd.date_range("2026-01-01", periods=40, freq="D")
     up = pd.DataFrame({"510300": np.linspace(4.0, 5.0, 40), "159915": np.linspace(2.0, 1.6, 40)}, index=idx)
+    # 数据源抽象: 估值/质量 meta 经 _fetch_* 注入, 不依赖 etf_spot 表缺字段(无 nav/fund_scale 列)
     monkeypatch.setattr(bt_eval, "load_panel", lambda u,c,s,e,f: up if f=="close" else None)
-    # 注入估值分位兜底(此处不用真 Index 数据源)
-    monkeypatch.setattr(es, "_fetch_index_valuation", lambda code: {"pe_pct": 0.2, "div_yield": 2.0})
-    from data import db
-    db.init_db()
-    # spot mock: etf_spot 有规模/换手/价格
+    monkeypatch.setattr(es, "_fetch_index_valuation",
+        lambda code: {"pe_pct": 0.2, "div_yield": 2.0})
+    monkeypatch.setattr(es, "_fetch_quality_meta",
+        lambda code: {"fund_scale": 8.0 if code=="159915" else 300.0, "fee_bps": 15, "tracking_err": 0.2})
     monkeypatch.setattr(es._db, "query_rows",
-        lambda table, *a, **k: [{"code":"510300","latest_price":4.9,"turnover_rate":1.2,"fund_scale":300.0},
-                                 {"code":"159915","latest_price":1.65,"turnover_rate":0.3,"fund_scale":8.0}] if table=="etf_spot" else [])
+        lambda table, *a, **k: [{"code":"510300","latest_price":4.9,"turnover_rate":1.2},
+                                 {"code":"159915","latest_price":1.65,"turnover_rate":0.3}] if table=="etf_spot" else [])
     out = es.etf_screen_rank(universe="ETF", mode="long", codes=["510300","159915"], days=60)
-    # 大+便宜(排名高)应靠前; 质量门槛剔除过小规模
     assert isinstance(out.get("long_term"), list)
     if out["long_term"]:
         assert "quality_score" in out["long_term"][0]
@@ -343,13 +345,14 @@ def test_etf_screen_rank_qdii_premium_visible(monkeypatch):
     import pandas as pd, numpy as np
     idx = pd.date_range("2026-01-01", periods=40, freq="D")
     up = pd.DataFrame({"513100": np.linspace(1.0, 1.1, 40)}, index=idx)
+    # nav 经 _fetch_qdii_premium 注入(不读 etf_spot.nav, 表无此列)
     monkeypatch.setattr(bt_eval, "load_panel", lambda u,c,s,e,f: up if f=="close" else None)
     monkeypatch.setattr(es, "_fetch_index_valuation", lambda code: None)
-    from data import db as _db
+    monkeypatch.setattr(es, "_fetch_quality_meta", lambda code: None)
+    monkeypatch.setattr(es, "_fetch_qdii_premium", lambda code: 0.15)  # 场内溢价 15%
     monkeypatch.setattr(es._db, "query_rows",
-        lambda table,*a,**k: [{"code":"513100","latest_price":1.60,"nav":1.40}] if table=="etf_spot" else [])
+        lambda table,*a,**k: [{"code":"513100","latest_price":1.60}] if table=="etf_spot" else [])
     out = es.etf_screen_rank(universe="QDII", mode="short", codes=["513100"], days=60)
-    # 溢价 >0 且项带 premium; 若数据不足清单为空则只断言不崩
     for item in out.get("short_term", [])[:1]:
         assert "premium" in item
 ```
@@ -363,12 +366,22 @@ Expected: FAIL（`etf_screen_rank`/`fund_premium` 未定义）
 
 - [ ] **Step 3: 实现编排队**
 
+```python
+# 数据源抽象(Phase 0 后按实测源实现; 失败→None, 不读 etf_spot 缺字段)
+def _probe_flags() -> dict: ...
+def _fetch_qdii_premium(code) -> float | None: ...
+def _fetch_quality_meta(code) -> dict | None:
+    """{'fund_scale': 亿, 'fee_bps': int|None, 'tracking_err': float|None}; 缺→None 该维度走中性。"""
+def _fetch_index_valuation(code) -> dict | None:
+    """{'pe_pct': 0..1, 'div_yield': float|None}; 指数历史分位, 低=便宜。"""
+```
+
 实现要点（给出结构 + 必须的核心代码，数据源差异经 `_fetch_*` 封装隔离）：
 - 头部 `from data import db as _db`、`from data.history import _UNIVERSE`、`from .pytdx_client import pytdx_client`（try/except 兜底）。
 - `etf_screen_rank` 里先查缓存（键 = (universe, mode, tuple(codes or []), limit, days)），30s。
 - `short` 分支：`load_panel(universe, codes, "20240101", today, "close")` + `"amount"` → `short_scores` → 按分数降序 items（每 item 带 `score`/`factor_scores`/`coverage`/`premium`/`source`）。
-- `long` 分支：从 `etf_spot` 取 规模/换手/成交额 → `quality_score` 硬门槛（scale<`min_scale` 或 amount<`min_amount` 跳过）→ `_fetch_index_valuation(code)` 取 `pe_pct/div_yield` → `valuation_percentile` = `pe_pct`（指数分位，若源给则直接映射）→ `long_score` → 降序；QDII 高溢价（`premium>0.03`）在该项 `risk_flag="high_premium"`。
-- `premium`：`fund_premium(latest_price, nav)`，nav 缺→None；`source` 标注。
+- `long` 分支：从 `etf_spot` 取 `turnover_rate`/`turnover_amount`（最新价 `latest_price`），**规模/费率/跟踪误差经 `_fetch_quality_meta(code)`**（QDDI 溢价经 `_fetch_qdii_premium`）→ `quality_score(scale_wan mgt..., turnover_rate, fee_bps, tracking_err)` 硬门槛（`_fetch_quality_meta` 的 fund_scale 若可得且 < `min_scale` 跳过；meta 缺失则该维度不判门槛）→ `_fetch_index_valuation(code)` 取 `pe_pct`/`div_yield` → `valuation_percentile = pe_pct`（源给则直接映射）→ `long_score` → 降序；QDII 高溢价（`premium>0.03`）在该项 `risk_flag="high_premium"`。
+- `premium`：`fund_premium(latest_price, nav_qdii)`，nav_qdii 缺→None；`source` 标注。
 - 返回 `{"universe", "mode", "count", "limit", "ts", "long_term": [...], "short_term": [...]}`（按 mode 只填对应清单，另一为空 list）；顶置 `disclaimer` 非 `_wrap` 管。
 - 列表项统一 `_to_records_eq`：`[dict(zip(d, map(_nan, d.values()))) ...]` 或构建时 `astype(object).where(pd.notna, None)`。
 
