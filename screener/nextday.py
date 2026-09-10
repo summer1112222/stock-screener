@@ -682,6 +682,27 @@ def _factor_relative_strength(s, market_median: float | None = None,
     return _clip((chg - base + 5.0) / 10.0)
 
 
+def _factor_relative_strength_hist(ma_info: dict | None = None,
+                                   market_median_ret: float | None = None,
+                                   lookback: int = 5) -> float | None:
+    """历史可回测相对强度: 过去 lookback 日个股收益 - 市场横截面中位数收益。
+
+    与实时 _factor_relative_strength(当日涨幅相对强度)对称，但基于 stock_daily
+    的 close_series，可用 OHLCV 历史重建 → 进 IC/分层研究。线上 nextday 排序
+    仍用实时口径；本函数仅供历史研究调用，不接进 _FACTOR_WEIGHTS。
+    映射 (ret - market_median_ret + 0.1) / 0.2: 相对市场强弱 ±10% 覆盖 0-1。
+    缺历史序列 / 基准 → None(不伪造 0 分)。
+    """
+    closes = _series(ma_info, "close_series")
+    if len(closes) < lookback + 1:
+        return None
+    prev, cur = closes[-1 - lookback], closes[-1]
+    if not (prev and prev > 0) or market_median_ret is None:
+        return None
+    ret = cur / prev - 1.0
+    return _clip((ret - market_median_ret + 0.1) / 0.2)
+
+
 def _factor_sr_10(s, ma_info: dict | None = None) -> float | None:
     """波动率归一收益: 近10日日收益均值/标准差(夏普式)。
 
@@ -729,15 +750,33 @@ def _factor_close_vol_corr(s, ma_info: dict | None = None) -> float | None:
     return _clip(corr / 1.0 + 0.5)
 
 
+def _mv_platform(mv: float) -> float:
+    """流通市值分段平台评分: 过小盘低分，中小盘随市值改善，超大市值平台不再单调奖励。
+
+    - <10亿   0→0.5   极端小盘(通常已被 min_mv 硬剔除，此处仅兜底)
+    - 10→50亿 0.5→0.9 流动性随市值快速改善
+    - 50→200亿 0.9→1.0 次新/活跃中小盘高分(贴合次日强势追涨偏好)
+    - >200亿  1.0 平台 流动性已充分，不再额外加分(原 _clip(mv/300) 对超大市值单调奖励)
+    """
+    if mv < 10:
+        return max(mv / 20.0, 0.0)
+    if mv < 50:
+        return 0.5 + (mv - 10) / 40.0 * 0.4
+    if mv < 200:
+        return 0.9 + (mv - 50) / 150.0 * 0.1
+    return 1.0
+
+
 def _factor_liq_turnover(s, ma_info: dict | None = None) -> float | None:
     """流动性质量: 流通市值充足 + 换手适中。
 
-    市值越大越易成交(非流动性越低)，换手适中过滤极端小盘与过度拥挤。
+    市值分段平台(_mv_platform)过滤极端小盘、对超大市值封顶而非单调加分，
+    换手适中(目标 6%)过滤极端小盘与过度拥挤。
     """
     mv, tr = _to_f(s.get("circulating_market_cap")), _to_f(s.get("turnover_rate"))
     if mv is None and tr is None:
         return None
-    mv_score = _clip(mv / 300.0) if mv is not None else 0.5
+    mv_score = _mv_platform(mv) if mv is not None else 0.5
     tr_score = _clip(1.0 - abs(tr - 6.0) / 10.0) if tr is not None else 0.5
     return 0.6 * mv_score + 0.4 * tr_score
 

@@ -514,6 +514,50 @@ def test_liq_turnover_rewards_size_and_moderate_turnover():
     assert good > bad
 
 
+def test_mv_platform_caps_at_large_cap_and_rewards_mid():
+    """市值分段平台: 中小盘随市值改善、超大市值封顶不再单调加分。"""
+    mid = nd._mv_platform(50.0)
+    large = nd._mv_platform(100.0)
+    huge = nd._mv_platform(300.0)
+    mega = nd._mv_platform(3000.0)
+    tiny = nd._mv_platform(1.0)
+    assert tiny < mid <= large < huge
+    # 超大市值封顶: 300亿 与 3000亿 同分，不再继续奖励
+    assert huge == mega == 1.0
+    # 50亿 ≥ 大市值(不因市值更大而单调上升)
+    assert mid <= large
+
+
+def test_factor_relative_strength_hist_picks_winning_side():
+    """历史相对强度: 跑赢市场基准的个股得分高于跑输者。"""
+    up = nd._factor_relative_strength_hist(
+        {"close_series": [10] * 5 + [12]}, market_median_ret=0.0, lookback=5)
+    down = nd._factor_relative_strength_hist(
+        {"close_series": [10] * 5 + [8]}, market_median_ret=0.0, lookback=5)
+    assert up > down
+    # 基准抬高后同一序列相对转弱
+    penalized = nd._factor_relative_strength_hist(
+        {"close_series": [10] * 5 + [12]}, market_median_ret=0.20, lookback=5)
+    assert penalized < up
+
+
+def test_factor_relative_strength_hist_missing_returns_none():
+    """历史相对强度缺序列 / 缺基准 → None，不伪造 0 分。"""
+    assert nd._factor_relative_strength_hist({}) is None
+    assert nd._factor_relative_strength_hist({"close_series": [10] * 5 + [12]},
+                                             market_median_ret=None) is None
+    # close_series 不足 lookback+1 日
+    assert nd._factor_relative_strength_hist(
+        {"close_series": [10] * 3}, market_median_ret=0.0, lookback=5) is None
+
+
+def test_factor_relative_strength_hist_respects_lookback():
+    """lookback 控制窗口: 更长窗口观测早期趋势。"""
+    s5 = nd._factor_relative_strength_hist(
+        {"close_series": [10] * 5 + [11, 12]}, market_median_ret=0.0, lookback=5)
+    assert s5 is not None
+
+
 def test_exclude_st_false(monkeypatch):
     _setup(monkeypatch)
     r = nd.nextday_strong_rank(codes=["600007"], exclude_st=False)
