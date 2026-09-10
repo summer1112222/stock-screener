@@ -22,6 +22,56 @@ def _panels():
     return close, amount
 
 
+def test_rel_strength_factor_direction_and_ic(monkeypatch):
+    """相对强度因子: 过去 n 日个股收益减去当日市场横截面中位数。
+
+    - 面板计算用原始相对值(IC 秩相关对单调变换不变, 不需 0-1 clip)
+    - 强势股 相对强度 > 弱势股
+    - 接入 research 后能跑通 IC/分层
+    """
+    close, amount = _panels()
+    # 直接验证 compute_factor 的方向语义
+    rs = research.bt_eval.compute_factor(
+        close, "rel_strength_5", params={"n": 5}, amount=amount)
+    last = rs.iloc[-1]
+    # 000001(10→18 强) 应高于 000002(18→10 弱)
+    assert last["000001"] > last["000002"]
+    # 首行(前 5 日收益不足窗口)应为 NaN
+    assert pd.isna(rs.iloc[0]["000001"])
+
+    # 接入 run_factor_research 编排能产出 IC 报告
+    monkeypatch.setattr(
+        research.bt_eval,
+        "load_panel",
+        lambda universe, codes, start, end, field: close if field == "close" else amount,
+    )
+    result = research.run_factor_research(
+        "stock", list(close.columns), "rel_strength_5", "20250101", "20251231",
+        forward_days=[5], n=5, n_groups=3,
+    )
+    assert result["context"]["factor"] == "rel_strength_5"
+    horizon = result["horizons"]["5"]
+    assert horizon["ic"]["spearman"]["n"] > 0
+    assert horizon["coverage"]["factor_cells"] > 0
+    assert "groups" in horizon["decile"]
+
+
+def test_valid_factor_keys_include_rel_strength():
+    """compute_factor 支持 rel_strength_n; 未知键抛错。"""
+    idx = pd.date_range("2025-01-01", periods=30, freq="D")
+    close = pd.DataFrame({"000001": np.linspace(10, 15, 30)}, index=idx)
+    out = research.bt_eval.compute_factor(
+        close, "rel_strength_20", params={"n": 20})
+    assert out is not None and not out.empty
+    # 未注册的因子键 → ValueError
+    try:
+        research.bt_eval.compute_factor(close, "no_such_factor")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
 def test_rank_ic_and_multi_horizon(monkeypatch):
     close, amount = _panels()
     monkeypatch.setattr(

@@ -107,6 +107,18 @@ def compute_factor(close: pd.DataFrame, factor_key: str,
         den_a = amount.rolling(nn, min_periods=2).std()
         corr = num / (den_c * den_a).replace(0, np.nan)
         return (corr.clip(-1, 1) + 1.0) / 2.0
+    if factor_key.startswith("rel_strength"):
+        # 相对强度: 近 n 日个股收益 - 当日市场横截面中位数收益。
+        # nextday rel_strength 的可回测面板口径。返回原始相对值而非 0-1:
+        # IC(Rank/皮尔逊相关)对线性/单调变换不变, clip 反而损失区分度。
+        # 前视安全: t 行只用 <=t 的收益(pandas rolling/pct_change 默认如此)。
+        nn = n
+        m = re.search(r"_(\d+)$", factor_key)
+        if m:
+            nn = int(m.group(1))
+        ret = close.pct_change(nn)
+        market_median = ret.median(axis=1)  # 当日横截面中位数, skipna
+        return ret.sub(market_median, axis=0)
     raise ValueError(f"未知 factor_key: {factor_key}")
 
 

@@ -404,7 +404,7 @@ BT_DISCLAIMER = ("历史回测/因子评价结果不预示未来表现，不构�
                  "不承诺收益，不输出买卖点。")
 
 BACKTEST_FACTORS = ["momentum_n", "volatility_n", "turnover_n", "activity", "momentum",
-                    "reversal_5", "reversal_20", "amihud_20"]
+                    "reversal_5", "reversal_20", "amihud_20", "rel_strength_20"]
 
 
 class BTFetchReq(BaseModel):

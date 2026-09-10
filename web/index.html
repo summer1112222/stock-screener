@@ -637,7 +637,7 @@ const _r=_restoreUI(); _applyRestoredUI(_r);
 loadFields().then(()=>{updateSortOptions();addCond();run();if(_r.tab&&_r.tab!=='screen') switchTab(_r.tab);});
 
 // ---------------- 回测研究 ----------------
-const BT_FACTORS=[['momentum_n','动量(n日)'],['volatility_n','波动(n日)'],['turnover_n','成交额均值(n日)'],['activity','活跃度'],['momentum','动量(带符号)'],['reversal_5','5日反转'],['reversal_20','20日反转'],['amihud_20','Amihud非流动性(20日)']];
+const BT_FACTORS=[['momentum_n','动量(n日)'],['volatility_n','波动(n日)'],['turnover_n','成交额均值(n日)'],['activity','活跃度'],['momentum','动量(带符号)'],['reversal_5','5日反转'],['reversal_20','20日反转'],['amihud_20','Amihud非流动性(20日)'],['rel_strength_20','相对强度(20日,市场横截面)']];
 const btFactorSel=document.getElementById('btFactor');
 btFactorSel.innerHTML=BT_FACTORS.map(([k,l])=>`<option value="${k}">${l}</option>`).join('');
 const codesArr=()=>document.getElementById('btCodes').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
