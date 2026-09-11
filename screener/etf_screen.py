@@ -124,21 +124,29 @@ def _to_f(v):
 
 
 def _nan(v):
-    """NaN/±inf → None(starlette JSONResponse allow_nan=False 会 500)。"""
+    """数值 NaN/±inf → None(starlette JSONResponse allow_nan=False 会 500)。
+    仅处理数值; 字符串/code/布尔与嵌套容器(dict/list)原样保留, 不被转 float。"""
     if v is None:
         return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
+    if isinstance(v, bool):
         return v
-    if math.isnan(f) or math.isinf(f):
-        return None
-    return f
+    if isinstance(v, (int, float)):
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    return v
 
 
 def _to_record(item: dict) -> dict:
-    """列表项统一 NaN→None 净化器。"""
-    return {k: _nan(v) for k, v in item.items()}
+    """列表项统一 NaN→None 净化器; 仅对顶层数值 NaN 做 None 化, 字符串与嵌套保留。"""
+    out = {}
+    for k, val in item.items():
+        if isinstance(val, dict):                       # 嵌套因子分位: 逐值净化保留 dict
+            out[k] = {kk: _nan(vv) for kk, vv in val.items()}
+        else:
+            out[k] = _nan(val)
+    return out
 
 
 def _probe_flags() -> dict:

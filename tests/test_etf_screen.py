@@ -59,6 +59,8 @@ def test_etf_screen_rank_mode_long_returns_quality_and_valuation(monkeypatch):
         lambda code: {"pe_pct": 0.2, "div_yield": 2.0})
     monkeypatch.setattr(es, "_fetch_quality_meta",
         lambda code: {"fund_scale": 8.0 if code == "159915" else 300.0, "fee_bps": 15, "tracking_err": 0.2})
+    # 编排测试必须完全隔离网络；QDII 溢价源显式 mock。
+    monkeypatch.setattr(es, "_fetch_qdii_premium", lambda code: None)
     monkeypatch.setattr(es._db, "query_rows",
         lambda table, *a, **k: [{"code": "510300", "latest_price": 4.9, "turnover_rate": 1.2},
                                  {"code": "159915", "latest_price": 1.65, "turnover_rate": 0.3}] if table == "etf_spot" else [])
@@ -70,6 +72,12 @@ def test_etf_screen_rank_mode_long_returns_quality_and_valuation(monkeypatch):
     if out["long_term"]:
         assert "quality_score" in out["long_term"][0]
         assert "valuation_percentile" in out["long_term"][0]
+        assert out["long_term"][0]["premium"] is None          # 全 mock 无网络, 溢价诚实 None
+        assert "source" in out["long_term"][0]                 # 来源标注保留
+        # code / source 字符串必须原样保留, 不被 _nan 转成 float
+        assert isinstance(out["long_term"][0]["code"], str)
+        assert out["long_term"][0]["code"] == "510300"
+        assert isinstance(out["long_term"][0]["source"], str)
 
 
 def test_etf_screen_rank_qdii_premium_visible(monkeypatch):
@@ -89,3 +97,5 @@ def test_etf_screen_rank_qdii_premium_visible(monkeypatch):
     out = es.etf_screen_rank(universe="QDII", mode="short", codes=["513100"], days=60)
     for item in out.get("short_term", [])[:1]:
         assert "premium" in item
+        assert item["code"] == "513100"
+        assert isinstance(item["code"], str)
