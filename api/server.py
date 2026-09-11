@@ -27,7 +27,7 @@ if _ROOT not in sys.path:
 from data import collector, db, history, portfolio, smart_money, watchlist
 from data import research as research_data
 from data import pytdx_client
-from screener import engine, smart_money as sm_query
+from screener import engine, smart_money as sm_query, etf_screen
 from screener.conditions import BOARD_FIELDS_CAT, ETF_FIELDS_CAT, STOCK_FIELDS_CAT, OPS
 from backtest import (eval as bt_eval, engine as bt_engine, risk as bt_risk,
                       robust as bt_robust, candidates as bt_cand,
@@ -977,6 +977,21 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
         pass
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
                        "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
+
+
+@app.get("/api/etf-screen")
+def etf_screen_route(universe: str = Query("ETF"), mode: str = Query("long"),
+                     limit: int = Query(50), days: int = Query(365),
+                     codes: str = Query("")):
+    """ETF/QDII 长短清单筛选路由。mode=long 填 long_term，mode=short 填 short_term。
+
+    机械排序观察清单，非荐股非买卖信号。
+    """
+    code_list = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
+    r = etf_screen.etf_screen_rank(
+        universe=universe, mode=mode, limit=limit, days=days, codes=code_list)
+    return _wrap(r, {"cand_disclaimer":
+        "ETF/QDII 长短清单机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
 
 @app.get("/api/nextday-strong")

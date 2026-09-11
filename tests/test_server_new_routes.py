@@ -240,3 +240,18 @@ def test_smart_money_board_link_route(monkeypatch):
     r = client.get("/api/smart-money/board-link?code=000001")
     assert r.status_code == 200
     assert r.json()["data"]["board"] == "银行"
+
+
+def test_etf_screen_route(monkeypatch):
+    from api import server
+    monkeypatch.setattr(server.etf_screen, "etf_screen_rank",
+        lambda **kw: {"universe": kw.get("universe", "ETF"), "mode": kw.get("mode", "long"),
+                      "long_term": [{"code": "510300", "quality_score": 80.0,
+                                     "valuation_percentile": 0.2}],
+                      "short_term": []})
+    client = TestClient(server.app)
+    r = client.get("/api/etf-screen?universe=ETF&mode=long&limit=10")
+    assert r.status_code == 200
+    b = r.json()
+    assert b.get("cand_disclaimer")
+    assert b.get("data", {}).get("long_term")
