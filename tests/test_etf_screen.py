@@ -99,3 +99,70 @@ def test_etf_screen_rank_qdii_premium_visible(monkeypatch):
         assert "premium" in item
         assert item["code"] == "513100"
         assert isinstance(item["code"], str)
+
+
+def test_long_missing_valuation_not_crash(monkeypatch):
+    # 估值分位源缺失(返 None) → 长清单不崩, 估值维度走中性 0.5, 清单仍成形
+    import pandas as pd, numpy as np
+    from backtest import eval as bt_eval
+    es._CACHE.clear()
+    monkeypatch.setattr(bt_eval, "load_panel", lambda u, c, s, e, f: pd.DataFrame({}, index=[]))
+    monkeypatch.setattr(es, "_fetch_index_valuation", lambda code: None)   # 缺估值源
+    monkeypatch.setattr(es, "_fetch_quality_meta", lambda code: None)      # 缺质量 meta → 规模门槛跳过
+    monkeypatch.setattr(es, "_fetch_qdii_premium", lambda code: None)
+    monkeypatch.setattr(es._db, "query_rows",
+        lambda table, *a, **k: [{"code": "510300", "latest_price": 4.9, "turnover_rate": 1.0}]
+        if table == "etf_spot" else [])
+    out = es.etf_screen_rank(mode="long", codes=["510300"], days=60)
+    assert out["long_term"], "缺估值源长清单仍应成形"
+    assert out["long_term"][0]["valuation_percentile"] == 0.5   # 中性 0.5
+    assert out["long_term"][0]["premium"] is None
+    assert isinstance(out["long_term"][0]["code"], str)
+
+
+def test_etf_screen_cache_ttl(monkeypatch):
+    # 30s 进程缓存: 同参二次命中不重算源; 清缓存后重算
+    import pandas as pd
+    from backtest import eval as bt_eval
+    es._CACHE.clear()
+    calls = {"n": 0}
+    def _val(code):
+        calls["n"] += 1
+        return {"pe_pct": 0.3}
+    monkeypatch.setattr(bt_eval, "load_panel", lambda u, c, s, e, f: pd.DataFrame({}, index=[]))
+    monkeypatch.setattr(es, "_fetch_index_valuation", _val)
+    monkeypatch.setattr(es, "_fetch_quality_meta", lambda code: None)
+    monkeypatch.setattr(es, "_fetch_qdii_premium", lambda code: None)
+    monkeypatch.setattr(es._db, "query_rows",
+        lambda table, *a, **k: [{"code": "510300"}] if table == "etf_spot" else [])
+    es.etf_screen_rank(mode="long", codes=["510300"], days=60)
+    first = calls["n"]
+    assert first > 0
+    es.etf_screen_rank(mode="long", codes=["510300"], days=60)   # 缓存命中, 不重算
+    assert calls["n"] == first, "缓存命中不应重复调用源"
+    es._CACHE.clear()
+    es.etf_screen_rank(mode="long", codes=["510300"], days=60)   # 清缓存后重算
+    assert calls["n"] > first
+
+
+def test_item_carries_name_field(monkeypatch):
+    # long/short item 带 name 字段; 本地无真实名称时诚实回退占位(不因缺失崩)
+    import pandas as pd, numpy as np
+    from backtest import eval as bt_eval
+    es._CACHE.clear()
+    idx = pd.date_range("2026-01-01", periods=30, freq="D")
+    up = pd.DataFrame({"510300": np.linspace(4, 5, 30)}, index=idx)
+    amt = pd.DataFrame(1e8, index=idx, columns=up.columns)
+    monkeypatch.setattr(bt_eval, "load_panel",
+        lambda u, c, s, e, f: up if f == "close" else amt)
+    monkeypatch.setattr(es, "_fetch_index_valuation", lambda code: None)
+    monkeypatch.setattr(es, "_fetch_quality_meta", lambda code: None)
+    monkeypatch.setattr(es, "_fetch_qdii_premium", lambda code: None)
+    # 占位名称(等于 code) → _display_name 无全市场源时诚实返回占位, 前端显"待刷新"
+    monkeypatch.setattr(es._db, "query_rows",
+        lambda table, *a, **k: [{"code": "510300", "name": "510300", "latest_price": 4.9}]
+        if table == "etf_spot" else [])
+    out = es.etf_screen_rank(mode="long", codes=["510300"], days=60)
+    assert "name" in out["long_term"][0]
+    out2 = es.etf_screen_rank(mode="short", codes=["510300"], days=60)
+    assert "name" in out2["short_term"][0]
