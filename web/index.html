@@ -117,6 +117,7 @@
     <button data-tab="smart" type="button">主力动向</button>
     <button data-tab="quality" type="button">优质筛选</button>
     <button data-tab="analysis" type="button">个股分析</button>
+    <button data-tab="etfscreen" type="button">ETF/QDII 筛选</button>
     <button class="pf-btn" style="margin-left:auto" id="pfOpen" type="button">持仓</button>
     <button class="pf-btn" id="wlOpen" type="button">自选</button>
   </nav>
@@ -346,6 +347,23 @@
     </div>
   </section>
 
+  <section class="tab-panel" data-tab="etfscreen">
+    <div class="card">
+      <div class="card-t">ETF/QDII 筛选 <span style="color:var(--warn);font-weight:400;margin-left:8px">长/短清单·机械排序观察清单·非推荐</span></div>
+      <div class="row" style="align-items:flex-end;flex-wrap:wrap;gap:8px">
+        <div class="f"><label>标的</label><select id="efsUniverse" class="btn ghost"><option value="ETF" selected>ETF</option><option value="QDII">QDII</option></select></div>
+        <div class="f"><label>清单</label><select id="efsMode" class="btn ghost" title="长期=质量+估值分位(QDII高溢价降权)；短期=量价横截面rank"><option value="long" selected>长期(质量×估值)</option><option value="short">短期(量价)</option></select></div>
+        <div class="f"><label>窗口(天)</label><select id="efsDays" class="btn ghost"><option>180</option><option selected>365</option><option>730</option></select></div>
+        <div class="f"><label>数量</label><select id="efsLimit" class="btn ghost"><option>20</option><option selected>50</option><option>100</option></select></div>
+        <button class="btn ghost" id="efsRun" type="button">筛选清单</button>
+        <span id="efsMsg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div class="skipped" id="efsNote" title="数据源缺字段时对应维度降级/置空，不伪造。QDII 高溢价(溢价率&gt;3%)在长期清单降权并标红旗、短期清单顶部醒目。"></div>
+      <div id="efsOut" style="margin-top:10px"></div>
+      <div class="disc"><b>ETF/QDII 筛选免责</b>：基于公开行情/估值数据的长短期<b>机械排序观察清单，非推荐、非买卖点、不构成投资建议</b>。QDII 溢价为市场实时供需结果，非套利机会承诺。市场有风险，盈亏自负。</div>
+    </div>
+  </section>
+
   <section class="tab-panel" data-tab="analysis">
     <div class="card">
       <div class="card-t">个股深度分析 <span style="color:var(--warn);font-weight:400;margin-left:8px">多维机械分析·研究优先级·非买卖信号</span></div>
@@ -475,6 +493,7 @@ function ensureTabLoaded(name){
     else{ smLoadChannels(); smLoad(); }
   }
   if(name==='quality'){ qsLoad(); }
+  if(name==='etfscreen'){ etfScreenLoad(); }
   if(name==='backtest'){ btRun(); }   // 首次进回测页自动跑默认ETF回测(默认codes有历史),免空白
 }
 function switchTab(name){
@@ -1614,6 +1633,57 @@ document.getElementById('qsDays').onchange=qsLoad;
 document.getElementById('qsThresh').onchange=qsLoad;
 document.getElementById('qsBoard').onchange=qsLoad;
 document.getElementById('qsCorr').onchange=qsLoad;
+
+// ---- ETF/QDII 筛选 tab ----
+const efsState = {raw:null};
+async function etfScreenLoad(){
+  const uni=document.getElementById('efsUniverse').value;
+  const mode=document.getElementById('efsMode').value;
+  const days=document.getElementById('efsDays').value;
+  const limit=document.getElementById('efsLimit').value;
+  const btn=document.getElementById('efsRun');
+  btn.disabled=true; const t0=Date.now();
+  document.getElementById('efsMsg').textContent='加载中(等值/估值/数据源按需拉取)...';
+  try{
+    const r=await fetch(`${API}/api/etf-screen?universe=${uni}&mode=${mode}&limit=${limit}&days=${days}`);
+    const j=await r.json();
+    const d=j.data||{};
+    const list=(d.long_term||[]).concat(d.short_term||[]);
+    const dt=((Date.now()-t0)/1000).toFixed(1);
+    document.getElementById('ut').textContent='更新于 '+(j.update_time||'');
+    document.getElementById('efsMsg').textContent=`${mode==='long'?'长期':'短期'}清单 ${(list||[]).length} 只 · 耗时${dt}s${dt<2?' (缓存命中)':''}`;
+    document.getElementById('efsNote').innerHTML=d.msg||(j.cand_disclaimer?'':''); // 数据源降级说明(如有)
+    efsState.raw=j;
+    etfScreenRender();
+  }catch(e){
+    document.getElementById('efsMsg').textContent='加载失败/超时: '+e;
+  }finally{ btn.disabled=false; }
+}
+function _efsPct(v){return v==null?'—':(v*100).toFixed(1)+'%';}
+function etfScreenRender(){
+  const mode=document.getElementById('efsMode').value;
+  const d=(efsState.raw?.data)||{};
+  const rows=mode==='long'?(d.long_term||[]):(d.short_term||[]);
+  if(!rows.length){ document.getElementById('efsOut').innerHTML='<div class="empty">无清单(无有效数据：长清单需 etf_spot + 估值源，短清单需历史日线；数据源缺字段对应维度降级置空)</div>'; return; }
+  const isLong=mode==='long';
+  const ths = `<tr><th class="num">代码</th><th class="num">名称</th><th class="num">综合分</th>${isLong?`<th class="num">质量分</th><th class="num">估值分位</th><th class="num">股息率</th><th class="num">最新价</th><th class="num">换手%</th><th class="num">规模(亿)</th>`:`<th class="num">量价分</th><th class="num">覆盖%</th>`}<th class="num">溢价率</th><th class="num">说明</th></tr>`;
+  const trs=rows.map(x=>{
+    const prem=x.premium;
+    const premTd=prem==null?'<td class="num">—</td>':(prem)*100<0?`<td class="num" style="color:#16A34A">${(prem*100).toFixed(2)}% 折价</td>`:`<td class="num" style="color:${prem>0.03?'#DC2626':'var(--muted)'}">${(prem*100).toFixed(2)}%${prem>0.03?' ⚠高溢价':''}</td>`;
+    const flag=isLong&&x.risk_flag==='high_premium'?'<span style="color:#DC2626;font-size:10px;border:1px solid #DC2626;border-radius:4px;padding:0 3px">高溢价降权</span>':'';
+    const nm = (x.name && String(x.name).trim() && String(x.name)!==x.code) ? x.name : '待刷新';
+    const nameTd=`<td>${nm}</td>`;
+    return `<tr><td>${x.code||''}</td>${nameTd}<td class="num">${x.score!=null?(+x.score).toFixed(2):'—'}</td>${isLong?`<td class="num">${x.quality_score!=null?(+x.quality_score).toFixed(2):'—'}</td><td class="num">${_efsPct(x.valuation_percentile)}</td><td class="num">${x.div_yield??'—'}</td><td class="num">${x.latest_price??'—'}</td><td class="num">${x.turnover_rate!=null?(+x.turnover_rate).toFixed(2):'—'}</td><td class="num">${x.fund_scale!=null?(+x.fund_scale).toFixed(1):'—'}</td>`:`<td class="num">${x.factor_scores?Object.values(x.factor_scores).map(v=>v!=null?(+v).toFixed(2):'—').join('/'):'—'}</td><td class="num">${x.coverage!=null?(+(x.coverage*100)).toFixed(0):'—'}</td>`}${premTd}<td style="font-size:11px;color:var(--muted)">${x.source||''} ${flag}</td></tr>`;
+  }).join('');
+  const efsTitle = isLong ? '长期清单' : '短期清单';
+  const efsNote2 = isLong ? ' · 长清单=质量×估值分位(QDII高溢价降权)' : ' · 短清单=量价横截面rank(动量/量价相关/波动率)';
+  document.getElementById('efsOut').innerHTML =
+    '<div style="font-size:12px;margin:4px 0"><b>' + efsTitle + ' (' + rows.length + ')</b>' + efsNote2 + '</div>' +
+    '<table><thead>' + ths + '</thead><tbody>' + trs + '</tbody></table>';
+}
+document.getElementById('efsRun').onclick=etfScreenLoad;
+document.getElementById('efsMode').onchange=etfScreenLoad;
+document.getElementById('efsUniverse').onchange=etfScreenLoad;
 document.getElementById('qsCombo').onchange=qsLoad;
 document.getElementById('qsResMode').onchange=qsLoad;
 // quality tab 改为懒加载(ensureTabLoaded 触发)，不在页面加载时 fetch

@@ -221,6 +221,28 @@ def _fetch_qdii_premium(code) -> float | None:
         return None
 
 
+def _display_name(code, spot=None):
+    """返回 ETF 展示名称；本地占位代码时尝试复用全市场快照名称。"""
+    key = str(code)
+    local = (spot or {}).get("name")
+    if local is not None and str(local).strip() and str(local).strip() != key:
+        return local
+    try:
+        df = _etf_spot_em_df()
+        if df is not None and not df.empty:
+            code_col = next((c for c in ("代码", "code") if c in df.columns), None)
+            name_col = next((c for c in ("名称", "基金简称", "name") if c in df.columns), None)
+            if code_col and name_col:
+                match = df[df[code_col].astype(str).str.zfill(6) == key.zfill(6)]
+                if not match.empty:
+                    name = match.iloc[0].get(name_col)
+                    if name is not None and str(name).strip() and str(name).strip() != key:
+                        return name
+    except Exception:
+        pass
+    return local
+
+
 def _fetch_quality_meta(code) -> dict | None:
     """{'fund_scale': 亿, 'fee_bps': int|None, 'tracking_err': float|None}。
     质量 meta 经 fund_etf_spot_em 的 总市值 代理规模；fee_bps/tracking_err 无可靠源 → None
@@ -268,10 +290,16 @@ def _rank_short(universe, codes, start, end, limit):
     if not use_codes:
         return []
     scores, details, coverage = short_scores(close, amount, use_codes, [5, 20])
+    try:
+        spot_rows = _db.query_rows("etf_spot", limit=0) or []
+        name_by = {str(r.get("code")): r.get("name") for r in spot_rows if r.get("code") is not None}
+    except Exception:
+        name_by = {}
     items = []
     for c in use_codes:
         item = _to_record({
             "code": c,
+            "name": _display_name(c, {"name": name_by.get(c)}),
             "score": scores.get(c),
             "factor_scores": details.get(c),
             "coverage": coverage.get(c),
@@ -312,6 +340,7 @@ def _rank_long(universe, codes, start, end, limit):
         score = long_score(valuation_pct=vp, quality=quality)
         item = _to_record({
             "code": c,
+            "name": _display_name(c, spot),
             "score": round(score, 2),
             "quality_score": round(quality, 4),
             "valuation_percentile": vp,                          # 源给则直接映射 pe_pct
