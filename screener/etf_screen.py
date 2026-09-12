@@ -267,10 +267,88 @@ def _fetch_quality_meta(code) -> dict | None:
         return None
 
 
+# csindex 指数估值分位接线：ETF → 跟踪指数 csindex code。
+# 层1 手动精确映射(主流宽基/行业/QDII)，层2 名称关键词兜底，层3 无 → None(诚实)。
+_INDEX_MAP = {
+    "510300": "000300", "159919": "000300", "510310": "000300", "510330": "000300",  # 沪深300
+    "510050": "000016",                                                              # 上证50
+    "510500": "000905", "159922": "000905",                                          # 中证500
+    "512100": "000852",                                                              # 中证1000
+    "510880": "000015",                                                              # 红利
+    "159915": "399006",                                                              # 创业板指
+    "588000": "000688",                                                              # 科创50
+}
+_INDEX_KEYWORDS = {
+    "沪深300": "000300", "上证50": "000016", "中证500": "000905", "中证1000": "000852",
+    "中证A500": "000510", "红利": "000015", "创业板": "399006", "科创50": "000688",
+    "科创100": "000698", "恒生": "HSI", "纳斯达克": "NDX", "标普": "SPX",
+    "日经": "N225", "德国": "GDAXI",
+}
+# 按指数 code 去重缓存(同一指数多只 ETF 只拉一次)；300s TTL。
+_INDEX_VAL_CACHE: dict = {"ts": 0.0, "data": {}}
+
+
+def _index_code(code: str, name=None) -> str | None:
+    """ETF code/名称 → 跟踪指数 csindex code；无映射/兜底 → None(诚实)。"""
+    key = str(code)
+    if key in _INDEX_MAP:
+        return _INDEX_MAP[key]
+    if name:
+        for kw, idx in _INDEX_KEYWORDS.items():
+            if kw in str(name):
+                return idx
+    return None
+
+
+def _pe_col(df) -> str | None:
+    """csindex 宽表 PE 列名候选。"""
+    for c in ("市盈率", "PE", "市盈率(倍)", "市盈率TTM"):
+        if c in df.columns:
+            return c
+    return None
+
+
 def _fetch_index_valuation(code) -> dict | None:
     """{'pe_pct': 0..1, 'div_yield': float|None}；指数历史估值分位, 低=便宜。
-    本任务 csindex 映射未接线 → 诚实返 None(该维度走中性 0.5)；单测注入。"""
-    return None
+    经 fund_etf_spot_em 名称 → _index_code 映射 csindex symbol, 按指数去重缓存。
+    映射失败/源失败/无 PE 列 → None(该维度中性 0.5)。单测注入 mock。
+    csindex 历史最新在首行(新→旧)：cur 取 pe_hist[0] 为当前估值。"""
+    if not _AK_OK:
+        return None
+    try:
+        snap = _etf_spot_em_df()
+        name = None
+        if snap is not None and not snap.empty:
+            cc = next((c for c in ("代码", "code") if c in snap.columns), None)
+            nc = next((c for c in ("名称", "基金简称", "name") if c in snap.columns), None)
+            if cc and nc:
+                m = snap[snap[cc].astype(str).str.zfill(6) == str(code).zfill(6)]
+                if not m.empty:
+                    name = m.iloc[0].get(nc)
+        idx = _index_code(code, name)
+        if not idx:
+            return None
+        now = time.time()
+        if _INDEX_VAL_CACHE["ts"] and now - _INDEX_VAL_CACHE["ts"] < 300:
+            if idx in _INDEX_VAL_CACHE["data"]:
+                return _INDEX_VAL_CACHE["data"][idx]
+        else:
+            _INDEX_VAL_CACHE["ts"] = now
+            _INDEX_VAL_CACHE["data"] = {}
+        df = _ak_mod.stock_zh_index_value_csindex(symbol=idx)
+        pe_col = _pe_col(df) if df is not None else None
+        if df is None or pe_col is None or df.empty:
+            return None
+        pe_hist = [h for h in df[pe_col].tolist() if h is not None]
+        if not pe_hist:
+            return None
+        cur = _to_f(pe_hist[0]) if pe_hist else None
+        vp = valuation_percentile(cur, pe_hist) if cur is not None else 0.5
+        out = {"pe_pct": _nan(vp), "div_yield": None}
+        _INDEX_VAL_CACHE["data"][idx] = out
+        return out
+    except Exception:
+        return None
 
 
 def _load_history_panel(universe, codes, start, end, field):

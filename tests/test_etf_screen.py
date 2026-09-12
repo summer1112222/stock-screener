@@ -166,3 +166,43 @@ def test_item_carries_name_field(monkeypatch):
     assert "name" in out["long_term"][0]
     out2 = es.etf_screen_rank(mode="short", codes=["510300"], days=60)
     assert "name" in out2["short_term"][0]
+
+
+def test_index_code_map_and_fuzzy():
+    # 手动映射命中
+    assert es._index_code("510300", "华泰柏瑞沪深300ETF") == "000300"
+    # 名称模糊兜底命中(未在映射表)
+    assert es._index_code("99xxxx", "易方达中证500ETF") == "000905"
+    # 无映射无兜底 → None
+    assert es._index_code("999999", "某LOF基金") is None
+
+
+def test_fetch_index_valuation_from_csindex(monkeypatch):
+    import pandas as pd
+    import types
+    es._INDEX_VAL_CACHE = {"ts": 0.0, "data": {}}
+    # 名称查全市场快照
+    snap = pd.DataFrame({"代码": ["510300"], "名称": ["华泰柏瑞沪深300ETF"]})
+    monkeypatch.setattr(es, "_etf_spot_em_df", lambda: snap)
+    # csindex 历史分位(降序: 新→旧; 含 PE 列)
+    hist = pd.DataFrame({
+        "日期": ["2026-09-10", "2026-09-09", "2026-09-08"],
+        "市盈率": [13.0, 12.0, 11.0],
+    })
+    # 宿主未装 akshare → _AK_OK=False/_ak_mod=None；补两处：关闭守卫 + stub 挂方法
+    monkeypatch.setattr(es, "_AK_OK", True)
+    fake_ak = types.SimpleNamespace()
+    monkeypatch.setattr(es, "_ak_mod", fake_ak)
+    fake_ak.stock_zh_index_value_csindex = lambda symbol: hist if symbol == "000300" else pd.DataFrame()
+    v = es._fetch_index_valuation("510300")
+    assert v is not None and "pe_pct" in v
+    # 当前 PE=13 是历史最高 → 分位近 1(close-interval: 3/3=1.0)
+    assert abs(v["pe_pct"] - 1.0) < 1e-9
+
+
+def test_fetch_index_valuation_no_map_returns_none(monkeypatch):
+    import pandas as pd
+    es._INDEX_VAL_CACHE = {"ts": 0.0, "data": {}}
+    monkeypatch.setattr(es, "_etf_spot_em_df",
+                        lambda: pd.DataFrame({"代码": ["999999"], "名称": ["某LOF"]}))
+    assert es._fetch_index_valuation("999999") is None
