@@ -1495,12 +1495,13 @@ document.getElementById('smTdxCode').onkeydown=e=>{if(e.key==='Enter')smTdxProbe
 
 // ---------------- 优质筛选(多口径共振·观察清单·非推荐) ----------------
 const qsState={raw:[],phaseMap:{},sortKey:'resonance',sortDir:'desc',dimSortKey:'resonance',dimSortDir:'desc'};
-// 首次超时自动重试一次:容器刚重启 warmup 后台预热(~55s)期间与首次请求争抢可能>75s,
-// 重试时 warmup 多半已完→缓存命中秒回。二次仍败才报错。
+// 首次超时自动重试一次:容器刚重启 warmup 后台预热(~55s)期间与首次请求争抢可能超时,
+// 实测 limit=100 时 /api/quality 后端约需 ~73s(5口径+组合+盘口refine),故首轮给 120s、
+// 重试给 150s 以覆盖大 limit/冷缓存/并发场景;二次仍败才报错。命中 5min 结果缓存则秒回。
 async function _qsFetch(url){
   for(let attempt=1;attempt<=2;attempt++){
     const ctl=new AbortController();
-    const ms=attempt===1?75000:90000;
+    const ms=attempt===1?120000:150000;
     const to=setTimeout(()=>ctl.abort(),ms);
     try{
       const res=await fetch(url,{signal:ctl.signal});
@@ -1556,7 +1557,7 @@ async function qsLoad(){
   const board=document.getElementById('qsBoard').value;
   const corr=document.getElementById('qsCorr').value;
   const btn=document.getElementById('qsRun');
-  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett财报+历史+信号较慢，首次约几十秒；超时自动重试一次，5分钟内重复缓存秒回)...';
+  btn.disabled=true; const t0=Date.now(); document.getElementById('qsMsg').textContent='加载中(buffett财报+历史+信号较慢，首次约1-2分钟，大名单可能更久；超时自动重试一次，期限内重复缓存秒回)...';
   try{
     const r=await _qsFetch(`${API}/api/quality?universe=${uni}&days=${days}&min_dims=${min_dims}&limit=${limit}&combo_method=${combo}&resonance_mode=${rmode}&dim_thresh=${thresh}&max_per_board=${board}&max_corr=${corr}`);
     const d=r.data||{};
