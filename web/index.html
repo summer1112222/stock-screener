@@ -1436,7 +1436,10 @@ async function smRadarLoad(){
     const ths=['代码','名称','共振','资金流·日净','累计净额','连续','边际加速','强度','解禁'].map(h=>`<th class="num">${h}</th>`).join('');
     const trs=shown.map(x=>{
       const n=x.channel_hits||0;
-      const buz=`<span style="color:${n>=3?'#16A34A':n>=2?'#F59E0B':'var(--muted)'}">${'◆'.repeat(Math.max(n,1))}</span><small> ${n}</small>`;
+      const rs=x.resonance!=null?(+x.resonance).toFixed(2):'—';
+      const lowLiq=x.low_liq?'<span style="font-size:11px;color:var(--muted)" title="日成交额过低，净强度失真，不参与共振排序">低流动性</span>':'' ;
+      const buz=`<span style="color:${x.resonance!=null?(n>=3?'#16A34A':n>=2?'#F59E0B':'var(--muted)'):'var(--muted)'}">${rs}</span>`+
+                `<span title="正向金额通道命中数${n}">${x.resonance!=null?('<small> ◆'+n+'</small>'):'◆'+Math.max(n,1)}</span> ${lowLiq}`;
       const flow=x.daily_net;
       const cum=x.cum_net;
       const streak=x.streak_inflow>0?'🟢入'+x.streak_inflow:x.streak_outflow>0?'🟡出'+x.streak_outflow:'—';
@@ -1444,7 +1447,7 @@ async function smRadarLoad(){
       const tip=Object.entries(x.channels||{}).map(([k,v]) => k+'='+(v.net==null?(v.positive?'增持':''):fmtNum(v.net))).join(' | ')||'无通道明细';
       return `<tr class="clk" data-code="${x.code||''}" title="${esc(tip)}"><td>${x.code||''}</td><td>${esc(x.name||'')}</td><td>${buz}</td><td class="num" style="color:${(flow||0)>=0?'#16A34A':'#F59E0B'}">${fmtNum(flow)}</td><td class="num" style="color:${(cum||0)>=0?'#16A34A':'#F59E0B'}">${fmtNum(cum)}</td><td>${streak}</td><td class="num">${x.margin_accel==null?'—':fmtNum(x.margin_accel)}</td><td class="num">${pct(x.net_intensity)}</td><td>${unlock}</td></tr>`;
     }).join('');
-    out.innerHTML=`<div class="skipped">按共振通道数→净强度→累计净额降序 · 前 ${shown.length} (共 ${rows.length}) · 数据日期 ${r.date} · 悬停行看各通道净额</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+    out.innerHTML=`<div class="skipped">按强度加权共振分(各金额通道净强度横截分位和+高管增持加分)降序 · 前 ${shown.length} (共 ${rows.length}) · 数据日期 ${r.date} · 悬停行看各通道净额</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
   }catch(e){ out.innerHTML='<div class="empty">加载失败: '+e+'</div>'; }
   finally{ document.getElementById('smLoading').textContent=''; }
 }

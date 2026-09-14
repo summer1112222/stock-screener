@@ -170,8 +170,48 @@ def _radar_stats(values: list[float]) -> tuple[float, int, int, float | None]:
     return float(sum(values)), si, so, accel
 
 
-def radar(days: int = 5, market: str | None = None, limit: int = 50) -> dict:
-    """多通道主力共振雷达，只读 smart_money_action，不触网。"""
+# 进程缓存30s(依赖日级数据, 避免每次全表扫 stock_spot 5200 行的重复开销)。
+_RADAR_CACHE: dict = {}
+_RADAR_TTL = 30.0
+_DEFAULT_MIN_TURNOVER = 5e7
+
+
+def _rank_pct_map(values: list[float]) -> dict[float, float]:
+    """横截 rank-pct(0-1)，并列取平均秩；n<=1 → 0.5(无对比信息取中位)。"""
+    if not values:
+        return {}
+    if len(values) <= 1:
+        return {values[0]: 0.5}
+    order = sorted(values)
+    n = len(order)
+    ranks: dict[float, float] = {}
+    i = 0
+    while i < n:
+        j = i
+        while j < n and order[j] == order[i]:
+            j += 1
+        avg_rank = (i + j - 1) / 2.0  # 0-based 平均秩
+        pct = avg_rank / (n - 1)
+        for v in order[i:j]:
+            ranks[v] = pct
+        i = j
+    return ranks
+
+
+def radar(days: int = 5, market: str | None = None, limit: int = 50,
+          min_turnover: float = _DEFAULT_MIN_TURNOVER) -> dict:
+    """多通道主力共振雷达，只读 smart_money_action，不触网。
+
+    共振分 = 各金额通道(资金流/龙虎榜/北向)累计净强度(net/turnover)的横截 rank-pct 求和
+    + 高管增持(股数通道, 不进金额)正向加分 0.5。成交额 < min_turnover 的 code 净强度
+    失真(cum_net/极小成交额)→ resonance=None 排末尾并标 low_liq, 不参与共振排序。
+    排序 resonance DESC → net_intensity DESC → cum_net DESC。进程缓存30s。
+    """
+    key = (days, market, limit, min_turnover)
+    now = _time_mod.time()
+    hit = _RADAR_CACHE.get(key)
+    if hit and now - hit[0] < _RADAR_TTL:
+        return hit[1]
     today = datetime.now().strftime("%Y-%m-%d")
     latest = db.query_rows("smart_money_action", where="date <= ?",
                            params=(today,), order_by="date DESC", limit=1)
@@ -218,6 +258,32 @@ def radar(days: int = 5, market: str | None = None, limit: int = 50) -> dict:
             if not item["unlock_as_of"] or str(as_of) < str(item["unlock_as_of"]):
                 item["unlock_as_of"] = str(as_of)
                 item["unlock_amount"] = _nan(row.get("amount"))
+    # 第一遍：每通道累计净额 + 成交额
+    for code, item in grouped.items():
+        turnover = _nan(spots.get(code, {}).get("turnover_amount")) or 0.0
+        item["_turnover"] = turnover
+        for channel, ch in item["channels"].items():
+            if channel in _AMOUNT_CHANNELS:
+                vals = [ch["daily"][d] for d in sorted(ch["daily"])]
+                net = float(sum(vals))
+                ch["net"] = _nan(net)
+                ch["_intensity"] = _nan(net / turnover) if turnover and turnover > 0 else None
+    # 每金额通道横截 rank-pct(跳过 low_liq code, 防失真强度污染分位)
+    low_liq_codes = {c for c, it in grouped.items() if it["_turnover"] < min_turnover}
+    ch_intensities: dict[str, dict] = {}
+    for code, item in grouped.items():
+        if code in low_liq_codes:
+            continue
+        for channel, ch in item["channels"].items():
+            if channel in _AMOUNT_CHANNELS and ch.get("_intensity") is not None:
+                ch_intensities.setdefault(channel, {})[code] = ch["_intensity"]
+    channel_pct: dict[str, dict] = {}
+    for channel, m in ch_intensities.items():
+        rmap = _rank_pct_map(list(m.values()))
+        channel_pct[channel] = {code: rmap[val] for code, val in m.items()}
+    # 共振分求和(缺失通道记 0 → 覆盖通道越多自然加分)
+    for code, item in grouped.items():
+        item["_resonance_raw"] = sum(channel_pct[c].get(code, 0.0) for c in channel_pct)
     out = []
     for code, item in grouped.items():
         hits = 0
@@ -225,11 +291,12 @@ def radar(days: int = 5, market: str | None = None, limit: int = 50) -> dict:
         daily_net = 0.0
         streak_in, streak_out, accel = 0, 0, None
         data_dates = []
+        mgmt_pos = item["channels"].get("高管增减持", {}).get("positive")
         for channel, ch in item["channels"].items():
             if channel in _AMOUNT_CHANNELS:
                 vals = [ch["daily"][d] for d in sorted(ch["daily"])]
                 net, si, so, ac = _radar_stats(vals)
-                ch.update(net=_nan(net), daily_net=_nan(vals[-1] if vals else None),
+                ch.update(daily_net=_nan(vals[-1] if vals else None),
                           cum_net=_nan(net), streak_inflow=si, streak_outflow=so,
                           margin_accel=_nan(ac), daily=[{"date": d, "amount": _nan(ch["daily"][d])}
                                                        for d in sorted(ch["daily"])],
@@ -241,20 +308,28 @@ def radar(days: int = 5, market: str | None = None, limit: int = 50) -> dict:
                     daily_net, streak_in, streak_out, accel = (vals[-1] if vals else 0.0), si, so, ac
             if ch.get("latest_date"):
                 data_dates.append(ch["latest_date"])
-        if item["channels"].get("高管增减持", {}).get("positive"):
+        if mgmt_pos:
             hits += 1
-        spot = spots.get(code, {})
-        turnover = _nan(spot.get("turnover_amount"))
+        turnover = item["_turnover"]
         intensity = round(cum_net / turnover, 4) if turnover and turnover != 0 else None
+        low_liq = code in low_liq_codes
+        resonance = None
+        if not low_liq:
+            resonance = round(item["_resonance_raw"] + (0.5 if mgmt_pos else 0.0), 4)
         item.update(channel_hits=hits, daily_net=_nan(daily_net), cum_net=_nan(cum_net),
                     streak_inflow=streak_in, streak_outflow=streak_out,
                     margin_accel=_nan(accel), net_intensity=intensity,
+                    resonance=resonance, low_liq=low_liq,
                     data_asof=max(data_dates) if data_dates else None)
         out.append(item)
-    out.sort(key=lambda x: (x.get("channel_hits", 0), x.get("net_intensity") if x.get("net_intensity") is not None else -1e18,
+    out.sort(key=lambda x: (x.get("resonance") is not None,
+                            x.get("resonance") if x.get("resonance") is not None else -1e18,
+                            x.get("net_intensity") if x.get("net_intensity") is not None else -1e18,
                             x.get("cum_net") or 0), reverse=True)
-    return {"rows": out[:max(int(limit), 0)] if limit else out, "total": min(len(out), limit) if limit else len(out),
-            "date": end, "days": days, "market": market}
+    result = {"rows": out[:max(int(limit), 0)] if limit else out, "total": min(len(out), limit) if limit else len(out),
+              "date": end, "days": days, "market": market}
+    _RADAR_CACHE[key] = (now, result)
+    return result
 
 
 def summarize_by_code(rows: list[dict]) -> dict:

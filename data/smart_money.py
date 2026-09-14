@@ -759,8 +759,11 @@ def collect_holders(date: str) -> tuple[list[dict], bool, str]:
             chg = _to_float(r.get(col_chg))
             if chg is None:
                 chg = 0.0
+            # action 由 chg 符号派生方向(正→增持/负→减持/0→持仓)，让 by_actor('国家队')
+            # 与雷达十大股东通道能看出增减持方向；amount=持股变动股数 保真。
+            action = "增持" if chg > 0 else "减持" if chg < 0 else "持仓"
             recs.append(_rec(date, code, sp.get("name"), "股票", "十大股东",
-                            holder, "持仓", chg, as_of=as_of,
+                            holder, action, chg, as_of=as_of,
                             raw={k: _clean(v) for k, v in r.items()}))
     # 区分真空 vs 全失败：tried>0 但 recs 空=全失败标不可用；tried=0=无候选
     if not recs:

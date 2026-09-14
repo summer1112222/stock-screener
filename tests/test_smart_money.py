@@ -428,6 +428,32 @@ def test_holders_seed_learning(monkeypatch, tmp_path):
     assert "600519" in saved["nt_holdings_seed"]
 
 
+def test_holders_action_derived_from_chg_sign(monkeypatch, tmp_path):
+    """十大股东 action 由东财'增减'列符号派生：正→增持/负→减持/0→持仓，
+    amount=持股变动股数 保真。让 by_actor('国家队') 能看出增减持方向。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    db.upsert_rows("stock_spot", [
+        {"code": "600519", "name": "贵州茅台", "turnover_amount": 1e9}])
+    monkeypatch.setattr(sm, "_AK_OK", True)
+    monkeypatch.setattr(sm, "NATIONAL_TEAM_HOLDINGS_SEED", {})
+    monkeypatch.setattr(sm, "_load_seed", lambda: set())
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    def _gdfx(symbol, date):
+        return pd.DataFrame({"股东名称": ["中央汇金", "证金资管", "社保一零二"],
+                             "增减": ["1000000", "-250000", "0"]})
+    _patch_ak(monkeypatch, stock_gdfx_free_top_10_em=_gdfx)
+    recs, ok, err = sm.collect_holders("2026-07-25")
+    assert ok, err
+    by_actor = {r["actor"]: r for r in recs}
+    assert by_actor["中央汇金"]["action"] == "增持"
+    assert by_actor["中央汇金"]["amount"] == 1_000_000
+    assert by_actor["证金资管"]["action"] == "减持"
+    assert by_actor["证金资管"]["amount"] == -250_000
+    assert by_actor["社保一零二"]["action"] == "持仓"
+    assert by_actor["社保一零二"]["amount"] == 0
+
+
 def test_today_list_defaults_to_latest_window(sm_db):
     """date 省略时默认取最新日期往前7日窗口(平衡数据量与速度)。SM_ROWS 最新 2026-07-14。"""
     res = smq.today_list()

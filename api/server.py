@@ -823,9 +823,10 @@ def sm_today(date: str | None = Query(None),
 @app.get("/api/smart-money/radar")
 def sm_radar(days: int = Query(5, ge=1, le=90),
              market: str | None = Query(None),
-             limit: int = Query(50, ge=1, le=500)):
+             limit: int = Query(50, ge=1, le=500),
+             min_turnover: float = Query(5e7, ge=0)):
     from screener.smart_money import radar
-    res = radar(days=days, market=market, limit=limit)
+    res = radar(days=days, market=market, limit=limit, min_turnover=min_turnover)
     return _wrap(res.get("rows", []), {
         "total": res.get("total", 0), "date": res.get("date"),
         "days": days, "market": market,
