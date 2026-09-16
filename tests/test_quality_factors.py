@@ -375,3 +375,76 @@ def test_dim3_low_liq_excluded(monkeypatch):
     ff = q._flow_factor_series(["000001"], days=20)
     import pandas as pd
     assert pd.isna(ff["radar_in_count"]["000001"])
+
+
+# ---------- Task 4: out_count>=2 主力多通道净流出 risk_flag + penalty ----------
+
+def test_outflow_risk_flag_penalty_map():
+    """_PENALTY_MAP 含 "主力多通道净流出" 1.0；_risk_penalty 识别该 flag。"""
+    gate = {"hard_pass": True, "risk_flags": ["主力多通道净流出"], "warnings": []}
+    p = quality._risk_penalty({}, gate, {})
+    assert p >= 1.0, f"主力多通道净流出 penalty 应>=1.0, got {p}"
+
+
+def test_outflow_below_threshold_no_flag():
+    """out_count=1 → 不触发 risk_flag（条件 out_count>=2）。"""
+    rad = {"000001": {"in_count": 0, "out_count": 1, "has_data": True,
+                      "low_liq": False, "mgmt_confirm": False, "asof": "d"}}
+    gate = {"hard_pass": True, "risk_flags": [], "warnings": []}
+    r = rad["000001"]
+    if r.get("has_data") and not r.get("low_liq") and (r.get("out_count") or 0) >= 2:
+        gate["risk_flags"].append("主力多通道净流出")
+    assert gate["risk_flags"] == []
+
+
+def test_outflow_integration_via_quality_rank(monkeypatch):
+    """quality_rank enriched 循环：radar out_count>=2 → item risk_flags 含
+    "主力多通道净流出"，hard_gate_pass 仍 True，adjusted_resonance 被惩罚 < raw。"""
+    quality._RESULT_CACHE.clear()
+    rows = [
+        {"code": "000001", "name": "平A", "latest_price": 10.0, "turnover_amount": 1e8,
+         "change_pct": 2.0, "main_net_inflow": 1e7, "turnover_rate": 3.0,
+         "pe": 15.0, "pb": 1.5, "amplitude": 3.0, "board": "银行"},
+        {"code": "600519", "name": "贵C", "latest_price": 1500.0, "turnover_amount": 2e8,
+         "change_pct": 1.0, "main_net_inflow": 3e7, "turnover_rate": 2.0,
+         "pe": 30.0, "pb": 8.0, "amplitude": 2.0, "board": "白酒"},
+    ]
+    qr = {"stock_spot": rows, "industry_board": []}
+    # 000001 out_count=2 触发风险标记；600519 out_count=0 不触发
+    radar_map = {
+        "000001": {"in_count": 1, "out_count": 2, "has_data": True,
+                   "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+        "600519": {"in_count": 1, "out_count": 0, "has_data": True,
+                   "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+    }
+    with patch("data.db.query_rows", side_effect=lambda t, **k: qr.get(t, [])), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", True), \
+         patch("backtest.buffett.akshare_blocked", return_value=False), \
+         patch("backtest.buffett.shortlist_by_turnover",
+               return_value=["000001", "600519"]), \
+         patch("backtest.buffett.analyze_many", return_value=[]), \
+         patch("screener.smart_money.radar_resonance_for", return_value=radar_map), \
+         patch("data.pytdx_client.get_quote", return_value=[]), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("screener.smart_money.main_force_phase",
+               return_value={"phase": "观望", "confidence": 0.0}), \
+         patch("backtest.quality._is_in_session", return_value=False):
+        res = quality.quality_rank(universe="stock", refine=False, min_turnover=0,
+                                   dim_thresh=0.0, min_dims=1)
+    main = {m["code"]: m for m in res["main"]}
+    it = main.get("000001")
+    assert it is not None, "000001 应进 main"
+    assert "主力多通道净流出" in it["risk_flags"], \
+        f"out_count=2 应触发风险标记, got {it['risk_flags']}"
+    assert it["hard_gate_pass"] is True, "风险标记不硬拒, hard_gate_pass 应 True"
+    # 600519 不触发
+    it2 = main.get("600519", {})
+    assert "主力多通道净流出" not in it2.get("risk_flags", []), \
+        "out_count=0 不应触发风险标记"
+    # penalty 应使 adjusted_resonance < raw_resonance（raw>0 时）
+    raw = it.get("raw_resonance") or 0.0
+    adj = it.get("adjusted_resonance") or 0.0
+    if raw > 0:
+        assert adj < raw, f"penalty 应扣减 adjusted({adj}) < raw({raw})"

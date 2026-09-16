@@ -168,7 +168,8 @@ def _quality_gate(item, confidence, fundamental=None, behavior_days=0) -> dict:
     return {"hard_pass": bool(hard_pass), "risk_flags": risk_flags, "warnings": warnings}
 
 
-_PENALTY_MAP = [("杠杆", 1.5), ("FCF", 1.5), ("波动", 2.0), ("脉冲", 1.0)]
+_PENALTY_MAP = [("杠杆", 1.5), ("FCF", 1.5), ("波动", 2.0), ("脉冲", 1.0),
+                ("主力多通道净流出", 1.0)]
 
 
 def _risk_penalty(item, gate, dim_scores) -> float:
@@ -1101,6 +1102,12 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     eff_min_dims = min(min_dims, len(dims_avail)) if dims_avail else 0
     enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4, 5)}
     conf_summary = {"high": 0, "medium": 0, "low": 0, "low_excluded": 0}
+    # radar 多通道净流出 risk_flag（spec 2026-09-16）：out_count>=2 → risk_flag
+    try:
+        from screener import smart_money as _sm_rf
+        _rad_out = _sm_rf.radar_resonance_for(codes, days=days)
+    except Exception:
+        _rad_out = {}
     for c in codes:
         ds = scores.get(c, {})
         res, hits = _resonance(ds, dim_thresh, weights, resonance_mode)
@@ -1121,6 +1128,12 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         # 财务红旗已在 _dim_scores 口径2 的 _bad 预筛剔除，此处传 fundamental=None 不重复判定
         gate = _quality_gate({"code": c}, conf, fundamental=None,
                              behavior_days=behavior_days)
+        # radar 多通道净流出 risk_flag（spec 2026-09-16）：out_count>=2 → risk_flag
+        # 风险标记非硬拒：走 _risk_penalty 路径，不影响 hard_gate_pass
+        _r_out = _rad_out.get(c) or {}
+        if _r_out and _r_out.get("has_data") and not _r_out.get("low_liq") \
+                and (_r_out.get("out_count") or 0) >= 2:
+            gate["risk_flags"].append("主力多通道净流出")
         res_raw = _to_float(res)
         raw = res_raw or 0.0
         adj = raw * _confidence_multiplier(conf["level"])
