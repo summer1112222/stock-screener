@@ -896,3 +896,17 @@ def test_nextday_radar_outflow_risk_flag(monkeypatch):
     res = nd.nextday_strong_rank("stock", codes=["600519"], selection_mode="score")
     it = res["items"][0]
     assert it["risk_flag"] == "多通道主力净流出"
+
+
+def test_nextday_radar_low_liq_no_boost(monkeypatch):
+    """low_liq=True → 不 boost（视同 in_count=0），data_source='low_liq'。"""
+    _radar_setup(monkeypatch)
+    monkeypatch.setattr(nd, "radar_resonance_for",
+                        _mock_radar({"600519": 3}, low_liq_map={"600519": True}))
+    res = nd.nextday_strong_rank("stock", codes=["600519"], selection_mode="score")
+    it = res["items"][0]
+    assert it["radar_boost"] == 1.0
+    assert it["score"] == it["base_score"]
+    assert it["radar_data_source"] == "low_liq"
+    # low_liq 视同无数据：in/out 不取值
+    assert it["radar_resonance_in"] is None

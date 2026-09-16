@@ -991,12 +991,16 @@ def nextday_strong_rank(universe: str = "stock",
     _radar_in_by_code: dict[str, object] = {}
     _radar_out_by_code: dict[str, object] = {}
     _radar_src_by_code: dict[str, str] = {}
+    _radar_mgmt_by_code: dict[str, object] = {}
     _base_scores = dict(scores)
     for _c in codes_k:
         _r = _radar.get(_c) or {}
         _has = _r.get("has_data") and not _r.get("low_liq")
         _in = _r.get("in_count") if _has else None
         _out = _r.get("out_count") if _has else None
+        # 股数通道(高管增减持方向)单独标，绝不并入 in/out 计数(量纲分离)；
+        # has_data=False/low_liq 时 _r 为空或无该键 → None(无数据语义)。
+        _mgmt = _r.get("mgmt_confirm") if _has else None
         _base = scores.get(_c, 0.0)
         _boost = 1.0
         if _in is not None and _base >= 50:
@@ -1005,6 +1009,7 @@ def nextday_strong_rank(universe: str = "stock",
         _boost_by_code[_c] = _boost
         _radar_in_by_code[_c] = _in
         _radar_out_by_code[_c] = _out
+        _radar_mgmt_by_code[_c] = _mgmt
         if not _r or not _r.get("has_data"):
             _radar_src_by_code[_c] = "无主力数据"
         elif _r.get("low_liq"):
@@ -1058,6 +1063,7 @@ def nextday_strong_rank(universe: str = "stock",
             "base_score": round(_base_scores.get(code, 0.0), 2),
             "radar_resonance_in": _nan(_radar_in_by_code.get(code)),
             "radar_resonance_out": _nan(_radar_out_by_code.get(code)),
+            "radar_mgmt_confirm": _nan(_radar_mgmt_by_code.get(code)),
             "radar_boost": _boost_by_code.get(code, 1.0),
             "radar_data_source": _radar_src_by_code.get(code, "无主力数据"),
             "risk_flag": ("多通道主力净流出"
