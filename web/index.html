@@ -1728,8 +1728,18 @@ function ndRender(d){
     ['close_vol_corr','量价共振','近20日收盘与成交额相关性；权重0.10'],
     ['liq_turnover','流动性','流通市值充足且换手适中；权重0.15']
   ];
-  const ths=['#','代码','名称','综合分','五步状态',...factors.map(f=>`<span title="${f[2]}">${f[1]}</span>`),'覆盖率/来源','板块','解释'].map(h=>`<th class="num">${h}</th>`).join('');
+  const ths=['#','代码','名称','综合分','共振','boost','风险','五步状态',...factors.map(f=>`<span title="${f[2]}">${f[1]}</span>`),'覆盖率/来源','板块','解释'].map(h=>`<th class="num">${h}</th>`).join('');
   const factorCell=(x,key)=>{ const v=x.factor_scores?.[key]; return v==null?'<td class="num" style="color:#D97706" title="缺数据">—</td>':`<td class="num">${Number(v).toFixed(0)}</td>`; };
+  // 主力共振/boost/风险 三列(只读 nextday item 字段，不触网；量纲分离：共振=金额通道计数0-3，boost=乘法加权，风险=多通道净流出标记)
+  const radarCells=(x)=>{
+    const rIn=x.radar_resonance_in;
+    const rBoost=x.radar_boost;
+    const rFlag=x.risk_flag;
+    const inCell=(rIn==null)?'<td class="num" style="color:#D97706" title="无主力数据">—</td>':`<td class="num" title="主力共振：金额通道(资金流/龙虎榜/北向)净流入通道数 0-3">${rIn}</td>`;
+    const boostCell=(rBoost!=null && Number(rBoost)>1.0)?`<td class="num" title="主力共振加权 boost" style="color:#16A34A">×${Number(rBoost).toFixed(2)}</td>`:'<td class="num" style="color:var(--muted)" title="无主力数据或无共振">—</td>';
+    const flagCell=rFlag?`<td class="num" style="color:#DC2626;font-weight:600" title="${rFlag}">${rFlag}</td>`:'<td class="num" style="color:var(--muted)">—</td>';
+    return inCell+boostCell+flagCell;
+  };
   const badge=(state,reason)=>{const c=state==='pass'?'#16A34A':state==='missing'?'#D97706':'#DC2626';const t=state==='pass'?'✓':state==='missing'?'?':'×';return `<span title="${reason||''}" style="color:${c};font-weight:700;margin-right:3px">${t}</span>`;};
   const stepLabels=['步1量价','步2规模','步3趋势','步4软分','步5板块'];
   const summary=all.reduce((a,x)=>{a.pass+=Object.values(x.step_status||{}).every(v=>v==='pass')?1:0;a.missing+=Object.values(x.step_status||{}).includes('missing')?1:0;a.cover+=Number(x.score_coverage||0);return a;},{pass:0,missing:0,cover:0});
@@ -1738,10 +1748,10 @@ function ndRender(d){
     const steps=stepLabels.map((n,i)=>badge(st['step'+(i+1)]||((x.failed_steps||[]).includes('step'+(i+1))?'fail':'missing'),reasons['step'+(i+1)]||'未返回结构化诊断')).join('');
     const detail=stepLabels.map((n,i)=>`<div><b>${n}</b>：${reasons['step'+(i+1)]||'—'}</div>`).join('');
     const quality=x.data_quality||{};
-    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?Number(x.score).toFixed(2):'—'}</b></td><td>${steps}<small style="color:var(--muted)">${hard}/4</small></td>${factorCell(x,'mom_5_1')}${factorCell(x,'rel_strength')}${factorCell(x,'sr_10')}${factorCell(x,'close_vol_corr')}${factorCell(x,'liq_turnover')}<td class="num">${(Number(x.score_coverage||0)*100).toFixed(0)}%<br><small>${quality.source||'—'}</small></td><td class="num">${x.board||'—'}</td><td style="font-size:11px;min-width:180px"><details><summary>查看原因</summary><div style="line-height:1.8">${detail}</div><div style="color:var(--muted)">缺失：${(quality.missing||[]).join('、')||'无'}</div></details></td></tr>`;
+    return `<tr class="clk" data-code="${x.code||''}"><td class="num">${x.rank||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td class="num"><b>${x.score!=null?Number(x.score).toFixed(2):'—'}</b>${x.base_score!=null?`<br><small style="color:var(--muted)" title="boost前基础分">${Number(x.base_score).toFixed(2)}</small>`:''}</td>${radarCells(x)}<td>${steps}<small style="color:var(--muted)">${hard}/4</small></td>${factorCell(x,'mom_5_1')}${factorCell(x,'rel_strength')}${factorCell(x,'sr_10')}${factorCell(x,'close_vol_corr')}${factorCell(x,'liq_turnover')}<td class="num">${(Number(x.score_coverage||0)*100).toFixed(0)}%<br><small>${quality.source||'—'}</small></td><td class="num">${x.board||'—'}</td><td style="font-size:11px;min-width:180px"><details><summary>查看原因</summary><div style="line-height:1.8">${detail}</div><div style="color:var(--muted)">缺失：${(quality.missing||[]).join('、')||'无'}</div></details></td></tr>`;
   }).join('');
   const avg=all.length?(summary.cover/all.length*100).toFixed(0):0;
-  document.getElementById('ndOut').innerHTML=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;color:var(--muted);font-size:12px"><span>候选 <b>${all.length}</b></span><span>五步全过 <b style="color:#16A34A">${summary.pass}</b></span><span>含缺数据 <b style="color:#D97706">${summary.missing}</b></span><span>平均覆盖率 <b>${avg}%</b></span></div><div style="margin-bottom:6px;color:var(--muted);font-size:12px">状态：绿色✓通过，红色×规则未通过，橙色?数据不足；综合分为横截面分位，仅用于机械排序。</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  document.getElementById('ndOut').innerHTML=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;color:var(--muted);font-size:12px"><span>候选 <b>${all.length}</b></span><span>五步全过 <b style="color:#16A34A">${summary.pass}</b></span><span>含缺数据 <b style="color:#D97706">${summary.missing}</b></span><span>平均覆盖率 <b>${avg}%</b></span></div><div style="margin-bottom:6px;color:var(--muted);font-size:12px">状态：绿色✓通过，红色×规则未通过，橙色?数据不足；综合分为横截面分位，仅用于机械排序。共振=主力共振金额通道净流入计数(0-3)，boost=共振加权系数(×1.05/×1.10)，风险=多通道主力净流出标记；均为机械统计非买卖信号。综合分下小字为 boost 前基础分。</div><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
 document.getElementById('ndRun').onclick=ndLoad;
 document.getElementById('ndFilter').onchange=ndLoad;
