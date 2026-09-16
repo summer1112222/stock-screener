@@ -862,6 +862,8 @@ def test_nextday_radar_boost_applied_when_base_above_floor(monkeypatch):
     assert abs(it["score"] - round(it["base_score"] * 1.10, 2)) < 0.1
     assert it["radar_boost"] == 1.10
     assert it["radar_resonance_in"] == 3
+    assert isinstance(it["radar_resonance_in"], int)  # 防 _nan float 化
+    assert it["radar_mgmt_confirm"] is False  # 股数通道信号，bool 不被 float 化
     assert it["radar_data_source"].startswith("smart_money_action@")
 
 
