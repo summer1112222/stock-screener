@@ -1066,7 +1066,7 @@ def nextday_strong_rank(universe: str = "stock",
             "radar_mgmt_confirm": _radar_mgmt_by_code.get(code),
             "radar_boost": _boost_by_code.get(code, 1.0),
             "radar_data_source": _radar_src_by_code.get(code, "无主力数据"),
-            "risk_flag": ("多通道主力净流出"
+            "risk_flag": ("主力多通道净流出"
                           if (_radar_out_by_code.get(code) or 0) >= 2 else None),
             "score": scores.get(code, 0.0),
         })

@@ -891,13 +891,13 @@ def test_nextday_radar_no_data_degrades(monkeypatch):
 
 
 def test_nextday_radar_outflow_risk_flag(monkeypatch):
-    """out_count>=2 → risk_flag='多通道主力净流出'（不阻断入选）。"""
+    """out_count>=2 → risk_flag='主力多通道净流出'（不阻断入选）。"""
     _radar_setup(monkeypatch)
     monkeypatch.setattr(nd, "radar_resonance_for",
                         _mock_radar({"600519": 0}, out_map={"600519": 2}))
     res = nd.nextday_strong_rank("stock", codes=["600519"], selection_mode="score")
     it = res["items"][0]
-    assert it["risk_flag"] == "多通道主力净流出"
+    assert it["risk_flag"] == "主力多通道净流出"
 
 
 def test_nextday_radar_low_liq_no_boost(monkeypatch):
