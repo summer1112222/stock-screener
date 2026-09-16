@@ -778,3 +778,121 @@ def test_ma_arrange_skip_fetch_when_has_history(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应触网")))
     info, hist = nd._ma_arrange_batch("stock", ["600001"], 60)
     assert info["600001"]["need_history"] is False
+
+
+# ==================================================================
+# 雷达共振 boost (spec 2026-09-16)
+# 乘法条件叠加：base_score>=50 才吃 boost，has_data/low_liq 不 boost。
+# 不进 _FACTOR_WEIGHTS，不触网不新增表。
+# ==================================================================
+
+# 强弱两只测试股：600519 全因子高 → rank-pct=1.0 → base_score=100；
+# 600519_low 全因子低 → rank-pct=0.0 → base_score=0 (<50 地板)。
+_RADAR_SPOT = [
+    {"code": "600519", "name": "强股", "change_pct": 8.0, "turnover_rate": 6.0,
+     "latest_price": 30.0, "circulating_market_cap": 50.0, "pe": 20.0,
+     "volume_ratio": 3.0, "st_type": None},
+    {"code": "600519_low", "name": "弱股", "change_pct": 0.5, "turnover_rate": 2.0,
+     "latest_price": 30.0, "circulating_market_cap": 15.0, "pe": 200.0,
+     "volume_ratio": 0.5, "st_type": None},
+]
+
+
+def _radar_ma(universe, codes, days=60):
+    out = {}
+    for c in codes:
+        if c == "600519":
+            closes = [10.0 + i * 0.5 for i in range(30)]
+            amounts = [100.0 + i * 5 for i in range(30)]
+            out[c] = {"ma5": 24.0, "ma10": 23.0, "ma20": 21.0, "ma60": 18.0,
+                      "bullish_align": True, "volume_breakout": True,
+                      "bearish": False, "converged": False, "need_history": False,
+                      "last_vol": 200.0, "vol_avg20": 120.0,
+                      "close_series": closes, "amount_series": amounts}
+        else:
+            closes = [10.0] * 30
+            amounts = [100.0] * 30
+            out[c] = {"ma5": 10.0, "ma10": 10.0, "ma20": 10.0, "ma60": 10.0,
+                      "bullish_align": False, "volume_breakout": False,
+                      "bearish": True, "converged": False, "need_history": False,
+                      "last_vol": 100.0, "vol_avg20": 100.0,
+                      "close_series": closes, "amount_series": amounts}
+    return out
+
+
+def _radar_qr(table, where=None, params=None, limit=0, **kw):
+    if table == "stock_spot":
+        return _RADAR_SPOT
+    if table == "st_list":
+        return []
+    if table == "sector_fund_flow":
+        return _SFF
+    return []
+
+
+def _radar_setup(monkeypatch):
+    monkeypatch.setattr(nd.db, "query_rows", _radar_qr)
+    monkeypatch.setattr(nd, "_ma_arrange_batch", _radar_ma)
+    monkeypatch.setattr(nd, "_board_members_batch", _mock_board_members)
+    monkeypatch.setattr(nd.pytdx_client, "get_quote", lambda codes: [])
+    monkeypatch.setattr(nd.pytdx_client, "get_finance_info", lambda code: {})
+    nd._CACHE.clear()
+
+
+def _mock_radar(in_map, out_map=None, has=True, low_liq_map=None):
+    """radar_resonance_for mock：{code: {in_count, out_count, has_data, low_liq, asof}}。"""
+    out_map = out_map or {}
+    low_liq_map = low_liq_map or {}
+    def _f(codes, days=5):
+        return {c: {"in_count": in_map.get(c, 0),
+                    "out_count": out_map.get(c, 0),
+                    "mgmt_confirm": False, "has_data": has,
+                    "low_liq": low_liq_map.get(c, False),
+                    "asof": "2026-09-15"} for c in codes}
+    return _f
+
+
+def test_nextday_radar_boost_applied_when_base_above_floor(monkeypatch):
+    """base_score>=50 + in_count=3 → boost 1.10 → score=base*1.10。"""
+    _radar_setup(monkeypatch)
+    monkeypatch.setattr(nd, "radar_resonance_for", _mock_radar({"600519": 3}))
+    res = nd.nextday_strong_rank("stock", codes=["600519"], selection_mode="score")
+    it = res["items"][0]
+    assert it["base_score"] >= 75
+    assert abs(it["score"] - round(it["base_score"] * 1.10, 2)) < 0.1
+    assert it["radar_boost"] == 1.10
+    assert it["radar_resonance_in"] == 3
+    assert it["radar_data_source"].startswith("smart_money_action@")
+
+
+def test_nextday_radar_boost_skipped_when_base_below_floor(monkeypatch):
+    """base_score<50 → 不 boost（radar_boost=1.0, score==base_score）。"""
+    _radar_setup(monkeypatch)
+    monkeypatch.setattr(nd, "radar_resonance_for", _mock_radar({"600519_low": 3}))
+    res = nd.nextday_strong_rank("stock", codes=["600519", "600519_low"],
+                                 selection_mode="score")
+    it = next(i for i in res["items"] if i["code"] == "600519_low")
+    assert it["base_score"] < 50
+    assert it["radar_boost"] == 1.0
+    assert it["score"] == it["base_score"]
+
+
+def test_nextday_radar_no_data_degrades(monkeypatch):
+    """has_data=False → 无 boost，data_source='无主力数据'。"""
+    _radar_setup(monkeypatch)
+    monkeypatch.setattr(nd, "radar_resonance_for", _mock_radar({}, has=False))
+    res = nd.nextday_strong_rank("stock", codes=["600519"], selection_mode="score")
+    it = res["items"][0]
+    assert it["radar_boost"] == 1.0
+    assert it["radar_resonance_in"] is None
+    assert it["radar_data_source"] == "无主力数据"
+
+
+def test_nextday_radar_outflow_risk_flag(monkeypatch):
+    """out_count>=2 → risk_flag='多通道主力净流出'（不阻断入选）。"""
+    _radar_setup(monkeypatch)
+    monkeypatch.setattr(nd, "radar_resonance_for",
+                        _mock_radar({"600519": 0}, out_map={"600519": 2}))
+    res = nd.nextday_strong_rank("stock", codes=["600519"], selection_mode="score")
+    it = res["items"][0]
+    assert it["risk_flag"] == "多通道主力净流出"

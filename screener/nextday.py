@@ -27,6 +27,13 @@ from data import db
 from data import pytdx_client
 from screener.indicators import ma_alignment
 
+# 雷达共振触发原语（Task 1 产出，spec 2026-09-16）：模块级导入以便测试 monkeypatch；
+# 导入失败（smart_money 缺失）时降级为 None，boost 块跳过不崩。
+try:
+    from screener.smart_money import radar_resonance_for
+except Exception:
+    radar_resonance_for = None
+
 _SCAN_K = 200       # 粗筛后精算上限(按涨幅降序)
 _TDX_ENRICH_K = 40  # TDX 实时/财务补全只覆盖前 N 名，避免全市场请求压力
 _HISTORY_FILL_K = 40  # TDX 自动补历史只覆盖涨幅靠前的小名单，避免阻塞全市场
@@ -971,6 +978,40 @@ def nextday_strong_rank(universe: str = "stock",
         factor_maps["liq_turnover"][code] = _factor_liq_turnover(s, mi)
 
     scores, factor_scores, coverage = _weighted_score(factor_maps, codes_k)
+
+    # 雷达共振触发 boost（spec 2026-09-16）：乘法条件叠加，不进 _FACTOR_WEIGHTS。
+    # base_score≥50 才吃 boost，低 base 不救；has_data=False / low_liq → 不 boost。
+    # 股数通道(mgmt_confirm) 绝不并入 in/out 计数（量纲分离）。
+    try:
+        _radar = (radar_resonance_for(codes_k)
+                  if radar_resonance_for is not None else {})
+    except Exception:
+        _radar = {}
+    _boost_by_code: dict[str, float] = {}
+    _radar_in_by_code: dict[str, object] = {}
+    _radar_out_by_code: dict[str, object] = {}
+    _radar_src_by_code: dict[str, str] = {}
+    _base_scores = dict(scores)
+    for _c in codes_k:
+        _r = _radar.get(_c) or {}
+        _has = _r.get("has_data") and not _r.get("low_liq")
+        _in = _r.get("in_count") if _has else None
+        _out = _r.get("out_count") if _has else None
+        _base = scores.get(_c, 0.0)
+        _boost = 1.0
+        if _in is not None and _base >= 50:
+            _boost = 1.0 + 0.05 * max(0, _in - 1)
+        scores[_c] = round(_base * _boost, 2)  # 覆盖为 boosted score（排序用）
+        _boost_by_code[_c] = _boost
+        _radar_in_by_code[_c] = _in
+        _radar_out_by_code[_c] = _out
+        if not _r or not _r.get("has_data"):
+            _radar_src_by_code[_c] = "无主力数据"
+        elif _r.get("low_liq"):
+            _radar_src_by_code[_c] = "low_liq"
+        else:
+            _radar_src_by_code[_c] = f"smart_money_action@{_r.get('asof')}"
+
     items = []
     for s in cand:
         code = str(s.get("code"))
@@ -1014,6 +1055,13 @@ def nextday_strong_rank(universe: str = "stock",
             "score_coverage": coverage.get(code, 0.0),
             "quote_available": code in quote_by_code,
             "data_source": "tdx" if code in quote_by_code else "stock_spot",
+            "base_score": round(_base_scores.get(code, 0.0), 2),
+            "radar_resonance_in": _nan(_radar_in_by_code.get(code)),
+            "radar_resonance_out": _nan(_radar_out_by_code.get(code)),
+            "radar_boost": _boost_by_code.get(code, 1.0),
+            "radar_data_source": _radar_src_by_code.get(code, "无主力数据"),
+            "risk_flag": ("多通道主力净流出"
+                          if (_radar_out_by_code.get(code) or 0) >= 2 else None),
             "score": scores.get(code, 0.0),
         })
 
