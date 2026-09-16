@@ -145,3 +145,66 @@ def test_radar_cache_hits_second_call():
         n2 = calls["n"]
     assert n1 == 3  # 最新日期 + action 窗口 + stock_spot 共 3 查
     assert n2 == n1  # 二次命中缓存，不重查 db
+
+
+# ---- radar_resonance_for 触发原语（spec 2026-09-16 Task 1）----
+
+import screener.smart_money as sm
+
+
+def _radar_row(code, turnover, channels, low_liq=False, asof="2026-09-15"):
+    """构造 radar() 单行返回结构（复用 radar 内部 _turnover/channels/net 字段）。"""
+    return {"code": code, "name": code, "_turnover": turnover,
+            "channels": channels, "low_liq": low_liq, "data_asof": asof,
+            "channel_hits": 0, "resonance": None, "net_intensity": None,
+            "cum_net": 0.0, "unlock_flag": False}
+
+
+def _ch(net):
+    """构造单通道 dict，net 为累计净额。"""
+    return {"net": net, "daily": {}, "latest_date": None, "positive": net > 0}
+
+
+def test_radar_resonance_for_in_count_strength_floor(monkeypatch):
+    # 资金流 net=200万, turnover=1亿 → intensity=0.002 > 0.001 → 计入 in
+    # 龙虎榜 net=5万, turnover=1亿 → intensity=0.0005 < 0.001 → 不计
+    rows = [_radar_row("600519", 1e8, {
+        "资金流": _ch(2e6), "龙虎榜": _ch(5e4), "北向": _ch(-3e6)})]
+    monkeypatch.setattr(sm, "radar", lambda days=5, market=None, limit=50, **k: {"rows": rows})
+    out = sm.radar_resonance_for(["600519"], days=5)
+    assert out["600519"]["in_count"] == 1   # 仅资金流过门槛
+    assert out["600519"]["out_count"] == 1  # 北向 -3e6/1e8=-0.03 < -0.001
+    assert out["600519"]["has_data"] is True
+    assert out["600519"]["low_liq"] is False
+
+
+def test_radar_resonance_for_low_liq_not_counted(monkeypatch):
+    # low_liq=True → 通道一律不计入（哪怕 net/turnover 数值大）
+    rows = [_radar_row("000001", 1e4, {"资金流": _ch(1e6)}, low_liq=True)]
+    monkeypatch.setattr(sm, "radar", lambda days=5, market=None, limit=50, **k: {"rows": rows})
+    out = sm.radar_resonance_for(["000001"], days=5)
+    assert out["000001"]["in_count"] == 0
+    assert out["000001"]["out_count"] == 0
+    assert out["000001"]["has_data"] is True
+    assert out["000001"]["low_liq"] is True
+
+
+def test_radar_resonance_for_no_data(monkeypatch):
+    # 候选 code 不在 radar 返回中 → has_data=False
+    monkeypatch.setattr(sm, "radar", lambda days=5, market=None, limit=50, **k: {"rows": []})
+    out = sm.radar_resonance_for(["300999"], days=5)
+    assert out["300999"]["has_data"] is False
+    assert out["300999"]["in_count"] == 0
+    assert out["300999"]["out_count"] == 0
+    assert out["300999"]["asof"] is None
+
+
+def test_radar_resonance_for_mgmt_confirm_separate(monkeypatch):
+    # 高管增持正向 → mgmt_confirm=True，但不并入 in_count
+    rows = [_radar_row("600519", 1e8, {
+        "资金流": _ch(2e6),
+        "高管增减持": {"net": None, "daily": {}, "latest_date": None, "positive": True}})]
+    monkeypatch.setattr(sm, "radar", lambda days=5, market=None, limit=50, **k: {"rows": rows})
+    out = sm.radar_resonance_for(["600519"], days=5)
+    assert out["600519"]["in_count"] == 1   # 仅资金流
+    assert out["600519"]["mgmt_confirm"] is True

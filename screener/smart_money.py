@@ -332,6 +332,49 @@ def radar(days: int = 5, market: str | None = None, limit: int = 50,
     return result
 
 
+def radar_resonance_for(codes: list[str], days: int = 5) -> dict[str, dict]:
+    """候选集共振触发原语（spec 2026-09-16）。复用 radar() 30s 缓存，limit=0
+    全量后按 code 字典匹配候选集，不触网不新增表。
+
+    返回 {code: {in_count, out_count, mgmt_confirm, has_data, low_liq, asof}}：
+    - in_count/out_count (0-3)：金额通道[资金流/龙虎榜/北向]里累计净额同向且
+      intensity=net/turnover 绝对值 > 0.001 的通道数；
+    - low_liq 股通道一律不计入（小分母 net/turnover 放大失真，强度地板挡不住）；
+    - mgmt_confirm：高管增减持为增持方向（股数通道，单独标不并入 0-3）；
+    - 无 smart_money_action 记录 → has_data=False，in/out_count=0 不触发。
+
+    机械统计，非买卖信号。"""
+    codes_s = [str(c) for c in codes]
+    rad = radar(days=days, limit=0)
+    rows = {str(r.get("code")): r for r in rad.get("rows", [])}
+    out: dict[str, dict] = {}
+    for c in codes_s:
+        r = rows.get(c)
+        if not r:
+            out[c] = {"in_count": 0, "out_count": 0, "mgmt_confirm": False,
+                      "has_data": False, "low_liq": False, "asof": None}
+            continue
+        low_liq = bool(r.get("low_liq"))
+        in_count, out_count = 0, 0
+        if not low_liq:
+            turnover = _nan(r.get("_turnover")) or 0.0
+            for ch_name in _AMOUNT_CHANNELS:
+                ch = (r.get("channels") or {}).get(ch_name) or {}
+                net = _nan(ch.get("net"))
+                if net is None or turnover <= 0:
+                    continue
+                intensity = net / turnover
+                if intensity > 0.001:
+                    in_count += 1
+                elif intensity < -0.001:
+                    out_count += 1
+        mgmt = (r.get("channels") or {}).get("高管增减持", {}) or {}
+        out[c] = {"in_count": in_count, "out_count": out_count,
+                  "mgmt_confirm": bool(mgmt.get("positive")), "has_data": True,
+                  "low_liq": low_liq, "asof": r.get("data_asof")}
+    return out
+
+
 def summarize_by_code(rows: list[dict]) -> dict:
     """按 code 聚合主力动向行的纯函数（spec 2026-09-06 强度排序后端对照实现，
     不触网不查库；前端 code 视图 JS 聚合与此语义一致）。
