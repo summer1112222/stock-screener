@@ -136,8 +136,8 @@ def test_behavior_batch_no_finshare():
     ff.assert_not_called()  # 批量场景不调 finshare 回退
 
 
-def test_dim3_uses_behavior():
-    """口径3 用 _behavior_batch 的 streak/north/marginal,status ok(连续性+北向+边际)。"""
+def test_dim3_uses_behavior(monkeypatch):
+    """口径3 用 radar in_count rank-pct，status ok(radar共振+内外盘)。"""
     quality._RESULT_CACHE.clear()
     rows = [
         {"code": "000001", "name": "平A", "latest_price": 10.0, "turnover_amount": 1e8,
@@ -148,11 +148,11 @@ def test_dim3_uses_behavior():
          "pe": 30.0, "pb": 8.0, "amplitude": 2.0, "board": "白酒"},
     ]
     qr = {"stock_spot": rows, "industry_board": []}
-    bb = {
-        "000001": {"streak_inflow": 5, "streak_outflow": 0,
-                   "margin_accel": 1e6, "north_cum": 2e7},
-        "600519": {"streak_inflow": 1, "streak_outflow": 0,
-                   "margin_accel": -5e5, "north_cum": 5e6},
+    radar_map = {
+        "000001": {"in_count": 3, "out_count": 0, "has_data": True,
+                   "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+        "600519": {"in_count": 1, "out_count": 0, "has_data": True,
+                   "low_liq": False, "mgmt_confirm": False, "asof": "d"},
     }
 
     with patch("data.db.query_rows", side_effect=lambda t, **k: qr.get(t, [])), \
@@ -162,15 +162,17 @@ def test_dim3_uses_behavior():
          patch("backtest.buffett.shortlist_by_turnover",
                return_value=["000001", "600519"]), \
          patch("backtest.buffett.analyze_many", return_value=[]), \
-         patch("screener.smart_money._behavior_batch", return_value=bb), \
+         patch("screener.smart_money.radar_resonance_for",
+               return_value=radar_map), \
+         patch("data.pytdx_client.get_quote", return_value=[]), \
          patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
          patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
          patch("backtest.quality._is_in_session", return_value=False):
         res = quality.quality_rank(universe="stock", refine=False, min_turnover=0,
                                    dim_thresh=0.0, min_dims=1)
-    assert res["dim_status"]["3"] == "ok(连续性+北向+边际)", res["dim_status"]
+    assert res["dim_status"]["3"] == "ok(radar共振+内外盘)", res["dim_status"]
     main = {m["code"]: m for m in res["main"]}
-    # 000001 streak/north/marginal 均优于 600519 → 口径3 分位更高
+    # 000001 in_count=3 > 600519 in_count=1 → 口径3 分位更高
     d1 = (main.get("000001", {}).get("dim_scores") or {}).get("3")
     d2 = (main.get("600519", {}).get("dim_scores") or {}).get("3")
     if d1 is not None and d2 is not None:
@@ -265,7 +267,16 @@ def test_value_factors_include_growth_and_fcf_yield():
 
 
 def test_flow_factors_include_quote_and_dragon(monkeypatch):
-    """资金口径纳入通达信内外盘比与龙虎榜净额。"""
+    """资金口径纳入通达信内外盘比与 radar in_count（改造 2026-09-16）。"""
+    monkeypatch.setattr(
+        "screener.smart_money.radar_resonance_for",
+        lambda codes, days=5: {
+            "a": {"in_count": 2, "out_count": 0, "has_data": True,
+                  "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+            "b": {"in_count": 0, "out_count": 1, "has_data": True,
+                  "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+        },
+    )
     monkeypatch.setattr(
         "data.pytdx_client.get_quote",
         lambda codes: [
@@ -273,25 +284,10 @@ def test_flow_factors_include_quote_and_dragon(monkeypatch):
             {"code": "b", "b_vol": 100, "s_vol": 200},
         ],
     )
-    monkeypatch.setattr(
-        "data.db.query_rows",
-        lambda table, **kwargs: [
-            {"code": "a", "channel": "龙虎榜", "amount": 3e7},
-            {"code": "b", "channel": "龙虎榜", "amount": -1e7},
-        ] if table == "smart_money_action" else [],
-    )
-    behavior = {
-        "a": {"streak_inflow": 4, "streak_outflow": 0,
-               "north_cum": 1e7, "margin_accel": 2e6},
-        "b": {"streak_inflow": 1, "streak_outflow": 4,
-               "north_cum": -1e7, "margin_accel": -2e6},
-    }
-    factors = quality._flow_factor_series(["a", "b"], behavior)
-    assert {"streak_inflow", "north_cum", "margin_accel",
-            "inner_outer_ratio", "dragon_net"} <= set(factors)
+    factors = quality._flow_factor_series(["a", "b"], days=20)
+    assert {"radar_in_count", "inner_outer_ratio"} <= set(factors)
     assert factors["inner_outer_ratio"]["a"] > factors["inner_outer_ratio"]["b"]
-    assert factors["dragon_net"]["a"] > factors["dragon_net"]["b"]
-    assert factors["streak_inflow"]["b"] == 0
+    assert factors["radar_in_count"]["a"] > factors["radar_in_count"]["b"]
 
 
 def test_signal_factors_include_recent_intensity():
@@ -323,3 +319,59 @@ def test_industry_proxy_factor_uses_board_momentum(monkeypatch):
     )
     factor = quality._industry_proxy_series(["a", "b"])
     assert factor["a"] > factor["b"]
+
+
+# ---------- Task 3: 口径3 改用 radar in_count rank-pct ----------
+
+def test_dim3_uses_radar_in_count(monkeypatch):
+    """口径3 主子因子 = radar in_count 候选集内 rank-pct。"""
+    import backtest.quality as q
+    # mock radar_resonance_for：三只候选 in_count 分别 3/2/0
+    monkeypatch.setattr("screener.smart_money.radar_resonance_for",
+                        lambda codes, days=5: {
+                            "000001": {"in_count": 3, "out_count": 0, "has_data": True,
+                                       "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+                            "000002": {"in_count": 2, "out_count": 0, "has_data": True,
+                                       "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+                            "000003": {"in_count": 0, "out_count": 0, "has_data": True,
+                                       "low_liq": False, "mgmt_confirm": False, "asof": "d"}})
+    monkeypatch.setattr("data.pytdx_client.get_quote", lambda codes: [])
+    ff = q._flow_factor_series(["000001", "000002", "000003"], days=20)
+    assert "radar_in_count" in ff
+    assert "inner_outer_ratio" in ff
+    # 旧子因子应已移除
+    assert "streak_inflow" not in ff
+    assert "north_cum" not in ff
+    assert "margin_accel" not in ff
+    # in_count=3 → rank-pct 最高
+    assert ff["radar_in_count"]["000001"] > ff["radar_in_count"]["000003"]
+
+
+def test_dim3_has_data_false_excluded(monkeypatch):
+    """has_data=False → in_count 给 None，排除出口径3 rank-pct 分母。"""
+    import backtest.quality as q
+    monkeypatch.setattr("screener.smart_money.radar_resonance_for",
+                        lambda codes, days=5: {
+                            "000001": {"in_count": 3, "out_count": 0, "has_data": True,
+                                       "low_liq": False, "mgmt_confirm": False, "asof": "d"},
+                            "000002": {"in_count": 0, "out_count": 0, "has_data": False,
+                                       "low_liq": False, "mgmt_confirm": False, "asof": None}})
+    monkeypatch.setattr("data.pytdx_client.get_quote", lambda codes: [])
+    ff = q._flow_factor_series(["000001", "000002"], days=20)
+    assert ff["radar_in_count"]["000001"] == 3.0
+    # 000002 has_data=False → None（不伪造 0）
+    import pandas as pd
+    assert pd.isna(ff["radar_in_count"]["000002"])
+
+
+def test_dim3_low_liq_excluded(monkeypatch):
+    """low_liq=True → in_count 给 None（与 has_data=False 同处理）。"""
+    import backtest.quality as q
+    monkeypatch.setattr("screener.smart_money.radar_resonance_for",
+                        lambda codes, days=5: {
+                            "000001": {"in_count": 0, "out_count": 0, "has_data": True,
+                                       "low_liq": True, "mgmt_confirm": False, "asof": "d"}})
+    monkeypatch.setattr("data.pytdx_client.get_quote", lambda codes: [])
+    ff = q._flow_factor_series(["000001"], days=20)
+    import pandas as pd
+    assert pd.isna(ff["radar_in_count"]["000001"])

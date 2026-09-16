@@ -391,24 +391,27 @@ def _value_factor_series(results: list, spot: pd.DataFrame | None,
     return fac
 
 
-def _flow_factor_series(codes: list, behavior: dict, quote_codes=None) -> dict:
-    """资金流向口径因子集（大=好）：streak_inflow(连续流出≥3 → 0 惩罚)/
-    north_cum/margin_accel + inner_outer_ratio(tdx 内外盘 b_vol/s_vol)/
-    dragon_net(龙虎榜净额,channel=龙虎榜)。
+def _flow_factor_series(codes: list, days: int, quote_codes=None) -> dict:
+    """资金流向口径因子集（改造 2026-09-16）：radar 共振 in_count 候选集内
+    rank-pct + inner_outer_ratio(tdx 内外盘 b_vol/s_vol)。旧单通道因子
+    (streak/north/margin/dragon) 被多通道共振计数替代；inner_outer_ratio 保留
+    为正交 tdx 第二子因子。has_data=False/low_liq → None 排除分母（不伪造 0）。
+
     quote_codes: 限小名单取盘口(shortlist)，默认全 codes；触网失败→缺省不崩。"""
     codes_l = [str(c) for c in codes]
-    cset = set(codes_l)
     qc = [str(c) for c in (quote_codes if quote_codes is not None else codes_l)]
-    inflow, north, margin = {}, {}, {}
-    for c in codes_l:
-        b = behavior.get(c) or {}
-        v = b.get("streak_inflow")
-        if (b.get("streak_outflow") or 0) >= 3:
-            v = 0.0  # 连续流出惩罚：不加分不计强度
-        inflow[c] = v
-        north[c] = b.get("north_cum")
-        margin[c] = b.get("margin_accel")
-    # 内外盘比（主动买/主动卖，>1 买盘占优）
+    # radar 共振 in_count（主子因子）
+    in_count = {c: None for c in codes_l}
+    try:
+        from screener import smart_money as sm_q
+        rad = sm_q.radar_resonance_for(codes_l, days=days)
+        for c in codes_l:
+            r = rad.get(c) or {}
+            if r.get("has_data") and not r.get("low_liq"):
+                in_count[c] = float(r.get("in_count") or 0)
+    except Exception:
+        pass
+    # 内外盘比（主动买/主动卖，>1 买盘占优）— 正交 tdx 信号，保留
     ior = {c: None for c in codes_l}
     try:
         from data import pytdx_client
@@ -420,29 +423,9 @@ def _flow_factor_series(codes: list, behavior: dict, quote_codes=None) -> dict:
                 ior[c] = bv / sv
     except Exception:
         pass
-    # 龙虎榜净买额
-    dr = {c: None for c in codes_l}
-    try:
-        rows = db.query_rows("smart_money_action", where="channel = ?",
-                             params=("龙虎榜",), limit=0) or []
-        agg = {}
-        for r in rows:
-            c = str(r.get("code"))
-            if c not in cset:
-                continue
-            amt = _to_float(r.get("amount"))
-            if amt is not None:
-                agg[c] = (agg.get(c) or 0.0) + amt
-        for c in agg:
-            dr[c] = agg[c]
-    except Exception:
-        pass
     return {
-        "streak_inflow": pd.Series(inflow, dtype=float),
-        "north_cum": pd.Series(north, dtype=float),
-        "margin_accel": pd.Series(margin, dtype=float),
+        "radar_in_count": pd.Series(in_count, dtype=float),
         "inner_outer_ratio": pd.Series(ior, dtype=float),
-        "dragon_net": pd.Series(dr, dtype=float),
     }
 
 
@@ -654,7 +637,7 @@ def _dim_scores(df, universe, days, min_signals, close=None):
         except Exception as e:
             status["2"] = f"err:{e}"
 
-    # 口径3 资金流向(改造A:资金流连续性+北向累计+边际加速,低相关替代高相关三因子;
+    # 口径3 资金流向(改造 2026-09-16: radar 多通道共振 in_count + 内外盘;
     #               限 shortlist,非 shortlist 口径3=None;降级旧 spot 路径)
     try:
         import screener.smart_money as sm_q
@@ -666,16 +649,19 @@ def _dim_scores(df, universe, days, min_signals, close=None):
                 sl_codes = [c for c in codes if c in sl]
             except Exception:
                 sl_codes = codes
-            bb = sm_q._behavior_batch(sl_codes, days=days)
-            # 任一 shortlist 标的有行为序列 → 新口径；盘口只触达同一小名单。
-            if any(bb[c]["streak_inflow"] is not None or bb[c]["north_cum"] is not None
-                   or bb[c]["margin_accel"] is not None for c in sl_codes):
-                ff = _flow_factor_series(sl_codes, bb, quote_codes=sl_codes)
+            # 任一 shortlist 标的 has_data=True → 新口径
+            try:
+                _rad = sm_q.radar_resonance_for(sl_codes, days=days)
+                rad_avail = any((r or {}).get("has_data") for r in _rad.values())
+            except Exception:
+                rad_avail = False
+            if rad_avail:
+                ff = _flow_factor_series(sl_codes, days=days, quote_codes=sl_codes)
                 comp = _avg_rank_pct(list(ff.values()), sl_codes)
                 for c in codes:
                     scores[c][3] = _to_float(comp.get(c)) if c in comp.index else None
                 dims_avail.append(3)
-                status["3"] = "ok(连续性+北向+边际)"
+                status["3"] = "ok(radar共振+内外盘)"
                 used_new = True
         if not used_new:
             # 降级旧路径:top_by_amount累计+spot当日净额+换手(ETF/无行为序列,高相关)
