@@ -61,6 +61,7 @@ def today_list(date: str | None = None, channel: str | None = None,
     rows = db.query_rows("smart_money_action", where=w, params=tuple(params),
                          order_by="amount DESC", limit=limit)
     _attach_intensity(rows)   # O1: 主力净额/当日成交额 强度归一化
+    _sector_ctx(rows)          # 行业景气/政策命中 只读上下文标注(不改主排序)
     return {"rows": rows, "total": len(rows), "date": date}
 
 
@@ -118,6 +119,36 @@ def _attach_intensity(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _sector_ctx(rows: list, fund_flow: list | None = None,
+                board_rows: list | None = None,
+                member_map: dict | None = None):
+    """给 rows 原地附 sector_heat/policy_hit（只读上下文标注，不改主排序）。
+
+    fund_flow/board_rows/member_map 为可注入依赖，供测试 mock；默认从 DB/nextday 取。
+    反查只传"被评分板块"(sector_fund_flow行业今日 ∩ industry_board 名)，有界单次调用，
+    避免全板块 board_stocks 网络回退风暴。失败诚实不标（sector_heat=None）。
+    """
+    from screener import sector_heat as _sh
+    if fund_flow is None:
+        fund_flow = db.query_rows("sector_fund_flow",
+                                  where="sector_type='行业' AND indicator='今日'",
+                                  order_by="", limit=0) or []
+    if board_rows is None:
+        board_rows = db.query_rows("industry_board", order_by="", limit=0) or []
+    if member_map is None:
+        from screener import nextday as _nd
+        member_map = {}
+        try:
+            ff_names = {str(r.get("name")) for r in fund_flow if r.get("name")}
+            scored = [str(r.get("name")) for r in board_rows
+                      if r.get("name") and str(r.get("name")) in ff_names]
+            if scored:
+                member_map = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
+        except Exception:
+            member_map = {}
+    _sh.attach_sector_heat(rows, fund_flow, board_rows, member_map)
+
+
 def top_by_amount(days: int = 5, market: str | None = None,
                   channel: str | None = None, limit: int = 30) -> dict:
     """用法 C：按 N 日累计主力净额排序的观察池（group by code 降序）。
@@ -149,6 +180,7 @@ def top_by_amount(days: int = 5, market: str | None = None,
         cnt = p.get("count")
         p["count"] = int(cnt) if cnt is not None else 0
     _attach_intensity(pool)
+    _sector_ctx(pool)          # 行业景气/政策命中 只读上下文标注(不改主排序)
     return {"rows": pool, "total": len(pool)}
 
 

@@ -87,3 +87,25 @@ def test_quality_refine_applies_sector_heat():
     # 盘后：A 流动性失效，仅 res+heat+policy，仍保持 a 首
     out2 = quality._apply_sector_heat(pool, ff, br, mm, in_session=False)
     assert out2[0]["code"] == "a"
+
+
+def test_top_by_amount_annotates_sector(monkeypatch):
+    """主力池经 _sector_ctx 标注管线：高景气+政策行附 sector_heat/policy_hit。"""
+    from screener import smart_money as sm
+    import data.db as db
+
+    rows = [{"code": "a", "name": "甲", "market": "sh", "amount": 1e7, "count": 1},
+            {"code": "z", "name": "乙", "market": "sz", "amount": 2e7, "count": 1}]
+    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
+    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
+    mm = {"先进制造": {"a"}}
+
+    monkeypatch.setattr(db, "query_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(sm, "_attach_intensity", lambda p: p)
+    monkeypatch.setattr(sm, "_sector_ctx",
+                        lambda p: sh.attach_sector_heat(p, ff, br, mm))
+
+    out = sm.top_by_amount(days=5)
+    merged = {x["code"]: x for x in out["rows"]}
+    assert "sector_heat" in merged["a"] and merged["a"]["policy_hit"] == 0.05
+    assert merged["z"]["sector_heat"] is None      # 无板块 → 诚实缺失
