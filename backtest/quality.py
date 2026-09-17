@@ -304,6 +304,36 @@ def _to_pct(s: pd.Series) -> pd.Series:
     return s.rank(pct=True, method="average")
 
 
+def _apply_sector_heat(pool: list, fund_flow: list, board_rows: list,
+                       member_map: dict, in_session: bool) -> list:
+    """行业景气加成重排(排序加成层，不改共振签名)。
+
+    final = 0.6*res_pct + 0.2*liq_pct + 0.2*heat_pct + policy   (盘中)
+          = 0.8*res_pct + 0.2*heat_pct + policy                 (盘后)
+    liq_pct 取 _refine_by_quote 已算的 quote.liquidity_pct(纯流动性 pool 分位)，
+    绝不用 _refine_score —— 它含 0.6*res，当 liq 代理会重复计入 res(0.72res)。
+    仅作排序上下文，不预测板块；成员反查失败板块 → 不加成。
+    """
+    from screener import sector_heat as _sh
+    _sh.attach_sector_heat(pool, fund_flow, board_rows, member_map)
+    rs = pd.Series({str(i.get("code")): _to_float(i.get("resonance")) or 0.0 for i in pool})
+    rp = _to_pct(rs).to_dict() if not rs.empty else {}
+    hs = pd.Series({str(i.get("code")): _to_float(i.get("sector_heat")) or 0.0 for i in pool})
+    hp = _to_pct(hs).to_dict() if not hs.empty else {}
+    for i in pool:
+        c = str(i.get("code"))
+        r = rp.get(c, 0.0)
+        h = hp.get(c, 0.0)
+        p = _to_float(i.get("policy_hit")) or 0.0
+        if in_session:
+            liq = _to_float((i.get("quote") or {}).get("liquidity_pct")) or 0.0
+            i["_final"] = 0.6 * r + 0.2 * liq + 0.2 * h + p
+        else:
+            i["_final"] = 0.8 * r + 0.2 * h + p
+    pool.sort(key=lambda x: x.get("_final") or 0.0, reverse=True)
+    return pool
+
+
 def _avg_rank_pct(factors: list, codes: list) -> pd.Series:
     """每个因子先转横截 rank-pct(_to_pct)，再按 code 取可用因子的均值。
 
@@ -1215,6 +1245,27 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
             pool, df, in_session=in_session)
         main = pool  # 精排池至少取 limit 只(limit>refine_pool 时不静默截断)
 
+        # 行业景气加成层(sector-heat)：资金+政策命中作排序上下文，不改共振签名。
+        # 反查只传"被评分板块"(sector_fund_flow行业今日 ∩ industry_board 名)，
+        # 有界单次调用，避免全板块 board_stocks 网络回退风暴。失败诚实降级。
+        try:
+            import data.db as _db
+            from screener import nextday as _nd
+            ff = _db.query_rows("sector_fund_flow",
+                                where="sector_type='行业' AND indicator='今日'",
+                                order_by="", limit=0) or []
+            br = _db.query_rows("industry_board", order_by="", limit=0) or []
+            ff_names = {str(r.get("name")) for r in ff if r.get("name")}
+            scored = [str(r.get("name")) for r in br
+                      if r.get("name") and str(r.get("name")) in ff_names]
+            mm = {}
+            if scored:
+                mm = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
+            pool = _apply_sector_heat(pool, ff, br, mm, in_session=in_session)
+            main = pool
+        except Exception:
+            pass  # 景气加成失败不影响既有精排结果(诚实降级)
+
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)
     main = _enrich_main_behavior(main, universe, days=days)
@@ -1224,6 +1275,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         it["dim_scores"] = {d: _to_float(v) for d, v in it.get("dim_scores", {}).items()}
         it["resonance"] = _to_float(it.get("resonance"))
         it.pop("_refine_score", None)  # 内部键清理
+        it.pop("_final", None)  # 行业景气加成临时排序键清理
         return it
 
     main = [_clean_item(it) for it in main]
