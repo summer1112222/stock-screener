@@ -328,6 +328,8 @@ def _risk_factor_series(close: pd.DataFrame, amount: pd.DataFrame | None,
                         days: int = 20) -> dict:
     """风险调整口径的因子集（全部大=好，供 _avg_rank_pct）：
     volatility(负)/downside_volatility(负)/momentum_5/20/60/sortino/amount_accel。
+    momentum_60 与 amount_accel 在 A 股为反转效应(IC 稳定为负,见 docs/quality-diag-2026-09-17.md)
+    → 取负：60日动量高为抛压/放量加速为追高，均按反转为好。
     无量能面板时 amount_accel 缺省（NaN），不拖累其他因子。"""
     ret = close.pct_change().dropna(how="all")
     if ret.empty or ret.shape[0] < 2:
@@ -341,7 +343,7 @@ def _risk_factor_series(close: pd.DataFrame, amount: pd.DataFrame | None,
         "downside_volatility": -down.fillna(0.0),
         "momentum_5": close.pct_change(5).iloc[-1],
         "momentum_20": close.pct_change(max(days, 2)).iloc[-1],
-        "momentum_60": close.pct_change(60).iloc[-1],
+        "momentum_60": -close.pct_change(60).iloc[-1],  # A股反转→取负
         "sortino": ret.mean() / down.replace(0, pd.NA),
     }
     if amount is not None and not amount.empty:
@@ -350,7 +352,7 @@ def _risk_factor_series(close: pd.DataFrame, amount: pd.DataFrame | None,
         w = amount.tail(max(days, 60))
         a5 = w.tail(5).mean()
         a_base = w.iloc[:-5].mean() if len(w) > 5 else a5
-        out["amount_accel"] = (a5 / a_base.replace(0, pd.NA) - 1.0)
+        out["amount_accel"] = -(a5 / a_base.replace(0, pd.NA) - 1.0)  # 缩量企稳=好,反转取负
     else:
         out["amount_accel"] = pd.Series(dtype=float, index=close.columns)
     return out

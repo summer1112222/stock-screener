@@ -241,7 +241,8 @@ def test_risk_factors_use_downside_and_multi_window():
                  "momentum_20", "momentum_60", "sortino", "amount_accel"):
         assert name in factors
     assert factors["momentum_5"]["a"] > factors["momentum_5"]["b"]
-    assert factors["amount_accel"]["a"] > factors["amount_accel"]["b"]
+    # amount_accel 已按 A 股反转取负: a 放量加速 → 值更负(低) → a < b(缩量企稳=好)
+    assert factors["amount_accel"]["a"] < factors["amount_accel"]["b"]
 
 
 def test_value_factors_include_growth_and_fcf_yield():
