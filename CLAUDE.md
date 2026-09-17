@@ -99,7 +99,7 @@ curl -X POST http://localhost:8000/api/refresh
 
 ## 改动检查清单
 
-> **设计文档**：`docs/superpowers/specs/` 当前存 20 份设计 spec，`docs/superpowers/plans/` 当前存 22 份实施 plan；按要改的领域先读对应文档，拿到“为什么这么设计”的上下文比读代码回溯快。`backtest-realism`、`chip-distribution` 目前仅有 spec；其余文档以目录实际文件为准。
+> **设计文档**：`docs/superpowers/specs/` 当前存 24 份设计 spec，`docs/superpowers/plans/` 当前存 27 份实施 plan；按要改的领域先读对应文档，拿到“为什么这么设计”的上下文比读代码回溯快。`backtest-realism`、`chip-distribution` 目前仅有 spec；其余文档以目录实际文件为准。
 
 - 新增 ETF/QDII 长短清单(`screener/etf_screen.py`) → **`etf_spot` 表无 nav/fund_scale 列**，净值/规模/费率/估值必须经 `_fetch_qdii_premium`/`_fetch_quality_meta`/`_fetch_index_valuation` 抽象按需取（`fund_etf_spot_em` 主源,失败/无 IOPV 诚实 None 不硬造），绝不直接读不存在的表列；item 统一带 `name`（本地占位==code 时经 `_display_name` 回退全市场快照真实名,无源诚实保留占位前端显"待刷新"）；请求含 universe/mode/codes/limit/days 全部入 30s `_CACHE` 缓存键；QDII 高溢价 long 降权标 risk_flag、short 顶部——措辞"长/短清单机械排序观察清单非荐股非买卖信号",挂 `cand_disclaimer`。同步 `tests/test_etf_screen.py`(数据源全 mock 不触网)。
 - 新增 SQLite 列/表 → 同步 `models.SCHEMA_SQL` + `TABLE_FIELDS` + `db._BOARD_MIGRATIONS`（若旧表补列）。
