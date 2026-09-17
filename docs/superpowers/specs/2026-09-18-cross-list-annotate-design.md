@@ -19,9 +19,9 @@
 
 | 清单(宿主) | 注入字段 | 对端轻量源 | 是否触发重计算 |
 |---|---|---|---|
-| quality 行 | `main_phase`(吸筹/洗盘/拉升/出货/观望)、`flow_streak`(资金连续净流入天数) | `sm.main_force_phase(code)` + `sm._behavior_batch(codes, 30)` | 否(DB 只读 + 30s 进程缓存) |
-| nextday 行 | 同上 `main_phase`/`flow_streak` | 同上(仅 top N) | 否 |
-| smart_money 行 | `quality_pct`(该股在 quality 共振清单中的分位上下文) | 复用已算的 resonance 分位,按 code 取 | 否(不重跑 buffett) |
+| quality 行 | `mf_phase`(吸筹/洗盘/拉升/出货/观望)+`mf_confidence`+`streak_inflow`/`cum_net`/`margin_accel` | `sm.main_force_phase(code)` + `sm._behavior_batch(codes, days)` | **已实现**(`quality._enrich_main_behavior`,20s 预算+finshare 熔断)。本次**不再改** |
+| nextday 行 | 同上 `mf_phase`/`mf_confidence`/`streak_inflow`(命名与 quality 一致) | `sm.main_force_phase(code)` + `sm._behavior_batch(codes, 30)` | 否(DB 只读 + 30s 进程缓存,nextday 已触网,此处不新增) |
+| smart_money 行 | `quality_pct`(该股在 quality 共振清单中的分位上下文) | 复用 quality 结果缓存的 resonance rank-pct,按 code 取 | 否(不重跑 buffett) |
 
 **Ruling 2(None 诚实缺失,不进排序):**
 任一穿透字段无源(无历史/无主力记录/无共振分位)→ 该字段 `None`,不崩、不伪造零分、**不参与排序**,仅作展示。与 `sector_heat` 的 `None` 语义一致。
@@ -39,10 +39,10 @@ quality↔nextday 两端的**完整评分互不嵌入**。需要时用"见对端
 | 文件 | 改动 |
 |---|---|
 | `screener/sector_heat.py` | **无**(纯函数已具备 attach;仅 nextday 复用) |
-| `screener/nextday.py` | A:结果经 `sector_heat.attach_sector_heat` 附 `sector_heat`/`policy_hit`;B:结果附 `main_phase`/`flow_streak`(仅 top N 轻量) |
-| `backtest/quality.py` | B:精排后的 main 行附 `main_phase`/`flow_streak`(对 shortlist 或 main 批量取) |
-| `screener/smart_money.py` | B:`top_by_amount`/`today_list` 行附 `quality_pct`(复用 resonance 分位,按 code) |
-| `tests/test_nextday.py`、`tests/test_quality.py`、`tests/test_smart_money.py` | 各增穿透标注覆盖(纯 mock,不触网) |
+| `screener/nextday.py` | **A**:结果经 `sector_heat.attach_sector_heat` 附 `sector_heat`/`policy_hit`;**B2**:结果附 `mf_phase`/`mf_confidence`/`streak_inflow`(复用 `_enrich_main_behavior` 套路,仅 passed_items) |
+| `backtest/quality.py` | **B1 已实现,不改**;仅加 B3 的 `_INDEX`(code→res_pct)写入 |
+| `screener/smart_money.py` | **B3**:`top_by_amount`/`today_list` 行附 `quality_pct`(lazy import 读 quality 索引,不重跑 buffett) |
+| `tests/test_nextday.py`、`tests/test_smart_money.py` | 各增穿透标注覆盖(纯 mock,不触网);`tests/test_quality.py` 增 `_INDEX` 写入断言 |
 | `CLAUDE.md` | 更新三者路由字段说明 + 穿透标注检查清单 |
 
 **不新增:** 表、采集源、API 路由(字段附在既有响应上)。
@@ -58,20 +58,21 @@ quality↔nextday 两端的**完整评分互不嵌入**。需要时用"见对端
 - 失败 → `member_map={}`,诚实 None。
 
 ### B1. quality 行附主力阶段
-- 在 quality 精排 main 产出后(或 by_dim 兜底),对 top N 调:
-  `_behavior_batch(codes, 30)` → 每 code 得 `flow_streak`(连续净流入天数)
-  `main_force_phase(code, 30)` → 每 code 得 `main_phase`
-- 两者都便宜(DB 只读 + 30s 缓存),不触网。
-- 字段挂到 item:`main_phase`/`flow_streak`。缺失 → None。
+**已实现**(`backtest/quality.py._enrich_main_behavior`,20s 预算+finshare 熔断秒退),本次不改。对外字段:`mf_phase`/`mf_confidence`/`behavior_group` + `streak_inflow`/`streak_outflow`/`cum_net`/`margin_accel`/`north_cum`。
 
 ### B2. nextday 行附主力阶段
-- 同 B1,对 `passed_items`(或 top N)注入 `main_phase`/`flow_streak`。
-- **注意:** nextday 已经触网(tdx get_quote/补历史);主力阶段走轻量 DB 缓存,**不新增触网**。
+- 对 `nextday_strong_rank` 的 `passed_items`(或 top N)注入 `mf_phase`/`mf_confidence`/`streak_inflow`。
+- 复用 quality 的套路:`sm._behavior_batch(codes, 30)` 批量取 streak + `sm.main_force_phase(code, 30)` 取 phase。
+- **命名与 quality 完全一致**(`mf_phase`/`mf_confidence`/`streak_inflow`),保证跨清单字段可对齐。
+- 时间预算:复用 `_enrich_main_behavior` 的 20s 预算 + finshare 熔断语义(不阻塞 nextday 响应)。缺失 → None。
+- **不新增触网**:nextday 已触网(tdx get_quote/补历史),主力阶段走 DB 只读 + 30s 缓存。
 
-### B3. smart_money 行附 quality 分位
-- `top_by_amount`/`today_list` 行附 `quality_pct`:对行内 codes,查 quality 共振分位(复用已算的 resonance rank-pct)。
-- **实现约束:** 不重跑 buffett。若 quality 结果已缓存(进程内 30s/5min),直接从缓存取;否则诚实 None(标注,不进排序)。
-- 具体取值源在 writing-plans 时定(倾向复用 quality_rank 的 resonance 分位字典,或标记"见优质筛选")。
+### B3. smart_money 行附 quality pct(**唯一新架构点**)
+- `top_by_amount`/`today_list` 行附 `quality_pct`:该股在 quality 共振清单中的分位(0-1,越大越靠前)。
+- **循环依赖处理(关键)**:quality(backtest)已 lazy-import `screener.smart_money`;smart_money 不能顶层 import backtest.quality。
+  - 做法:`quality_rank` 产出后在模块级 `_INDEX` 刷新一张 `code→res_pct` 只读索引(随 `_RESULT_CACHE` 写入,不进返回值避免序列化);smart_money 提供 `_attach_quality_pct(rows)`,内部 **lazy import** `backtest.quality` 读该索引,读不到 → None。
+  - `res_pct` 用精排池 `_to_pct` 后的 resonance 分位(与 `_final` 里的 rp 同源),保证与 quality 排序一致。
+- **不重跑 buffett**:仅读已缓存索引。索引空 → None(标注,不进排序)。
 
 ## 五、失败/降级语义
 
@@ -81,10 +82,10 @@ quality↔nextday 两端的**完整评分互不嵌入**。需要时用"见对端
 
 ## 六、测试
 
-- `tests/test_nextday.py`:新增 → sector_heat/policy_hit 已附 + main_phase/flow_streak 已附(纯 mock db,不触网)。
-- `tests/test_quality.py`:新增 → main 行含 main_phase/flow_streak,None 时不崩。
-- `tests/test_smart_money.py`:新增 → top_by_amount/today_list 行含 quality_pct,无源 None。
-- 全 mock `db.query_rows`/`main_force_phase`/`_behavior_batch`/`_board_members_batch`,不依赖网络。
+- `tests/test_nextday.py`:新增 → `passed_items` 含 `sector_heat`/`policy_hit`(A)+ `mf_phase`/`streak_inflow`(B2);缺历史/缺主力记录 → None 不崩(纯 mock db,不触网)。
+- `tests/test_quality.py`:新增 → `quality_rank` 产 `_INDEX`(code→res_pct),含 main 里 code,取值与排序一致。
+- `tests/test_smart_money.py`:新增 → `top_by_amount`/`today_list` 行含 `quality_pct`;索引空 → None(不重跑 buffett,mock `_attach_quality_pct` 或索引)。
+- 全 mock `db.query_rows`/`main_force_phase`/`_behavior_batch`/`_board_members_batch`/quality 索引,不依赖网络。
 
 ## 七、合规红线(全程保持)
 
