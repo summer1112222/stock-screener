@@ -912,3 +912,34 @@ def test_nextday_radar_low_liq_no_boost(monkeypatch):
     assert it["radar_data_source"] == "low_liq"
     # low_liq 视同无数据：in/out 不取值
     assert it["radar_resonance_in"] is None
+
+
+def test_nextday_passed_annotates_sector_heat(monkeypatch):
+    """A: nextday passed_items 附 sector_heat/policy_hit(纯 mock,不触网)。"""
+    _setup(monkeypatch)
+    _base = _mock_qr
+    def _qr(table, **kw):
+        if table == "industry_board":
+            return [{"name": "半导体", "up_count": 60, "down_count": 40},
+                    {"name": "电池", "up_count": 30, "down_count": 70}]
+        return _base(table, **kw)
+    monkeypatch.setattr(nd.db, "query_rows", _qr)
+    # 让已通过的 600001 只属"半导体"(命中政策),并从电池撤下 —— 保证有 passed item 带 policy_hit>0
+    def _bm(names):
+        out = {}
+        for n in names:
+            if n == "半导体":
+                out[n] = ["600001", "600010", "600011"]   # 2 涨停,step5 板助攻仍过
+            elif n == "电池":
+                out[n] = ["600010", "600011"]
+            else:
+                out[n] = _BOARD_MEMBERS.get(n, [])
+        return out
+    monkeypatch.setattr(nd, "_board_members_batch", _bm)
+    r = nd.nextday_strong_rank(limit=10)
+    passed = r.get("passed_items", [])
+    assert passed, "应至少 1 只通过"
+    for it in passed:
+        assert "sector_heat" in it and "policy_hit" in it  # 字段存在
+    hit = next((x for x in passed if (x.get("policy_hit") or 0) > 0), None)
+    assert hit is not None, "半导体成员应命中政策→policy_hit>0"

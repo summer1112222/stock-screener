@@ -26,6 +26,7 @@ import numpy as np
 from data import db
 from data import pytdx_client
 from screener.indicators import ma_alignment
+from screener import sector_heat as _sh
 
 # 雷达共振触发原语（Task 1 产出，spec 2026-09-16）：模块级导入以便测试 monkeypatch；
 # 导入失败（smart_money 缺失）时降级为 None，boost 块跳过不崩。
@@ -1078,6 +1079,23 @@ def nextday_strong_rank(universe: str = "stock",
     )]
     passed_items.sort(key=lambda x: (x["score"], x["hard_pass"]), reverse=True)
     base["passed_items"] = passed_items[:max(0, limit)]
+
+    # A: 行业景气/政策命中 穿透标注(仅 passed_items,只读上下文,不改排序)
+    if base["passed_items"]:
+        _ff, _br, _mm = [], [], {}
+        try:
+            _ff = db.query_rows("sector_fund_flow",
+                                where="sector_type='行业' AND indicator='今日'",
+                                order_by="", limit=0)
+            _br = db.query_rows("industry_board", order_by="", limit=0)
+            _ff_names = {str(r.get("name")) for r in _ff if r.get("name")}
+            _scored = [str(r.get("name")) for r in _br
+                       if r.get("name") and str(r.get("name")) in _ff_names]
+            _mm = {b: set(c) for b, c in _board_members_batch(_scored).items()}
+        except Exception:
+            _ff, _br, _mm = [], [], {}
+        _sh.attach_sector_heat(base["passed_items"], _ff, _br, _mm)
+
     diagnostic_items = sorted(
         items,
         key=lambda x: (x["hard_pass"], x["score"], x["score_coverage"],
