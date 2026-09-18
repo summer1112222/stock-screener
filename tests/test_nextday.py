@@ -943,3 +943,17 @@ def test_nextday_passed_annotates_sector_heat(monkeypatch):
         assert "sector_heat" in it and "policy_hit" in it  # 字段存在
     hit = next((x for x in passed if (x.get("policy_hit") or 0) > 0), None)
     assert hit is not None, "半导体成员应命中政策→policy_hit>0"
+
+
+def test_nextday_passed_annotates_main_phase(monkeypatch):
+    """B2: nextday passed_items 附 mf_phase/streak_inflow(复用 quality 富集)。"""
+    _setup(monkeypatch)                      # 复用全套 mock(不触网)
+    import backtest.quality as q
+    monkeypatch.setattr(q, "_enrich_main_behavior",
+                        lambda m, u, days: [{**it, "mf_phase": "吸筹",
+                                             "streak_inflow": 5} for it in m])
+    r = nd.nextday_strong_rank(limit=10)
+    passed = r.get("passed_items", [])
+    assert passed
+    assert passed[0].get("mf_phase") == "吸筹"
+    assert passed[0].get("streak_inflow") == 5

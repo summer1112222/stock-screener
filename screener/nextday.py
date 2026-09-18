@@ -1096,6 +1096,16 @@ def nextday_strong_rank(universe: str = "stock",
             _ff, _br, _mm = [], [], {}
         _sh.attach_sector_heat(base["passed_items"], _ff, _br, _mm)
 
+    # B2: 主力阶段/资金连续性 穿透标注(复用 quality._enrich_main_behavior,
+    #     lazy import 避循环依赖;universe!=stock 时函数内直接返回原行)
+    if base["passed_items"] and universe == "stock":
+        try:
+            from backtest import quality as _q
+            base["passed_items"] = _q._enrich_main_behavior(
+                base["passed_items"], universe, days=days)
+        except Exception:
+            pass  # 富集失败→字段 None(诚实缺失)
+
     diagnostic_items = sorted(
         items,
         key=lambda x: (x["hard_pass"], x["score"], x["score_coverage"],
