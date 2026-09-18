@@ -668,3 +668,20 @@ def test_finshare_success_resets_fail_count(monkeypatch):
     smq._note_fs_fetch(True)
     assert smq._FS_FAILS == 0
     assert not smq._finshare_blocked()
+
+
+def test_attach_quality_pct(monkeypatch):
+    """B3: top_by_amount 行附 quality_pct;索引空→None(不重跑 buffett)。"""
+    from screener import smart_money as sm
+    import data.db as db
+    import backtest.quality as q
+    rows = [{"code": "a", "name": "甲", "market": "sh", "amount": 1e7, "count": 1},
+            {"code": "z", "name": "乙", "market": "sz", "amount": 2e7, "count": 1}]
+    monkeypatch.setattr(db, "query_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(sm, "_attach_intensity", lambda p: p)
+    monkeypatch.setattr(sm, "_sector_ctx", lambda p: p)
+    monkeypatch.setattr(q, "_RES_PCT_INDEX", {"a": 0.9})
+    out = sm.top_by_amount(days=5)
+    merged = {x["code"]: x for x in out["rows"]}
+    assert merged["a"].get("quality_pct") == 0.9
+    assert merged["z"].get("quality_pct") is None

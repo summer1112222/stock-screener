@@ -62,6 +62,7 @@ def today_list(date: str | None = None, channel: str | None = None,
                          order_by="amount DESC", limit=limit)
     _attach_intensity(rows)   # O1: 主力净额/当日成交额 强度归一化
     _sector_ctx(rows)          # 行业景气/政策命中 只读上下文标注(不改主排序)
+    _attach_quality_pct(rows)  # B3: quality 共振分位穿透标注(不改主排序)
     return {"rows": rows, "total": len(rows), "date": date}
 
 
@@ -149,6 +150,27 @@ def _sector_ctx(rows: list, fund_flow: list | None = None,
     _sh.attach_sector_heat(rows, fund_flow, board_rows, member_map)
 
 
+# B3 穿透: 读 quality 的共振分位索引,给主力清单附 quality_pct(上下文标注)。
+# lazy import backtest.quality 避循环依赖(quality 已 lazy import screener.smart_money)。
+_quality_index: dict[str, float] = {}
+
+
+def _attach_quality_pct(rows: list[dict]) -> list[dict]:
+    """给行附 quality_pct(该股在 quality 共振清单的分位)。索引空→None。"""
+    global _quality_index
+    if not rows:
+        return rows
+    try:
+        from backtest import quality as _q
+        _quality_index = dict(getattr(_q, "_RES_PCT_INDEX", {}))
+    except Exception:
+        _quality_index = {}
+    for r in rows:
+        c = str(r.get("code") or "")
+        r["quality_pct"] = _quality_index.get(c) if c else None
+    return rows
+
+
 def top_by_amount(days: int = 5, market: str | None = None,
                   channel: str | None = None, limit: int = 30) -> dict:
     """用法 C：按 N 日累计主力净额排序的观察池（group by code 降序）。
@@ -181,6 +203,7 @@ def top_by_amount(days: int = 5, market: str | None = None,
         p["count"] = int(cnt) if cnt is not None else 0
     _attach_intensity(pool)
     _sector_ctx(pool)          # 行业景气/政策命中 只读上下文标注(不改主排序)
+    _attach_quality_pct(pool)  # B3: quality 共振分位穿透标注(不改主排序)
     return {"rows": pool, "total": len(pool)}
 
 

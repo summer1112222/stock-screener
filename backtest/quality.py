@@ -23,6 +23,9 @@ _CAND_DISCLAIMER = ("多口径共振机械排序观察清单，非荐股非买�
 # 结果级缓存(5min TTL)：quality_rank 计算重(历史+buffett+signals)，避免短时重复重算
 _RESULT_CACHE: dict = {}
 _RESULT_TTL = 300.0  # 秒
+# B3 穿透: code → 共振横截分位(供 smart_money 清单作 quality 上下文标注,
+#   只读不进排序;不重跑 buffett)。universe==stock 且 main 非空时刷新。
+_RES_PCT_INDEX: dict[str, float] = {}
 # 共振默认经验权重(因子有效性先验,非 IC 校准,可被 weights/resonance_mode 覆盖)：
 # 口径2 价值质量/5 景气(高持久) > 口径1 风险调整 > 口径4 多信号 > 口径3 资金流(最噪声)。
 # 加权均值不要求和归一(wsum/wtot 已处理)。
@@ -1292,5 +1295,16 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
               "excluded_summary": excluded_summary,
               "source_health": {str(d): dim_status.get(str(d), "") for d in (1, 2, 3, 4, 5)},
               "cand_disclaimer": _CAND_DISCLAIMER, "error": None}
+    if universe == "stock" and main:
+        try:
+            _rs = pd.Series({str(it.get("code")): _to_float(it.get("resonance")) or 0.0
+                             for it in main if it.get("code")})
+            _rp = _to_pct(_rs).to_dict() if not _rs.empty else {}
+            _RES_PCT_INDEX.clear()
+            _RES_PCT_INDEX.update({str(c): float(v) for c, v in _rp.items()})
+        except Exception:
+            _RES_PCT_INDEX.clear()
+    else:
+        _RES_PCT_INDEX.clear()
     _RESULT_CACHE[_key] = (_now, result)
     return result

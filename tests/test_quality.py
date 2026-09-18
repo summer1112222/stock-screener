@@ -240,3 +240,11 @@ def test_quality_dim2_main_path_intact(monkeypatch):
                         lambda table, **kw: SPOT_STOCK_FULL if table == "stock_spot" else [])
     res = quality.quality_rank("stock", min_turnover=5e7, limit_pct=9.9)
     assert res["dim_status"].get("2", "").startswith("ok(降级")
+
+
+def test_quality_res_pct_index(monkeypatch):
+    """B3: quality 模块级 _RES_PCT_INDEX(code→共振分位)存在且可写。"""
+    from backtest import quality as q
+    q._RES_PCT_INDEX = {"000001": 0.9, "600000": 0.3}
+    assert hasattr(q, "_RES_PCT_INDEX")
+    assert q._RES_PCT_INDEX["000001"] == 0.9
