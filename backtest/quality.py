@@ -286,6 +286,14 @@ def _refine_by_quote(pool: list, df_spot, in_session: bool):
 # buffett(≤40s)+尾段(≤25s)+其他(≤20s)≈85s 内返回，先于客户端超时。
 _REFINE_TAIL_DEADLINE = 25.0
 
+# 网络尾段跳过的已耗预算阈值(秒)：_dim_scores 后若 buffett/DB 已耗超过它，直接跳过
+# 网络尾段(盘口+板块反查)，给尾段+组合+行为富集留出安全余量，把总耗时上界压稳(<120s)。
+_TAIL_SKIP_ELAPSED = 60.0
+
+# 尾线程在途开始时间戳(monotonic)。None=无尾线程在途。死网络窗口尾段超时后僵尸线程仍在
+# 后台占 pytdx 锁，此标记让后续调用不再重复 spawn 尾线程，堵死多请求各起僵尸线程叠加的窗口。
+_TAIL_INFLIGHT_TS: float | None = None
+
 
 def _refine_tail_body(pool, df, in_session, refine_pool, limit):
     """盘口精排 + 行业景气加成尾段(将被 daemon 线程线程中调用)。
@@ -322,9 +330,17 @@ def _run_refine_tail(pool, df, in_session, refine_pool, limit):
     死网络挂起(慢而不抛异常)也在此返回：超时返 None → 调用方保留未精排主清单并降级。
     尾段正常完成(含内部各步降级)返 (main, refine_status, quote_by_code)。
     超时后 daemon 线程继续在后台自担(pytdx _lock 可能一直被僵尸占着,后续请求 acquire
-    timeout=8 即降级,不影响主请求返回)。与 board_stocks._fetch_constituents_em_timed 同范式。"""
+    timeout=8 即降级,不影响主请求返回)。与 board_stocks._fetch_constituents_em_timed 同范式。
+    在途守卫：`_TAIL_INFLIGHT_TS` 有在途线程时不再重复 spawn——神经网络慢/死网络窗口
+    多请求各自起尾线程会叠加抢 pytdx 锁，此标记把并发尾线程压到 1，重复调用立即降级不叠加。"""
     import queue as _q
     import threading as _th
+    import time as _time
+    global _TAIL_INFLIGHT_TS
+    if _TAIL_INFLIGHT_TS is not None:
+        # 已有尾线程在途(正常并发或死网络僵尸)：不重复 spawn，调用方保留未精排主清单降级
+        return None
+    _TAIL_INFLIGHT_TS = _time.monotonic()
     q: "_q.Queue" = _q.Queue()
 
     def _run():
@@ -332,6 +348,9 @@ def _run_refine_tail(pool, df, in_session, refine_pool, limit):
             q.put(("ok", _refine_tail_body(pool, df, in_session, refine_pool, limit)))
         except Exception as e:  # noqa: BLE001
             q.put(("err", e))
+        finally:
+            global _TAIL_INFLIGHT_TS
+            _TAIL_INFLIGHT_TS = None  # 线程结束(正常或僵尸跑完)才允许下一个尾线程
 
     _th.Thread(target=_run, daemon=True).start()
     try:
@@ -1197,6 +1216,7 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
                     board_map.setdefault(str(m), nm)
         except Exception:
             pass
+    _t_enter = _time.monotonic()  # 供尾段预算检查:已耗超 _TAIL_SKIP_ELAPSED 则跳过网络尾段
     scores, dims_avail, dim_status = _dim_scores(df, universe, days, min_signals, close=close)
     eff_min_dims = min(min_dims, len(dims_avail)) if dims_avail else 0
     enriched, by_dim = [], {d: [] for d in (1, 2, 3, 4, 5)}
@@ -1299,24 +1319,29 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
         selection_status, selection_note = "ok", None
 
     # 盘口精排阶段（仅个股 + refine）
+    _t_now = _time.monotonic()
     if not refine:
         refine_status = "skip(refine=False)"
     elif universe != "stock":
         refine_status = "skip(ETF不精排)"
-    else:
+    elif not main:
         refine_status = "skip(无可精排候选)"  # stock+refine 但 main 空
-    quote_by_code = {}
-    if universe == "stock" and refine and main:
+    elif _t_now - _t_enter > _TAIL_SKIP_ELAPSED:
+        # buffett/DB 已耗超预算(如财报慢吞掉60s)→ 跳过网络尾段,保留未精排主清单,
+        # 给尾段+组合+行为富集留出安全余量,把总耗时上界压稳(<120s)而非逼近客户端超时
+        refine_status = "skip(已耗超预算,保留未精排清单)"
+    else:
+        quote_by_code = {}
         pool = main[:max(refine_pool, limit)]
-        # 网络尾段(盘口+板块反查)套 _REFINE_TAIL_DEADLINE 硬墙钟:死网络挂起也在此降级,
-        # 保证后端先于客户端 120s/150s 超时返回(根因见 _REFINE_TAIL_DEADLINE 注释)。
+        # 网络尾段(盘口+板块反查)套 _REFINE_TAIL_DEADLINE 硬墙钟 + _TAIL_INFLIGHT_TS 在途守卫:
+        # 死网络挂起/并发送到也在此快速降级,保证后端先于客户端 120s/150s 超时返回。
         _tail = _run_refine_tail(pool, df, in_session, refine_pool, limit)
         if _tail is not None:
             main, refine_status, quote_by_code = _tail
         else:
-            # 尾段超时:保留未精排主清单并诚实降级,后续 _apply_combo/_enrich 照常跑
+            # 尾段超时或已有尾线程在途:保留未精排主清单并诚实降级,后续 _apply_combo/_enrich 照常跑
             quote_by_code = {}
-            refine_status = "skip(网络尾段超时,保留未精排清单)"
+            refine_status = "skip(网络尾段超时/在途,保留未精排清单)"
 
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)

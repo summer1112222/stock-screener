@@ -360,3 +360,32 @@ def test_quality_rank_refine_tail_timeout_degrades():
     assert elapsed < 2.0
     assert "超时" in res["refine_status"]
     assert len(res["main"]) >= 1  # 保留未精排主清单(未精排仍有主清单)
+
+
+def test_run_refine_tail_inflight_guard_no_duplicate_spawn():
+    """死网络窗口：尾线程超时后僵尸仍在途 → 不重复 spawn，第 2 次调用立即返 None 降级，
+    杜绝多请求各起尾线程叠加抢 pytdx 锁。"""
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    quality._TAIL_INFLIGHT_TS = None  # 确保干净起点
+    df = pd.DataFrame([{"code": "000001"}])
+    pool = [{"code": "000001", "name": "A", "resonance": 1.0,
+             "hits": 2, "dim_scores": {}}]
+
+    slow_called = {"n": 0}
+
+    def slow_body(p, d, in_session, rp, lim):
+        slow_called["n"] += 1
+        time.sleep(5)  # 模拟死网络慢 → 第 1 次必超时,僵尸留占 _TAIL_INFLIGHT_TS
+        return p, "ok(盘中)", {}
+
+    try:
+        with patch("backtest.quality._REFINE_TAIL_DEADLINE", 0.3), \
+             patch("backtest.quality._refine_tail_body", side_effect=slow_body):
+            r1 = quality._run_refine_tail(pool, df, True, 3, 10)   # spawn + 超时 → None
+            assert r1 is None
+            r2 = quality._run_refine_tail(pool, df, True, 3, 10)   # 僵尸在途 → 不 spawn
+            assert r2 is None
+            assert slow_called["n"] == 1  # 只 spawn 了 1 个尾线程,未叠加
+    finally:
+        quality._TAIL_INFLIGHT_TS = None  # 清理僵尸标记,防污染其他测试

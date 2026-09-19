@@ -1574,7 +1574,10 @@ async function qsLoad(){
     qsRender();
     const _codes=(d.main||[]).map(x=>x.code).filter(Boolean);
     if(_codes.length) _fillPhaseColumn(_codes);   // 异步并发填阶段列,不 await(不阻塞,命中30s缓存秒回)
-  }catch(e){ document.getElementById('qsMsg').textContent='加载失败/超时(已重试1次仍败，buffett财报网络阻塞或未拉历史，稍后重试5分钟内缓存命中秒回): '+e; }
+  }catch(e){
+    const why=(e&&e.name==='AbortError')?'请求超时未返回':('后端错误: '+e);
+    document.getElementById('qsMsg').textContent='加载失败/超时(已重试1次仍败)。'+why+'。网络或财报接口阻塞可能导致计算超时，稍后重试，5分钟内已算结果会缓存秒回。';
+  }
   finally{ btn.disabled=false; }
 }
 function _qscmp(a,b,k,dir){
