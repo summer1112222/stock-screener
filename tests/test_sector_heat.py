@@ -109,3 +109,68 @@ def test_top_by_amount_annotates_sector(monkeypatch):
     merged = {x["code"]: x for x in out["rows"]}
     assert "sector_heat" in merged["a"] and merged["a"]["policy_hit"] == 0.05
     assert merged["z"]["sector_heat"] is None      # 无板块 → 诚实缺失
+
+
+def test_sector_ctx_members_timeout_degrades(monkeypatch):
+    """_sector_ctx 板块成分股反查套硬墙钟：_board_members_batch 慢/挂起时快速超时降级,
+    不阻塞主清单返回(根因:530 板块逐个 fetch_constituents 触网可挂 120s+,today_list 被拖到
+    116s 超时,主力动向筛不出最新数据)。超时后 sector_heat=None 诚实缺失,DB 数据仍秒回。"""
+    import time
+    from screener import smart_money as sm
+    from screener import nextday as nd
+
+    sm._SECTOR_MEMBERS_CACHE.clear()  # 干净起点
+    rows = [{"code": "a", "name": "甲", "amount": 1e7}]
+    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
+    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
+
+    slow = {"n": 0}
+
+    def slow_batch(scored):
+        slow["n"] += 1
+        time.sleep(5)  # 模拟慢网络/冷缓存下板块反查挂起
+        return {"先进制造": ["a"]}
+
+    try:
+        monkeypatch.setattr(sm, "_SECTOR_CTX_DEADLINE", 0.3)
+        monkeypatch.setattr(nd, "_board_members_batch", slow_batch)
+        t0 = time.monotonic()
+        sm._sector_ctx(rows, fund_flow=ff, board_rows=br)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0                 # 硬墙钟降级,不被 5s 挂起拖垮
+        assert rows[0]["sector_heat"] is None  # 超时 → 诚实缺失
+        assert slow["n"] == 1                # 只触发一次反查
+        # 空结果缓存:第二次直接复用空缓存秒回,不再花满 deadline 白等(死网络窗口不反复白等)
+        t1 = time.monotonic()
+        sm._sector_ctx(rows, fund_flow=ff, board_rows=br)
+        assert time.monotonic() - t1 < 0.5
+        assert slow["n"] == 1                # 未重复反查
+    finally:
+        sm._SECTOR_MEMBERS_CACHE.clear()     # 防泄漏污染其他测试
+
+
+def test_sector_ctx_members_success_cached(monkeypatch):
+    """板块反查成功结果缓存复用:第二次 _sector_ctx 直接命中缓存,不再重复触网反查。"""
+    import time
+    from screener import smart_money as sm
+    from screener import nextday as nd
+
+    sm._SECTOR_MEMBERS_CACHE.clear()
+    rows = [{"code": "a", "name": "甲", "amount": 1e7}]
+    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
+    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
+    calls = {"n": 0}
+
+    def fast_batch(scored):
+        calls["n"] += 1
+        return {"先进制造": ["a"]}
+
+    try:
+        monkeypatch.setattr(nd, "_board_members_batch", fast_batch)
+        sm._sector_ctx(rows, fund_flow=ff, board_rows=br)   # 首次: 反查并缓存
+        assert calls["n"] == 1
+        sm._sector_ctx(rows, fund_flow=ff, board_rows=br)   # 二次: 缓存命中
+        assert calls["n"] == 1                               # 未重复触网
+        assert rows[0]["sector_heat"] is not None
+    finally:
+        sm._SECTOR_MEMBERS_CACHE.clear()

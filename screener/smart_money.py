@@ -120,6 +120,60 @@ def _attach_intensity(rows: list[dict]) -> list[dict]:
     return rows
 
 
+# 板块成分股反查硬墙钟(秒)：_board_members_batch 对每个被评分板块逐个 fetch_constituents
+# 触网，慢网络/冷缓存下 530 板块可挂 120s+，外层 except 捕不住"慢而不抛"死网络挂起 →
+# today_list 被拖到 116s 超时,主力动向筛不出最新数据。套硬墙钟,超时返 {} → sector_heat=None
+# 诚实降级(DB 数据仍秒回)。成功结果缓存 TTL 复用,避免正常网络下每次重复反查 530 板块。
+_SECTOR_CTX_DEADLINE = 6.0
+_SECTOR_MEMBERS_TTL = 300.0
+# 超时/失败的空结果也缓存(短 TTL):死网络窗口内板块反查每次 6s 都完不成,若不缓存空结果
+# 则每次 today 请求都白等 6s。缓存空结果后,60s 内直接复用秒回,不再反复打慢网络。
+_SECTOR_MEMBERS_EMPTY_TTL = 60.0
+_SECTOR_MEMBERS_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def _sector_members_timed(scored: list[str]) -> dict:
+    """板块成分股反查(smart_money 侧),daemon 线程 + queue 硬墙钟(同 quality._run_refine_tail 范式)。
+
+    超时返 {} → 调用方 sector_heat=None 降级,不阻塞主清单返回;成功结果缓存 _SECTOR_MEMBERS_TTL,
+    超时/失败的空结果缓存 _SECTOR_MEMBERS_EMPTY_TTL(避免死网络窗口反复白等)。超时后 daemon
+    线程后台自担(僵尸占 pytdx 锁,后续 get_quote acquire timeout 即降级,不影响主请求)。
+    """
+    if not scored:
+        return {}
+    import time as _tm
+    import queue as _q
+    import threading as _th
+    from screener import nextday as _nd
+    key = tuple(scored)
+    now = _tm.monotonic()
+    hit = _SECTOR_MEMBERS_CACHE.get(key)
+    if hit:
+        _ttl = _SECTOR_MEMBERS_EMPTY_TTL if not hit[1] else _SECTOR_MEMBERS_TTL
+        if now - hit[0] < _ttl:
+            return hit[1]
+    q: "_q.Queue" = _q.Queue()
+
+    def _run():
+        try:
+            q.put(("ok", _nd._board_members_batch(list(scored))))
+        except Exception as e:  # noqa: BLE001
+            q.put(("err", e))
+
+    _th.Thread(target=_run, daemon=True).start()
+    try:
+        item = q.get(timeout=_SECTOR_CTX_DEADLINE)
+    except _q.Empty:
+        _SECTOR_MEMBERS_CACHE[key] = (_tm.monotonic(), {})  # 空结果短缓存,避免反复白等
+        return {}  # 超时:不反查,僵尸线程后台自担
+    if item[0] == "ok":
+        mm = item[1] or {}
+        _SECTOR_MEMBERS_CACHE[key] = (_tm.monotonic(), mm)
+        return mm
+    _SECTOR_MEMBERS_CACHE[key] = (_tm.monotonic(), {})
+    return {}
+
+
 def _sector_ctx(rows: list, fund_flow: list | None = None,
                 board_rows: list | None = None,
                 member_map: dict | None = None):
@@ -127,7 +181,8 @@ def _sector_ctx(rows: list, fund_flow: list | None = None,
 
     fund_flow/board_rows/member_map 为可注入依赖，供测试 mock；默认从 DB/nextday 取。
     反查只传"被评分板块"(sector_fund_flow行业今日 ∩ industry_board 名)，有界单次调用，
-    避免全板块 board_stocks 网络回退风暴。失败诚实不标（sector_heat=None）。
+    避免全板块 board_stocks 网络回退风暴；经 _sector_members_timed 套硬墙钟+缓存,
+    慢网络/大量板块下超时降级为 sector_heat=None(DB 数据仍秒回,不阻塞主清单)。失败诚实不标。
     """
     from screener import sector_heat as _sh
     if fund_flow is None:
@@ -137,14 +192,13 @@ def _sector_ctx(rows: list, fund_flow: list | None = None,
     if board_rows is None:
         board_rows = db.query_rows("industry_board", order_by="", limit=0) or []
     if member_map is None:
-        from screener import nextday as _nd
         member_map = {}
         try:
             ff_names = {str(r.get("name")) for r in fund_flow if r.get("name")}
             scored = [str(r.get("name")) for r in board_rows
                       if r.get("name") and str(r.get("name")) in ff_names]
             if scored:
-                member_map = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
+                member_map = {b: set(c) for b, c in _sector_members_timed(scored).items()}
         except Exception:
             member_map = {}
     _sh.attach_sector_heat(rows, fund_flow, board_rows, member_map)
