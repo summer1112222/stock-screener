@@ -19,6 +19,7 @@ step5 从 industry_board 成分表反查 code→board(同 daily_strong 套路)�
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -40,6 +41,11 @@ _TDX_ENRICH_K = 40  # TDX 实时/财务补全只覆盖前 N 名，避免全市�
 _HISTORY_FILL_K = 40  # TDX 自动补历史只覆盖涨幅靠前的小名单，避免阻塞全市场
 _CACHE: dict[tuple, tuple] = {}
 _CACHE_TTL = 30
+# A 段穿透标注：行业景气只需"被评分热点板块"成分股（有界,勿全板块扫——全量 ~500 行业
+# 板块逐个 THS 抓取曾致冷缓存 316s > 前端 120s AbortError,见 CLAUDE.md cross-list-annotate）。
+_SECTOR_CTX_K = 20          # 按资金净流入降序取前 N 个热点行业板块
+_BOARD_BATCH_TTL = 30       # 板块成分股降级抓取 TTL(与 _CACHE_TTL 对齐)
+_BOARD_BATCH_CACHE: dict[tuple, tuple] = {}  # (board,category) → (ts, rows)
 
 
 def _nan(v):
@@ -511,6 +517,44 @@ def _rank_tdx_blocks(block_members: dict[str, list[str]],
             for i, x in enumerate(rows)]
 
 
+def _scored_sector_names(fund_flow: list[dict], board_rows: list[dict],
+                         k: int = _SECTOR_CTX_K) -> list[str]:
+    """行业景气穿透标注的"被评分板块"：按资金净流入降序取热点前 k 且与
+    industry_board 有交集的板块名。有界单次调用（勿全板块扫,CLAUDE.md）。
+
+    全量行业板块(~500)逐个取成分股曾致冷缓存 316s 超前端 120s AbortError；
+    行业景气标注只对热点板块有意义,冷门板块 item 反正 heat 低,诚实 None 即可。
+    """
+    br_names = {str(r.get("name")) for r in (board_rows or []) if r.get("name")}
+    hot = [r for r in (fund_flow or [])
+           if r.get("name") and _to_f(r.get("main_net_inflow")) is not None]
+    hot.sort(key=lambda r: _to_f(r.get("main_net_inflow")), reverse=True)
+    out: list[str] = []
+    for r in hot[:k]:
+        n = str(r.get("name"))
+        if n in br_names:
+            out.append(n)
+    return out
+
+
+def _fetch_board_constituents_cached(board: str, category: str = "行业") -> list[dict]:
+    """带 TTL 缓存的板块成分股抓取（TDX 不可用的降级路径用）。
+
+    board_stocks 只有 name→code 映射缓存、成分股列表每次都真抓（THS/东财）。
+    nextday 曾对 ~500 个行业板块逐个降级抓取(531 次)累计 316s → 前端 120s
+    AbortError；此 helper 让 30s 窗口内同板块复用，配合 _scored_sector_names
+    裁剪热点前 K，彻底消除全板块重复抓取。
+    """
+    key = (board, category)
+    ent = _BOARD_BATCH_CACHE.get(key)
+    if ent and (time.time() - ent[0]) < _BOARD_BATCH_TTL:
+        return ent[1]
+    from data import board_stocks
+    rows = board_stocks.fetch_constituents(board, category) or []
+    _BOARD_BATCH_CACHE[key] = (time.time(), rows)
+    return rows
+
+
 def _board_members_batch(board_names: list[str], spot_by_code: dict | None = None) -> dict[str, list[str]]:
     """按需取得板块成分股，优先通达信板块文件，失败再用既有板块源。"""
     if not board_names:
@@ -540,7 +584,7 @@ def _board_members_batch(board_names: list[str], spot_by_code: dict | None = Non
             return out
         for board in missing:
             try:
-                rows = board_stocks.fetch_constituents(board, "行业") or []
+                rows = _fetch_board_constituents_cached(board, "行业") or []
                 members = [_code_key(row.get("code") or row.get("raw_code")) for row in rows]
                 out[str(board)] = list(dict.fromkeys(c for c in members if c))
             except Exception:
@@ -553,7 +597,7 @@ def _board_members_batch(board_names: list[str], spot_by_code: dict | None = Non
     out = {}
     for board in board_names:
         try:
-            rows = board_stocks.fetch_constituents(board, "行业") or []
+            rows = _fetch_board_constituents_cached(board, "行业") or []
             members = [_code_key(row.get("code") or row.get("raw_code")) for row in rows]
             out[str(board)] = list(dict.fromkeys(c for c in members if c))
         except Exception:
@@ -901,8 +945,9 @@ def nextday_strong_rank(universe: str = "stock",
     except Exception:
         quote_by_code = {}
     # 单股失败不影响其余股票；TDX 服务器偶发返回空/异常时保留已成功结果。
-    # 财务概要覆盖全部粗筛候选，确保候选池第 N 只也能有换手率/市值/PE。
-    for c in pure_quote_codes:
+    # 财务概要只覆盖前 _TDX_ENRICH_K 候选(get_finance_info 是逐股串行调用,
+    # 全候选 ~200 只曾 ~22s 拖慢冷缓存;批量 get_quote 仍覆盖全部候选单次取)。
+    for c in pure_codes_k:
         try:
             fin_by_code[c] = pytdx_client.get_finance_info(c) or {}
         except Exception:
@@ -1088,9 +1133,9 @@ def nextday_strong_rank(universe: str = "stock",
                                 where="sector_type='行业' AND indicator='今日'",
                                 order_by="", limit=0)
             _br = db.query_rows("industry_board", order_by="", limit=0)
-            _ff_names = {str(r.get("name")) for r in _ff if r.get("name")}
-            _scored = [str(r.get("name")) for r in _br
-                       if r.get("name") and str(r.get("name")) in _ff_names]
+            # 只取"被评分热点板块"(资金净流入前 _SECTOR_CTX_K ∩ industry_board),
+            # 勿全板块扫——全量 ~500 行业板块逐个取成分股曾超前端 120s AbortError。
+            _scored = _scored_sector_names(_ff, _br)
             _mm = {b: set(c) for b, c in _board_members_batch(_scored).items()}
         except Exception:
             _ff, _br, _mm = [], [], {}

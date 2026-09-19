@@ -957,3 +957,58 @@ def test_nextday_passed_annotates_main_phase(monkeypatch):
     assert passed
     assert passed[0].get("mf_phase") == "吸筹"
     assert passed[0].get("streak_inflow") == 5
+
+
+def test_scored_sector_names_limits_to_hot_top_k():
+    """A段穿透标注只取热点前 K(有界,勿全板块扫):全量行业板块传入应裁剪到前 K,
+    只保留与 industry_board 有交集的热点板块。"""
+    ff = [{"name": f"板块{i}", "main_net_inflow": float(1000 - i)}
+          for i in range(500)]          # 500 个行业资金流板块
+    br = [{"name": f"板块{i}"} for i in range(500)]
+    scored = nd._scored_sector_names(ff, br, k=20)
+    assert len(scored) == 20            # 不再全量 500
+    assert scored == [f"板块{i}" for i in range(20)]  # 按资金净流入降序前 20
+
+
+def test_board_members_batch_caches_constituents_fetch(monkeypatch):
+    """TDX 板块文件不可用时,_board_members_batch 降级逐板抓取应带 TTL 缓存:
+    同一板块两次独立调用只真抓一次(fetch_constituents 只计数 1)。"""
+    monkeypatch.setattr(nd.pytdx_client, "get_block_members",
+                        lambda category="all": {})   # TDX 不可用→逐板降级
+    import data.board_stocks as bs
+    calls: dict = {}
+
+    def _fake_fetch(board, category="行业"):
+        calls[board] = calls.get(board, 0) + 1
+        return [{"code": "sh600001", "raw_code": "600001"}]
+
+    monkeypatch.setattr(bs, "fetch_constituents", _fake_fetch)
+    c = getattr(nd, "_BOARD_BATCH_CACHE", None)
+    if c is not None:
+        c.clear()
+    nd._board_members_batch(["电池"])
+    nd._board_members_batch(["电池"])
+    assert calls.get("电池") == 1
+
+
+def test_finance_info_limited_to_tdx_enrich_k(monkeypatch):
+    """逐股 get_finance_info 只覆盖前 _TDX_ENRICH_K 候选,勿全候选(~200 只)逐股
+    串行调 pytdx 拖慢冷缓存(曾 ~200 次/22s,与 line 878 '财务概要仍限前 N' 注释矛盾)。"""
+    _setup(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(nd.pytdx_client, "get_finance_info",
+                        lambda c: calls.append(c) or {})
+    # 注入 60 只 spot(> _TDX_ENRICH_K=40),codes 限定不粗筛 → 全 60 只进精算名单
+    codes = [f"603{i:03d}" for i in range(60)]
+    spots = [dict(_SPOT[0], code=c, name=f"x{i}") for i, c in enumerate(codes)]
+    base_qr = _mock_qr
+
+    def qr(table, where=None, params=None, limit=0, **kw):
+        if table == "stock_spot":
+            return spots
+        return base_qr(table, where=where, params=params, limit=limit, **kw)
+
+    monkeypatch.setattr(nd.db, "query_rows", qr)
+    nd._CACHE.clear()
+    nd.nextday_strong_rank(universe="stock", codes=codes, limit=10, min_change_pct=0)
+    assert len(calls) <= nd._TDX_ENRICH_K
