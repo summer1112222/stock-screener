@@ -35,6 +35,9 @@ DEFAULT_PARAMS: dict[str, dict] = {
         "max_price": 50.0, "min_mv": 10.0, "max_mv": 200.0, "max_pe": 150.0,
         "exclude_st": True,
     },
+    "smart_money": {
+        "date": None, "channel": None, "market": None, "days": 7, "limit": 1000,
+    },
 }
 
 
@@ -62,6 +65,10 @@ def _meta_payload(module: str, item: dict) -> str:
     keep: dict = {}
     if module == "quality":
         for k in ("hits", "dim_scores", "confidence_level", "data_confidence"):
+            if k in item:
+                keep[k] = item.get(k)
+    elif module == "smart_money":
+        for k in ("quality_pct",):
             if k in item:
                 keep[k] = item.get(k)
     else:
@@ -96,7 +103,7 @@ def _insert_ignore(row: dict) -> int:
 
 def record_list(module: str, mode: str, date: str, items: list[dict]) -> int:
     """记录一批清单条目(同日同 mode 同 code 幂等)。返回写入行数。"""
-    if module not in {"quality", "nextday"}:
+    if module not in {"quality", "nextday", "smart_money"}:
         return 0
     if not date or not items:
         return 0
@@ -109,7 +116,8 @@ def record_list(module: str, mode: str, date: str, items: list[dict]) -> int:
         rows.append({
             "module": module, "mode": mode, "date": date, "code": code,
             "name": it.get("name"), "rank": rank,
-            "score": _to_f(it.get("score")) if module == "nextday" else _to_f(it.get("adjusted_resonance")),
+            "score": _to_f(it.get("score")) if module in ("nextday", "smart_money")
+                     else _to_f(it.get("adjusted_resonance")),
             "meta_json": _meta_payload(module, it),
             "ret_k1": None, "ret_k3": None, "ret_k5": None,
             "filled_ts": None, "ts": data[0],

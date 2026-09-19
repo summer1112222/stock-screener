@@ -4,6 +4,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
 from unittest.mock import patch
 
 from backtest import tracker
@@ -43,6 +44,41 @@ def test_is_default_params_quality():
     bad = dict(defaults); bad["limit"] = 99
     assert tracker.is_default_params("quality", bad) is False
     assert tracker.is_default_params("unknown", {}) is False
+
+
+def test_record_smart_money():
+    """B3 追踪：smart_money 应能 record，score=净额、meta_json 含 quality_pct。
+    按现有 mock 方式(同上 test_record_list_idempotent_same_code) patch _insert_ignore
+    捕获落库行，验证白名单/score 分支/meta 分支，不触网不污染真实 DB。"""
+    tracker.DEFAULT_PARAMS["smart_money"] = {
+        "date": None, "channel": None, "market": None, "days": 7, "limit": 1000,
+    }
+    calls = []
+    def _insert(row):
+        calls.append(row)
+        return 1
+    with patch("backtest.tracker._insert_ignore", side_effect=_insert):
+        n = tracker.record_list("smart_money", "today", "2026-09-18",
+                                [{"code": "600001", "name": "甲",
+                                  "score": 1.2e8, "quality_pct": 0.9}])
+    assert n >= 1
+    row = calls[0]
+    assert row["module"] == "smart_money" and row["mode"] == "today"
+    assert row["score"] == 1.2e8
+    assert json.loads(row["meta_json"]).get("quality_pct") == 0.9
+
+
+def test_smart_money_default_params():
+    """smart_money 默认参数判定：默认组合命中，改 limit 不命中。"""
+    tracker.DEFAULT_PARAMS["smart_money"] = {
+        "date": None, "channel": None, "market": None, "days": 7, "limit": 1000,
+    }
+    assert tracker.is_default_params(
+        "smart_money", {"date": None, "channel": None, "market": None,
+                        "days": 7, "limit": 1000})
+    assert not tracker.is_default_params(
+        "smart_money", {"date": None, "channel": None, "market": None,
+                        "days": 7, "limit": 50})
 
 
 def test_fill_returns_t_plus1_open_buy():
