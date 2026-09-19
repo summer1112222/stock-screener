@@ -16,16 +16,32 @@ import pandas as pd
 
 # 静态政策主题 → 命中板块名列表。从 gov.cn 政策要点人工维护，非实时抓取。
 # 预填 2026-09 六大主线（先进制造/电子信息/智能家居消费/基础研究算力/人形机器人/智能驾驶）。
+# 2026-09-20 校准：板块名对齐 `industry_board` 真实行业板块名（THS 行业分类）。
+#   原来混入了风格/概念名（"先进制造"/"智能驾驶"/"算力"/"CPO"/"人形机器人"/"减速器"/"传感器"等）——
+#   这些在 industry_board 里不存在，个股→板块反查 `_board_members_batch("行业")` 用 TDX 行业板块文件
+#   也查不到，导致 policy_hit 对这些个股永远 0。改用真实行业板块名，反查才能命中。
 POLICY_THEMES: dict[str, list[str]] = {
-    "先进制造": ["先进制造", "工业母机", "机器人", "高端装备"],
-    "电子信息": ["电子", "半导体", "消费电子", "面板"],
-    "智能家居消费": ["智能家居", "家用电器", "厨卫电器"],
-    "基础研究(算力/AI)": ["CPO", "算力", "AI应用", "光模块"],
-    "人形机器人": ["人形机器人", "减速器", "传感器"],
-    "智能驾驶": ["智能驾驶", "汽车零部件", "车联网"],
+    "先进制造": ["专用设备", "通用设备", "自动化设备", "机床工具", "工控设备", "工程机械", "机器人", "机械设备", "激光设备"],
+    "电子信息": ["电子", "半导体", "半导体材料", "半导体设备", "消费电子", "消费电子零部件及组装", "面板", "分立器件", "被动元件", "印制电路板", "光学元件", "光学光电子", "集成电路制造", "集成电路封测", "数字芯片设计", "模拟芯片设计"],
+    "智能家居消费": ["家用电器", "白色家电", "黑色家电", "厨卫电器", "厨房电器", "厨房小家电", "小家电", "清洁小家电", "家居用品", "定制家居", "卫浴电器"],
+    "基础研究(算力/AI)": ["通信设备", "通信网络设备及器件", "通信线缆及配套", "通信终端及配件", "计算机", "计算机设备", "软件开发", "垂直应用软件", "IT服务"],
+    "人形机器人": ["机器人", "电机", "自动化设备", "工控设备", "专用设备"],
+    "智能驾驶": ["汽车零部件", "汽车电子电气系统", "汽车", "乘用车", "电动乘用车", "商用车", "车身附件及饰件"],
 }
 # 把主题的板块名制成 flat 命中集，policy_hit 判"该板块名是否命中任一政策主题"
 _HIT_BOARDS: set[str] = {b for ls in POLICY_THEMES.values() for b in ls}
+
+
+def unmatched_themes(available_boards) -> dict[str, list[str]]:
+    """诊断：返回每个政策主题里配置了但 available_boards(数据源真实板块名)缺失的板块名。
+
+    供数据就绪后核对——缺失名经个股→板块反查(`_board_members_batch("行业")` 走行业板块)
+    命中不到，policy_hit 对其恒 0。喂全量 industry_board 板块名即可定位待补对齐项。
+    纯函数、不触网。
+    """
+    avail = {str(b) for b in (available_boards or set())}
+    return {t: [b for b in boards if b not in avail]
+            for t, boards in POLICY_THEMES.items()}
 
 
 def policy_hit(board: str) -> float:
@@ -95,11 +111,14 @@ def pick_board(code: str, member_map: dict[str, set[str]], heat: dict[str, float
 
 def attach_sector_heat(rows: list[dict], fund_flow: list[dict],
                        board_rows: list[dict], member_map: dict[str, set[str]]) -> None:
-    """原地给每行加 sector_heat(所属最优板块景气)与 policy_hit(政策加成)。
+    """原地给每行加 sector_heat(所属最优板块景气)、policy_hit(政策加成)与 policy_event(政策事件标注)。
 
-    rows 需含 code；无板块/无景气 → sector_heat=None, policy_hit=0.0，诚实缺失。"""
+    rows 需含 code；无板块/无景气 → sector_heat=None, policy_hit=0.0，诚实缺失。
+    policy_event 复用同一最优板块，为命中政策事件列表(无→[]，只标注不进排序)。"""
+    from screener import policy_events as _pe
     heat = board_heat(fund_flow, board_rows)
     for r in rows:
         board = pick_board(str(r.get("code") or ""), member_map, heat)
         r["sector_heat"] = heat.get(str(board)) if board else None
         r["policy_hit"] = policy_hit(str(board) if board else "")
+        r["policy_event"] = _pe.event_hit(str(board) if board else "")

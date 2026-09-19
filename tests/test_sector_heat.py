@@ -8,8 +8,11 @@ from screener import sector_heat as sh
 
 def test_policy_hit():
     b = sh.board_heat  # 触发模块 import
-    assert sh.policy_hit("先进制造") == 0.05
+    # 校准后 POLICY_THEMES 板块名对齐 industry_board 真实行业板块名(反查得到个股)
+    assert sh.policy_hit("机器人") == 0.05
+    assert sh.policy_hit("半导体") == 0.05
     assert sh.policy_hit("白酒") == 0.0
+    assert sh.policy_hit("智能驾驶") == 0.0   # 风格名已剔除(industry_board 无此行业板块)
     assert sh.policy_hit("") == 0.0
 
 
@@ -25,59 +28,71 @@ def test_rank_pct_order():
 def test_board_heat_weights():
     """0.6*资金分位 + 0.4*上涨宽度分位；width 用 up/(up+down)。"""
     ff = [
-        {"name": "先进制造", "main_net_inflow": 3e8},
+        {"name": "机器人", "main_net_inflow": 3e8},
         {"name": "白酒", "main_net_inflow": -1e8},
         {"name": "医药", "main_net_inflow": 1e8},
     ]
     br = [
-        {"name": "先进制造", "up_count": 60, "down_count": 40, "constituent_count": 100},
+        {"name": "机器人", "up_count": 60, "down_count": 40, "constituent_count": 100},
         {"name": "白酒", "up_count": 5, "down_count": 95, "constituent_count": 100},
         {"name": "医药", "up_count": 30, "down_count": 70, "constituent_count": 100},
     ]
     h = sh.board_heat(ff, br)
-    # 先进制造 资金最高(1.0)+宽度0.6=(1.0) → heat 最高；白酒最低
-    assert h["先进制造"] == max(h.values())
+    # 机器人 资金最高(1.0)+宽度0.6=(1.0) → heat 最高；白酒最低
+    assert h["机器人"] == max(h.values())
     assert h["白酒"] == min(h.values())
     for v in h.values():
         assert 0.0 <= v <= 1.0
 
 
 def test_pick_board_highest_heat():
-    mm = {"先进制造": {"a", "b"}, "医药": {"a"}}
-    heat = {"先进制造": 0.8, "医药": 0.4}
-    assert sh.pick_board("a", mm, heat) == "先进制造"  # 多命中取 heat 最高
+    mm = {"机器人": {"a", "b"}, "医药": {"a"}}
+    heat = {"机器人": 0.8, "医药": 0.4}
+    assert sh.pick_board("a", mm, heat) == "机器人"  # 多命中取 heat 最高
     assert sh.pick_board("c", mm, heat) is None
 
 
 def test_attach_sector_heat():
     """attach 原地加 sector_heat/policy_hit；未命中板块→sector_heat=None。"""
     rows = [{"code": "a"}, {"code": "c"}]
-    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
-    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
-    mm = {"先进制造": {"a"}}
+    ff = [{"name": "机器人", "main_net_inflow": 3e8}]
+    br = [{"name": "机器人", "up_count": 60, "down_count": 40}]
+    mm = {"机器人": {"a"}}
     sh.attach_sector_heat(rows, ff, br, mm)
     r0 = rows[0]
-    assert r0["policy_hit"] == 0.05            # 先进制造 命中政策
+    assert r0["policy_hit"] == 0.05            # 机器人 命中政策
     assert r0["sector_heat"] is not None and 0.0 <= r0["sector_heat"] <= 1.0
+    assert isinstance(r0.get("policy_event"), list)  # 顺带附事件催化标注(列表,可空)
     assert rows[1]["policy_hit"] == 0.0
     assert rows[1]["sector_heat"] is None      # 无板块 → None
+
+
+def test_unmatched_themes_reports_missing_boards():
+    """诊断函数：喂数据源真实行业板块名集合，报告主题里配置但缺失(反查不到个股)的板块名。"""
+    avail = {"机器人", "专用设备", "半导体"}
+    miss = sh.unmatched_themes(avail)
+    # 机器人/专用设备 在 avail → 先进制造 主题不报缺失；但"通用设备"等不在 → 报
+    assert "机器人" not in {x for v in miss.values() for x in v}
+    assert "通用设备" in miss.get("先进制造", [])
+    # 全命中 → 每主题缺失列表为空
+    assert all(not v for v in sh.unmatched_themes(set(sh._HIT_BOARDS)).values())
 
 
 def test_quality_refine_applies_sector_heat():
     """精排加成：res 打平时 heat/policy 破平(高景气+政策方列首)，item 附字段。"""
     from backtest import quality
     pool = [
-        {"code": "a", "resonance": 0.6},  # 先进制造(heat最高)+政策 → 应列首
+        {"code": "a", "resonance": 0.6},  # 机器人(heat最高)+政策 → 应列首
         {"code": "b", "resonance": 0.6},  # 白酒(heat最低)
         {"code": "c", "resonance": 0.0},  # 医药(heat中)
     ]
-    ff = [{"name": "先进制造", "main_net_inflow": 3e8},
+    ff = [{"name": "机器人", "main_net_inflow": 3e8},
           {"name": "白酒", "main_net_inflow": -1e8},
           {"name": "医药", "main_net_inflow": 1e8}]
-    br = [{"name": "先进制造", "up_count": 60, "down_count": 40},
+    br = [{"name": "机器人", "up_count": 60, "down_count": 40},
           {"name": "白酒", "up_count": 5, "down_count": 95},
           {"name": "医药", "up_count": 30, "down_count": 70}]
-    mm = {"先进制造": {"a"}, "白酒": {"b"}, "医药": {"c"}}
+    mm = {"机器人": {"a"}, "白酒": {"b"}, "医药": {"c"}}
     out = quality._apply_sector_heat(pool, ff, br, mm, in_session=True)
     assert out[0]["code"] == "a", f"景气+政策应列首: {[x['code'] for x in out]}"
     merged = {x["code"]: x for x in out}
@@ -96,9 +111,9 @@ def test_top_by_amount_annotates_sector(monkeypatch):
 
     rows = [{"code": "a", "name": "甲", "market": "sh", "amount": 1e7, "count": 1},
             {"code": "z", "name": "乙", "market": "sz", "amount": 2e7, "count": 1}]
-    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
-    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
-    mm = {"先进制造": {"a"}}
+    ff = [{"name": "机器人", "main_net_inflow": 3e8}]
+    br = [{"name": "机器人", "up_count": 60, "down_count": 40}]
+    mm = {"机器人": {"a"}}
 
     monkeypatch.setattr(db, "query_rows", lambda *a, **k: rows)
     monkeypatch.setattr(sm, "_attach_intensity", lambda p: p)
@@ -121,15 +136,15 @@ def test_sector_ctx_members_timeout_degrades(monkeypatch):
 
     sm._SECTOR_MEMBERS_CACHE.clear()  # 干净起点
     rows = [{"code": "a", "name": "甲", "amount": 1e7}]
-    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
-    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
+    ff = [{"name": "机器人", "main_net_inflow": 3e8}]
+    br = [{"name": "机器人", "up_count": 60, "down_count": 40}]
 
     slow = {"n": 0}
 
     def slow_batch(scored):
         slow["n"] += 1
         time.sleep(5)  # 模拟慢网络/冷缓存下板块反查挂起
-        return {"先进制造": ["a"]}
+        return {"机器人": ["a"]}
 
     try:
         monkeypatch.setattr(sm, "_SECTOR_CTX_DEADLINE", 0.3)
@@ -157,13 +172,13 @@ def test_sector_ctx_members_success_cached(monkeypatch):
 
     sm._SECTOR_MEMBERS_CACHE.clear()
     rows = [{"code": "a", "name": "甲", "amount": 1e7}]
-    ff = [{"name": "先进制造", "main_net_inflow": 3e8}]
-    br = [{"name": "先进制造", "up_count": 60, "down_count": 40}]
+    ff = [{"name": "机器人", "main_net_inflow": 3e8}]
+    br = [{"name": "机器人", "up_count": 60, "down_count": 40}]
     calls = {"n": 0}
 
     def fast_batch(scored):
         calls["n"] += 1
-        return {"先进制造": ["a"]}
+        return {"机器人": ["a"]}
 
     try:
         monkeypatch.setattr(nd, "_board_members_batch", fast_batch)
