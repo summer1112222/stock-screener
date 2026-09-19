@@ -814,6 +814,17 @@ def sm_today(date: str | None = Query(None),
              days: int = Query(7, ge=1, le=90),
              limit: int = Query(1000, ge=0, le=100000)):
     res = sm_query.today_list(date, channel, market, days=days, limit=limit)
+    # 默认参数组合 → 落库追踪样本(仅头部前20,机械记录,不改变响应)
+    try:
+        _sm_params = {"date": date, "channel": channel, "market": market,
+                      "days": days, "limit": limit}
+        if bt_tracker.is_default_params("smart_money", _sm_params) and res.get("rows"):
+            _heads = [{"code": r.get("code"), "name": r.get("name"),
+                       "score": r.get("amount"), "quality_pct": r.get("quality_pct")}
+                      for r in res["rows"][:20]]
+            bt_tracker.record_list("smart_money", "today", _track_date(), _heads)
+    except Exception:
+        pass
     return _wrap(res["rows"], {
         "total": res["total"], "date": res.get("date", date),
         "days": days, "limit": limit,
