@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """quality 盘口精排测试。mock pytdx_client.get_quote，不真连网。"""
 import datetime as dt
+import time
 from unittest.mock import patch
 
 import sys, os
@@ -324,3 +325,38 @@ def test_api_quality_passes_refine_params():
     assert r.status_code == 200
     assert captured.get("refine") is False
     assert captured.get("refine_pool") == 30
+
+
+def test_quality_rank_refine_tail_timeout_degrades():
+    """死网络：盘口+板块反查尾段阻塞超过 _REFINE_TAIL_DEADLINE → 保留未精排主清单并诚实降级，
+    保证后端在客户端 120s/150s 超时前必返回，而非让首请求干等网络挂起。"""
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    qr = {"stock_spot": _seed_spot_rows(), "industry_board": []}
+
+    def fake_query(table, **kw):
+        return qr.get(table, [])
+
+    # 模拟死网络：_refine_by_quote 阻塞远超 deadline(默认 25s)，永远不返回
+    def slow_refine(pool, df, in_session):
+        time.sleep(5)  # 比 patch 的 0.3s deadline 长得多 → 必触发超时分支
+        return pool, "ok(盘中)", {}
+
+    # 用 0.3s 的临时 deadline 让超时分支快速被验证(正常值 25s 见模块常量)
+    t0 = time.monotonic()
+    with patch("backtest.quality._REFINE_TAIL_DEADLINE", 0.3), \
+         patch("data.db.query_rows", side_effect=fake_query), \
+         patch("backtest.quality._refine_by_quote", side_effect=slow_refine), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", False), \
+         patch("screener.smart_money.top_by_amount", return_value={"rows": []}), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True):
+        res = quality.quality_rank(universe="stock", refine=True, refine_pool=3,
+                                   min_turnover=0, dim_thresh=0.0, min_dims=1)
+    elapsed = time.monotonic() - t0
+    # 远小于 slow_refine 的 5s 睡眠 → 证明被 deadline 拦下,未干等网络挂起
+    assert elapsed < 2.0
+    assert "超时" in res["refine_status"]
+    assert len(res["main"]) >= 1  # 保留未精排主清单(未精排仍有主清单)

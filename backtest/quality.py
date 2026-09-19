@@ -279,6 +279,70 @@ def _refine_by_quote(pool: list, df_spot, in_session: bool):
     return pool, status, {c: _quote_dict(c) for c in codes}
 
 
+# 网络尾段(盘口 get_quote + 板块成分股反查)硬墙钟超时(秒)。死网络上 pytdx 会逐个走完
+# 5 台服务器池(_TIMEOUT=8×5≈40s)、板块降级再逐板块走 THS(每页 requests timeout=15)，
+# 只靠 try/except 捕不住"慢而不报错"的挂起 → 冷缓存 quality_rank 总耗时能远超客户端
+# 120s/150s 双 abort。此 deadline 保证尾段超时即降级返回未精排主清单，后端必在
+# buffett(≤40s)+尾段(≤25s)+其他(≤20s)≈85s 内返回，先于客户端超时。
+_REFINE_TAIL_DEADLINE = 25.0
+
+
+def _refine_tail_body(pool, df, in_session, refine_pool, limit):
+    """盘口精排 + 行业景气加成尾段(将被 daemon 线程线程中调用)。
+    返回 (main, refine_status, quote_by_code)。各步失败诚实降级不崩。"""
+    pool, refine_status, quote_by_code = _refine_by_quote(
+        pool, df, in_session=in_session)
+    main = pool  # 精排池至少取 limit 只(limit>refine_pool 时不静默截断)
+
+    # 行业景气加成层(sector-heat)：资金+政策命中作排序上下文，不改共振签名。
+    # 反查只传"被评分板块"(sector_fund_flow行业今日 ∩ industry_board 名)，
+    # 有界单次调用，避免全板块 board_stocks 网络回退风暴。失败诚实降级。
+    try:
+        import data.db as _db
+        from screener import nextday as _nd
+        ff = _db.query_rows("sector_fund_flow",
+                            where="sector_type='行业' AND indicator='今日'",
+                            order_by="", limit=0) or []
+        br = _db.query_rows("industry_board", order_by="", limit=0) or []
+        ff_names = {str(r.get("name")) for r in ff if r.get("name")}
+        scored = [str(r.get("name")) for r in br
+                  if r.get("name") and str(r.get("name")) in ff_names]
+        mm = {}
+        if scored:
+            mm = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
+        pool = _apply_sector_heat(pool, ff, br, mm, in_session=in_session)
+        main = pool
+    except Exception:
+        pass  # 景气加成失败不影响既有精排结果(诚实降级)
+    return main, refine_status, quote_by_code
+
+
+def _run_refine_tail(pool, df, in_session, refine_pool, limit):
+    """在 daemon 线程跑尾段 + `_REFINE_TAIL_DEADLINE` 墙钟硬超时。
+    死网络挂起(慢而不抛异常)也在此返回：超时返 None → 调用方保留未精排主清单并降级。
+    尾段正常完成(含内部各步降级)返 (main, refine_status, quote_by_code)。
+    超时后 daemon 线程继续在后台自担(pytdx _lock 可能一直被僵尸占着,后续请求 acquire
+    timeout=8 即降级,不影响主请求返回)。与 board_stocks._fetch_constituents_em_timed 同范式。"""
+    import queue as _q
+    import threading as _th
+    q: "_q.Queue" = _q.Queue()
+
+    def _run():
+        try:
+            q.put(("ok", _refine_tail_body(pool, df, in_session, refine_pool, limit)))
+        except Exception as e:  # noqa: BLE001
+            q.put(("err", e))
+
+    _th.Thread(target=_run, daemon=True).start()
+    try:
+        kind, val = q.get(timeout=_REFINE_TAIL_DEADLINE)
+    except _q.Empty:
+        return None  # 尾段超时 → 调用方保留未精排清单,不在网络挂起上干等
+    if kind == "ok":
+        return val
+    return None  # 尾段内部整体异常 → 保留未精排清单(与既有"精排失败不改清单"一致)
+
+
 def _to_float(v):
     if v is None:
         return None
@@ -1244,30 +1308,15 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     quote_by_code = {}
     if universe == "stock" and refine and main:
         pool = main[:max(refine_pool, limit)]
-        pool, refine_status, quote_by_code = _refine_by_quote(
-            pool, df, in_session=in_session)
-        main = pool  # 精排池至少取 limit 只(limit>refine_pool 时不静默截断)
-
-        # 行业景气加成层(sector-heat)：资金+政策命中作排序上下文，不改共振签名。
-        # 反查只传"被评分板块"(sector_fund_flow行业今日 ∩ industry_board 名)，
-        # 有界单次调用，避免全板块 board_stocks 网络回退风暴。失败诚实降级。
-        try:
-            import data.db as _db
-            from screener import nextday as _nd
-            ff = _db.query_rows("sector_fund_flow",
-                                where="sector_type='行业' AND indicator='今日'",
-                                order_by="", limit=0) or []
-            br = _db.query_rows("industry_board", order_by="", limit=0) or []
-            ff_names = {str(r.get("name")) for r in ff if r.get("name")}
-            scored = [str(r.get("name")) for r in br
-                      if r.get("name") and str(r.get("name")) in ff_names]
-            mm = {}
-            if scored:
-                mm = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
-            pool = _apply_sector_heat(pool, ff, br, mm, in_session=in_session)
-            main = pool
-        except Exception:
-            pass  # 景气加成失败不影响既有精排结果(诚实降级)
+        # 网络尾段(盘口+板块反查)套 _REFINE_TAIL_DEADLINE 硬墙钟:死网络挂起也在此降级,
+        # 保证后端先于客户端 120s/150s 超时返回(根因见 _REFINE_TAIL_DEADLINE 注释)。
+        _tail = _run_refine_tail(pool, df, in_session, refine_pool, limit)
+        if _tail is not None:
+            main, refine_status, quote_by_code = _tail
+        else:
+            # 尾段超时:保留未精排主清单并诚实降级,后续 _apply_combo/_enrich 照常跑
+            quote_by_code = {}
+            refine_status = "skip(网络尾段超时,保留未精排清单)"
 
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)
