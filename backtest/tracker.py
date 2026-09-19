@@ -72,7 +72,9 @@ def _meta_payload(module: str, item: dict) -> str:
             if k in item:
                 keep[k] = item.get(k)
     else:
-        for k in ("factor_scores", "step_status", "hard_pass", "score_coverage"):
+        # nextday: 五因子分 + 穿透标注(供 diagnose_ranking 穿透分层用 sector_heat/policy_hit/mf_phase)
+        for k in ("factor_scores", "step_status", "hard_pass", "score_coverage",
+                  "sector_heat", "policy_hit", "mf_phase", "streak_inflow"):
             if k in item:
                 keep[k] = item.get(k)
     try:

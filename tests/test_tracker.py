@@ -68,6 +68,28 @@ def test_record_smart_money():
     assert json.loads(row["meta_json"]).get("quality_pct") == 0.9
 
 
+def test_record_nextday_persists_penetration_fields():
+    """nextday 追踪：meta_json 应保留穿透标注 sector_heat/policy_hit/mf_phase,
+    供 diagnose_ranking.penetration_layers 做穿透分层(终端审修复,2026-09-19)。"""
+    calls = []
+    def _insert(row):
+        calls.append(row)
+        return 1
+    with patch("backtest.tracker._insert_ignore", side_effect=_insert):
+        n = tracker.record_list(
+            "nextday", "strict", "2026-09-18",
+            [{"code": "600001", "name": "甲", "score": 0.9,
+              "factor_scores": {"mom_5_1": 0.9},
+              "sector_heat": 0.7, "policy_hit": True, "mf_phase": "拉升",
+              "streak_inflow": 3}])
+    assert n >= 1
+    meta = json.loads(calls[0]["meta_json"])
+    assert meta.get("sector_heat") == 0.7
+    assert meta.get("policy_hit") is True
+    assert meta.get("mf_phase") == "拉升"
+    assert meta.get("streak_inflow") == 3
+
+
 def test_smart_money_default_params():
     """smart_money 默认参数判定：默认组合命中，改 limit 不命中。"""
     tracker.DEFAULT_PARAMS["smart_money"] = {
