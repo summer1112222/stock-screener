@@ -362,6 +362,133 @@ def test_quality_rank_refine_tail_timeout_degrades():
     assert len(res["main"]) >= 1  # 保留未精排主清单(未精排仍有主清单)
 
 
+def _policy_boards():
+    """合成政策板块数据：industry_board 有半导体/银行，sector_fund_flow 给半导体高净流入。
+    让 000001(半导体, 政策主题) 与 000002(银行, 防御但非政策主题) 区分命中。"""
+    return {
+        "industry_board": [
+            {"name": "半导体", "up_count": 20, "down_count": 5},
+            {"name": "银行", "up_count": 8, "down_count": 12},
+        ],
+        "sector_fund_flow": [
+            {"name": "半导体", "main_net_inflow": 1e9},
+            {"name": "银行", "main_net_inflow": 1e7},
+        ],
+    }
+
+
+def _policy_member_map():
+    """member_map：半导体→000001, 银行→000002。"""
+    return {"半导体": {"000001"}, "银行": {"000002"}}
+
+
+def _policy_pool():
+    """显式 resonance 相等 → 排序由 policy 加成决定(否则并列无差异)。"""
+    return [
+        {"code": "000001", "name": "平A", "resonance": 20.0, "hits": 2, "dim_scores": {}},
+        {"code": "000002", "name": "万B", "resonance": 20.0, "hits": 2, "dim_scores": {}},
+    ]
+
+
+def test_apply_policy_bonus_sorts_by_policy():
+    """主路径重排函数：000001(半导体=政策主题) 与 000002(银行,非政策) resonance 相等时，
+    凭 policy_hit 加成排前；并附 policy_hit/style_hit/policy_event 字段。"""
+    import pandas as pd
+    pool = _policy_pool()
+    ff, br = _policy_boards()["sector_fund_flow"], _policy_boards()["industry_board"]
+    mm = _policy_member_map()
+    out = quality._apply_policy_bonus(list(pool), ff, br, mm, in_session=False,
+                                      style=None, as_of=None)
+    assert out[0]["code"] == "000001"  # 半导体政策主题 → policy_hit>0 → 排前
+    it = out[0]
+    assert (it.get("policy_hit") or 0.0) > 0.0
+    assert "style_hit" in it and "policy_event" in it
+    # 未命中板块的 000002 不因缺板块而崩(诚实 0 加成)
+    assert out[1]["code"] == "000002"
+
+
+def test_apply_policy_bonus_event_bonus_extra():
+    """命中政策事件(POLICY_EVENTS)的行 policy_event 非空(银行属 property_credit 地产链事件)，
+    无事件行(半导体非事件板块)为空；排序仍由 res_pct+policy 主导。"""
+    pool = _policy_pool()
+    ff, br = _policy_boards()["sector_fund_flow"], _policy_boards()["industry_board"]
+    mm = _policy_member_map()
+    out = quality._apply_policy_bonus(list(pool), ff, br, mm, in_session=False,
+                                      style=None, as_of="2026-09-01")
+    by_code = {it["code"]: it for it in out}
+    # 银行命中地产链事件 → policy_event 非空；半导体非事件板块 → 空
+    assert len(by_code["000002"].get("policy_event") or []) >= 1
+    assert (by_code["000001"].get("policy_event") or []) == []
+    # 000001 半导体政策主题凭 policy_hit 仍排前(res_pct 相等时 policy 决胜负)
+    assert out[0]["code"] == "000001"
+
+
+def test_quality_rank_refine_false_attaches_policy_fields():
+    """主清单路径(refine=False)也附政策字段——此前仅精排尾段有，refine=False 完全缺失。"""
+    import pandas as pd
+    quality._RESULT_CACHE.clear()
+    qr = _seed_spot_rows()
+    data = dict(_policy_boards())
+    data["stock_spot"] = qr
+
+    def fake_query(table, **kw):
+        return data.get(table, [])
+
+    with patch("data.db.query_rows", side_effect=fake_query), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", False), \
+         patch("screener.smart_money.top_by_amount", return_value={"rows": []}), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True), \
+         patch("backtest.quality._macro_style_ctx", return_value=(None, None)), \
+         patch("screener.nextday._board_members_batch", return_value=_policy_member_map()):
+        res = quality.quality_rank(universe="stock", refine=False,
+                                   min_turnover=0, dim_thresh=0.0, min_dims=1)
+    assert res["refine_status"] == "skip(refine=False)"
+    assert len(res["main"]) >= 1
+    # 主清单行附政策字段(此前仅精排尾段有)
+    for it in res["main"]:
+        assert "policy_hit" in it and "style_hit" in it and "policy_event" in it
+        assert isinstance(it["policy_event"], list)
+
+
+def test_quality_rank_refine_tail_timeout_keeps_policy_fields():
+    """尾段超时降级(保留未精排主清单)后，主路径政策加成仍生效附字段——
+    此前降级分支完全无政策排序。"""
+    import pandas as pd
+    import time as _t
+    quality._RESULT_CACHE.clear()
+    qr = _seed_spot_rows()
+    data = dict(_policy_boards())
+    data["stock_spot"] = qr
+
+    def fake_query(table, **kw):
+        return data.get(table, [])
+
+    def slow_refine(pool, df, in_session):
+        _t.sleep(5)  # 比 patch 的 0.3s deadline 长 → 必超时
+        return pool, "ok(盘中)", {}
+
+    with patch("backtest.quality._REFINE_TAIL_DEADLINE", 0.3), \
+         patch("backtest.quality._refine_by_quote", side_effect=slow_refine), \
+         patch("data.db.query_rows", side_effect=fake_query), \
+         patch("backtest.eval.load_panel", return_value=pd.DataFrame()), \
+         patch("backtest.buffett._AK_OK", False), \
+         patch("screener.smart_money.top_by_amount", return_value={"rows": []}), \
+         patch("backtest.signals.scan_signals", return_value={"rows": [], "error": "无历史"}), \
+         patch("backtest.signals.backtest_signals", return_value={"error": "无历史"}), \
+         patch("backtest.quality._is_in_session", return_value=True), \
+         patch("backtest.quality._macro_style_ctx", return_value=(None, None)), \
+         patch("screener.nextday._board_members_batch", return_value=_policy_member_map()):
+        res = quality.quality_rank(universe="stock", refine=True, refine_pool=3,
+                                   min_turnover=0, dim_thresh=0.0, min_dims=1)
+    assert "超时" in res["refine_status"]
+    assert len(res["main"]) >= 1
+    for it in res["main"]:
+        assert "policy_hit" in it and "style_hit" in it and "policy_event" in it
+
+
 def test_run_refine_tail_inflight_guard_no_duplicate_spawn():
     """死网络窗口：尾线程超时后僵尸仍在途 → 不重复 spawn，第 2 次调用立即返 None 降级，
     杜绝多请求各起尾线程叠加抢 pytdx 锁。"""

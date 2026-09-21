@@ -23,6 +23,37 @@ _CAND_DISCLAIMER = ("多口径共振机械排序观察清单，非荐股非买�
 # 结果级缓存(5min TTL)：quality_rank 计算重(历史+buffett+signals)，避免短时重复重算
 _RESULT_CACHE: dict = {}
 _RESULT_TTL = 300.0  # 秒
+# B3 事件催化权重并入精排排序的关键系数(2026-09-20)：
+#   event_weight 经风格×时效调制可能 >1(放大分支×1.5)，需缩放到与 policy_hit/style_hit
+#   (0.05/0.03 量级)可比才进 _final；无事件 → 0，现有排序完全不变(零破坏)。
+_EVENT_SORT_FACTOR = 0.02    # 命中事件 max(weight) × 此系数 → 排序加成
+_EVENT_SORT_CAP = 2.0        # 事件权重计入排序的上限(防超强单事件过度失真)
+# B1 宏观风格因子覆盖率门槛：macro_style 可用因子权重占比 < 此值(弱证据,如只剩 pe_pct)
+#   → 不以其风格塑造精排排序,退化为静态加成。防单因子独唱误导板块加成。
+_STYLE_MIN_COVERAGE = 0.5
+# 主路径新政加成(2026-09-21)硬墙钟：refine skip/超时降级分支也跑板块反查+政策加成，
+#   但死网络下同精排尾段套墙钟——超时返 None 保留原主清单，不拖垮主请求。
+_POLICY_DEADLINE = 20.0       # 秒
+_POLICY_INFLIGHT_TS = None    # 主路径新政尾段在途守卫(独立于精排尾段 _TAIL_INFLIGHT_TS)
+
+
+def _macro_style_ctx() -> tuple:
+    """宏观风格+时效锚：market_daily 最新行 → macro_style 状态机 → (style, as_of)。
+
+    market.latest() 空(市场温度表无数据)→ (None,None) 退化为静态加成,兼容旧行为；
+    coverage<阈值(可用因子权重占比不足)→ 弱证据风格不塑造排序,退化静态。不触网不崩。"""
+    style, as_of = None, None
+    try:
+        import data.market as _mk
+        from screener.macro_style import macro_style as _ms
+        _mkt = _mk.latest()
+        _st = _ms(_mkt) if _mkt else None
+        if _st and (_st.get("coverage") or 0.0) >= _STYLE_MIN_COVERAGE:
+            style, as_of = _st, (_mkt.get("date") if _mkt else None)
+    except Exception:
+        pass  # 宏观风格/时效取不到不影响既有加成
+    return style, as_of
+
 # B3 穿透: code → 共振横截分位(供 smart_money 清单作 quality 上下文标注,
 #   只读不进排序;不重跑 buffett)。universe==stock 且 main 非空时刷新。
 _RES_PCT_INDEX: dict[str, float] = {}
@@ -318,7 +349,13 @@ def _refine_tail_body(pool, df, in_session, refine_pool, limit):
         mm = {}
         if scored:
             mm = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
-        pool = _apply_sector_heat(pool, ff, br, mm, in_session=in_session)
+        # B2+B3 宏观风格调制：market_daily 最新行 → macro_style 状态机 →
+        #   动态调制板块政策/风格加成(B2)与事件催化权重(B3,以 market.date 作事件时效锚)。
+        #   market.latest() 空(市场温度表无数据)→ style/as_of=None 退化为静态加成,兼容旧行为。
+        #   coverage<阈值(可用因子权重占比不足,如只剩 pe_pct 单因子)→ 弱证据风格不塑造排序,退化为静态加成。
+        style, as_of = _macro_style_ctx()
+        pool = _apply_sector_heat(pool, ff, br, mm, in_session=in_session,
+                                  style=style, as_of=as_of)
         main = pool
     except Exception:
         pass  # 景气加成失败不影响既有精排结果(诚实降级)
@@ -391,17 +428,25 @@ def _to_pct(s: pd.Series) -> pd.Series:
 
 
 def _apply_sector_heat(pool: list, fund_flow: list, board_rows: list,
-                       member_map: dict, in_session: bool) -> list:
+                       member_map: dict, in_session: bool, style: dict | None = None,
+                       as_of: str | None = None) -> list:
     """行业景气加成重排(排序加成层，不改共振签名)。
 
-    final = 0.6*res_pct + 0.2*liq_pct + 0.2*heat_pct + policy   (盘中)
-          = 0.8*res_pct + 0.2*heat_pct + policy                 (盘后)
+    final = 0.6*res_pct + 0.2*liq_pct + 0.2*heat_pct + policy + style_hit + event_bonus  (盘中)
+          = 0.8*res_pct + 0.2*heat_pct + policy + style_hit + event_bonus               (盘后)
+    policy = attach_sector_heat 的动态政策加成(命中政策主题板块×风格调制)；
+    style_hit = 风格方向加成(进攻主线 attack / 防御板块 defense，见 sector_heat.policy_addon)；
+    event_bonus = 新政事件催化权重折算(该行命中事件 max(weight)×_EVENT_SORT_FACTOR 缩放)，
+      无事件 → 0，现有排序完全不变。
+    style(macro_style 返回 dict)缺省 → 退化为静态 policy_hit/0 风格加成，兼容旧行为。
+    as_of(market.date,YYYY-MM-DD)透传 policy_events B3 事件催化权重时效锚；缺省→事件仅风格调制。
     liq_pct 取 _refine_by_quote 已算的 quote.liquidity_pct(纯流动性 pool 分位)，
     绝不用 _refine_score —— 它含 0.6*res，当 liq 代理会重复计入 res(0.72res)。
     仅作排序上下文，不预测板块；成员反查失败板块 → 不加成。
     """
     from screener import sector_heat as _sh
-    _sh.attach_sector_heat(pool, fund_flow, board_rows, member_map)
+    _sh.attach_sector_heat(pool, fund_flow, board_rows, member_map,
+                           style=style, as_of=as_of)
     rs = pd.Series({str(i.get("code")): _to_float(i.get("resonance")) or 0.0 for i in pool})
     rp = _to_pct(rs).to_dict() if not rs.empty else {}
     hs = pd.Series({str(i.get("code")): _to_float(i.get("sector_heat")) or 0.0 for i in pool})
@@ -410,14 +455,108 @@ def _apply_sector_heat(pool: list, fund_flow: list, board_rows: list,
         c = str(i.get("code"))
         r = rp.get(c, 0.0)
         h = hp.get(c, 0.0)
-        p = _to_float(i.get("policy_hit")) or 0.0
+        p = (_to_float(i.get("policy_hit")) or 0.0) + (_to_float(i.get("style_hit")) or 0.0)
+        # B3 新政事件催化权重并入排序加成：取该行命中事件的 max(weight) 折算(小系数缩放)。
+        # 仅作排序上下文，不进持久字段(_final 临时键)；无事件 → 0，现有排序完全不变。
+        ev_bonus = 0.0
+        for e in (i.get("policy_event") or []):
+            w = _to_float(e.get("weight"))
+            if w is not None and w > ev_bonus:
+                ev_bonus = w
+        if ev_bonus > 0.0:
+            ev_bonus = min(ev_bonus, _EVENT_SORT_CAP) * _EVENT_SORT_FACTOR
         if in_session:
             liq = _to_float((i.get("quote") or {}).get("liquidity_pct")) or 0.0
-            i["_final"] = 0.6 * r + 0.2 * liq + 0.2 * h + p
+            i["_final"] = 0.6 * r + 0.2 * liq + 0.2 * h + p + ev_bonus
         else:
-            i["_final"] = 0.8 * r + 0.2 * h + p
+            i["_final"] = 0.8 * r + 0.2 * h + p + ev_bonus
     pool.sort(key=lambda x: x.get("_final") or 0.0, reverse=True)
     return pool
+
+
+def _apply_policy_bonus(pool: list, fund_flow: list, board_rows: list,
+                        member_map: dict, in_session: bool, style: dict | None = None,
+                        as_of: str | None = None) -> list:
+    """主清单路径新政加成重排(排序上下文，不改共振签名)。
+
+    与 _apply_sector_heat 同构但**不含流动性**(流动性是盘口精排专属，主路径无盘口)：
+      _final = res_pct + policy + style_hit + event_bonus   (盘中/盘后一致)
+    仅对"精排 skip/超时降级"分支调用——refine 成功时尾段 _apply_sector_heat 已含更强加成。
+    政策/风格/事件字段经 attach_sector_heat 原地附到每行；无政策证据 → 0 加成，现有排序不变。
+    纯函数不触网；板块反查结果由调用方传入。"""
+    from screener import sector_heat as _sh
+    _sh.attach_sector_heat(pool, fund_flow, board_rows, member_map,
+                           style=style, as_of=as_of)
+    rs = pd.Series({str(i.get("code")): _to_float(i.get("resonance")) or 0.0 for i in pool})
+    rp = _to_pct(rs).to_dict() if not rs.empty else {}
+    for i in pool:
+        c = str(i.get("code"))
+        r = rp.get(c, 0.0)
+        p = (_to_float(i.get("policy_hit")) or 0.0) + (_to_float(i.get("style_hit")) or 0.0)
+        ev_bonus = 0.0
+        for e in (i.get("policy_event") or []):
+            w = _to_float(e.get("weight"))
+            if w is not None and w > ev_bonus:
+                ev_bonus = w
+        if ev_bonus > 0.0:
+            ev_bonus = min(ev_bonus, _EVENT_SORT_CAP) * _EVENT_SORT_FACTOR
+        i["_final"] = r + p + ev_bonus
+    pool.sort(key=lambda x: x.get("_final") or 0.0, reverse=True)
+    return pool
+
+
+def _run_policy_bonus(main: list, in_session: bool, style: dict | None = None,
+                      as_of: str | None = None) -> list | None:
+    """主路径新政加成：读板块资金+反查个股板块 → _apply_policy_bonus 重排。
+
+    套 _POLICY_DEADLINE 硬墙钟(同精排尾段范式)：死网络挂起(慢而不抛异常)也在此快速降级
+    返 None → 调用方保留原主清单(诚实省略政策加成,不拖垮主请求)。
+    在途守卫 `_POLICY_INFLIGHT_TS` 独立于精排尾段——refine 尾段超时降级分支仍可起，
+    但多请求不叠加重复起尾线程。"""
+    import queue as _q
+    import threading as _th
+    import time as _time
+    global _POLICY_INFLIGHT_TS
+    if _POLICY_INFLIGHT_TS is not None:
+        return None  # 已有政策尾线程在途：不重复 spawn，保留原主清单降级
+    _POLICY_INFLIGHT_TS = _time.monotonic()
+    q: "_q.Queue" = _q.Queue()
+
+    def _body():
+        # 有界反查：只传 sector_fund_flow 行业今日 ∩ industry_board 名的被评分板块，
+        # 经 nextday._board_members_batch(带 30s TTL 缓存)反查个股所属板块。
+        import data.db as _db
+        from screener import nextday as _nd
+        ff = _db.query_rows("sector_fund_flow",
+                            where="sector_type='行业' AND indicator='今日'",
+                            order_by="", limit=0) or []
+        br = _db.query_rows("industry_board", order_by="", limit=0) or []
+        ff_names = {str(r.get("name")) for r in ff if r.get("name")}
+        scored = [str(r.get("name")) for r in br
+                  if r.get("name") and str(r.get("name")) in ff_names]
+        mm = {}
+        if scored:
+            mm = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
+        return _apply_policy_bonus(main, ff, br, mm, in_session=in_session,
+                                   style=style, as_of=as_of)
+
+    def _run():
+        try:
+            q.put(("ok", _body()))
+        except Exception as e:  # noqa: BLE001
+            q.put(("err", e))
+        finally:
+            global _POLICY_INFLIGHT_TS
+            _POLICY_INFLIGHT_TS = None  # 线程结束(正常或僵尸跑完)才允许下一个
+
+    _th.Thread(target=_run, daemon=True).start()
+    try:
+        kind, val = q.get(timeout=_POLICY_DEADLINE)
+    except _q.Empty:
+        return None  # 超时 → 保留原主清单
+    if kind == "ok":
+        return val
+    return None  # 内部整体异常 → 保留原主清单
 
 
 def _avg_rank_pct(factors: list, codes: list) -> pd.Series:
@@ -1342,6 +1481,16 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
             # 尾段超时或已有尾线程在途:保留未精排主清单并诚实降级,后续 _apply_combo/_enrich 照常跑
             quote_by_code = {}
             refine_status = "skip(网络尾段超时/在途,保留未精排清单)"
+
+    # 主清单路径新政加成(2026-09-21)：精排 skip/降级分支也附 policy/style/policy_event
+    #   并按其重排。refine 成功时尾段 _apply_sector_heat 已含更强加成(含流动性)，不重复；
+    #   仅当主清单"未精排"(refine=False / ETF 不精排 / 无可精排 / 超预算跳过 / 尾段超时)
+    #   才补跑，使这些分支的政策/事件字段与排序与其他路径一致。失败/超时保留原排序。
+    if universe == "stock" and main and not refine_status.startswith("ok"):
+        style, as_of = _macro_style_ctx()
+        _pb = _run_policy_bonus(main, in_session, style=style, as_of=as_of)
+        if _pb is not None:
+            main = _pb
 
     main = _apply_combo(main, universe, df, max_per_board, max_corr, limit,
                         combo_method=combo_method, close=close, board_map=board_map)

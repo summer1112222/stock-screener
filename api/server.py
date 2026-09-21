@@ -34,6 +34,7 @@ from backtest import (eval as bt_eval, engine as bt_engine, risk as bt_risk,
                       signals as bt_sig, buffett as bt_buf,
                       research as bt_research)
 from backtest import tracker as bt_tracker
+from screener.market_style import style_context as _style_context
 
 app = FastAPI(title="A股板块/ETF 筛选器(本地)")
 
@@ -56,6 +57,7 @@ def _startup_warm():
     时 deadline 内填部分 buffett 缓存(落盘7天)也优于无;之后用户首次开"优质筛选"
     tab 命中缓存秒开。spot 为空(首次部署)则 shortlist 空→no-op,下次 refresh 后补。"""
     _warm_quality_cache_background()
+    _backfill_lhb_recent_background()
 
 # 启动即建表，避免首次访问 /api/* (未经 /api/refresh) 时 "no such table" 500
 db.init_db()
@@ -385,6 +387,27 @@ def _warm_quality_cache_background():
     threading.Thread(target=_run, daemon=True, name="warm-quality").start()
 
 
+_lhb_lock = threading.Lock()
+
+
+def _backfill_lhb_recent_background():
+    """后台 daemon 补采龙虎榜 T+1 滞后缺口,不阻塞启动/refresh;已在跑则跳过。
+
+    龙虎榜 T+1 发布,当日 refresh 常采不到当日榜单→次日 max(date) 落后于最近
+    交易日;启动/refresh 后顺带补一次，把 max+1..最近交易日之间的缺失按交易日
+    逐日补采入库(幂等,无榜日空)。失败不抛崩(补采是锦上添花)。"""
+    if not _lhb_lock.acquire(blocking=False):
+        return  # 上次补采仍在跑,跳过避免叠加
+    def _run():
+        try:
+            smart_money.backfill_lhb_recent()
+        except Exception:
+            pass
+        finally:
+            _lhb_lock.release()
+    threading.Thread(target=_run, daemon=True, name="backfill-lhb").start()
+
+
 @app.api_route("/api/refresh", methods=["GET", "POST"])
 def refresh():
     """手动触发全量采集刷新。
@@ -393,6 +416,7 @@ def refresh():
     refresh 后后台预热 quality 缓存(不阻塞响应),使首次开"优质筛选"tab 秒开。
     """
     report = collector.refresh_all()
+    _backfill_lhb_recent_background()
     _warm_quality_cache_background()
     return _wrap(report)
 
@@ -828,7 +852,8 @@ def sm_today(date: str | None = Query(None),
     return _wrap(res["rows"], {
         "total": res["total"], "date": res.get("date", date),
         "days": days, "limit": limit,
-        "cand_disclaimer": SM_CAND_DISCLAIMER})
+        "cand_disclaimer": SM_CAND_DISCLAIMER,
+        "style_context": _style_context()})
 
 
 @app.get("/api/smart-money/radar")
@@ -988,7 +1013,8 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
     except Exception:
         pass
     return _wrap(res, {"cand_disclaimer": res.get("cand_disclaimer",
-                       "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。")})
+                       "多口径共振机械排序观察清单，非荐股非买卖信号，盈亏自负。"),
+                       "style_context": _style_context()})
 
 
 @app.get("/api/etf-screen")
@@ -1043,7 +1069,8 @@ def nextday_strong(universe: str = Query("stock"),
     except Exception:
         pass
     return _wrap(res, {"cand_disclaimer":
-                       "次日强势清单——5因子机械排序观察清单，非荐股非买卖信号，盈亏自负。"})
+                       "次日强势清单——5因子机械排序观察清单，非荐股非买卖信号，盈亏自负。",
+                       "style_context": _style_context()})
 
 
 @app.api_route("/api/track/fill", methods=["GET", "POST"])

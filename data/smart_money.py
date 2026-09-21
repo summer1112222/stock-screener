@@ -27,6 +27,7 @@ except Exception as e:  # pragma: no cover
     _AK_ERR = f"akshare 未安装或导入失败: {e}"
 
 from . import db, collector  # noqa: F401  (import collector 触发 _install_http_patch 全局 UA 保护)
+from data import calendar as cal  # 交易日/盘中判断(龙虎榜 T+1 补采)
 
 # 国家队关键字（查询层 by_actor("国家队") 展开为 LIKE 多名匹配）
 NATIONAL_TEAM = ["中国证券金融", "中央汇金", "全国社保基金",
@@ -1017,3 +1018,45 @@ def refresh_today(date: str | None = None,
         report["update_time"] = db.last_update_time()
         report["partial"] = True
     return report
+
+
+def backfill_lhb_recent(now: datetime | _date | None = None) -> dict:
+    """龙虎榜 T+1 滞后自动补采：若龙虎榜最新日期落后于最近交易日，逐交易日补采到最近。
+
+    龙虎榜数据 T+1 发布，当日 refresh 常采不到当日榜单，次日数据源更新后才齐。
+    本函数查龙虎榜 max(date)，落后于 cal.latest_trading_day(now) 时，从 max 后一个
+    交易日逐日 refresh_today(date=d, channels=['龙虎榜']) 补采到最近交易日。
+    幂等（upsert）；无榜/非交易日自然空不写库；单日失败不中断。返回
+    {filled_dates, rows, latest, target, skipped}。now 可注入便于测试。"""
+    if not _AK_OK:
+        return {"filled_dates": [], "rows": 0, "latest": None, "target": None,
+                "skipped": _AK_ERR}
+    if now is None:
+        now = datetime.now()
+    target = cal.latest_trading_day(now)
+    latest = None
+    try:
+        row = db.query_rows("smart_money_action", where="channel = ?",
+                            params=("龙虎榜",), order_by="date DESC", limit=1)
+        latest = row[0].get("date") if row else None
+    except Exception:
+        latest = None
+    if latest and latest >= target:
+        return {"filled_dates": [], "rows": 0, "latest": latest, "target": target,
+                "skipped": "龙虎榜已是最新"}
+    # 起点：latest 后一个交易日；无数据则从最近交易日补起
+    d = cal.next_trading_day(latest) if latest else target
+    filled = []
+    rows = 0
+    while d <= target:
+        try:
+            rep = refresh_today(date=d, channels=["龙虎榜"])
+            n = (rep.get("counts") or {}).get("龙虎榜", 0)
+            rows += n
+            if n:
+                filled.append(d)
+        except Exception:
+            pass   # 单日失败不中断，继续补后续交易日
+        d = cal.next_trading_day(d)
+    return {"filled_dates": filled, "rows": rows, "latest": latest,
+            "target": target, "skipped": None}

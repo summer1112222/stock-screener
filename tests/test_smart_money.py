@@ -685,3 +685,66 @@ def test_attach_quality_pct(monkeypatch):
     merged = {x["code"]: x for x in out["rows"]}
     assert merged["a"].get("quality_pct") == 0.9
     assert merged["z"].get("quality_pct") is None
+
+
+# ---------- 龙虎榜 T+1 滞后自动补采 ----------
+def _mock_cal(monkeypatch, latest: str, next_map: dict):
+    """mock data.calendar：latest_trading_day 定 target；next_trading_day 按映射步进。"""
+    monkeypatch.setattr(sm.cal, "latest_trading_day", lambda day: latest)
+    monkeypatch.setattr(sm.cal, "next_trading_day",
+                        lambda day: next_map.get(day, day))
+
+
+def test_backfill_lhb_recent_fills_missing_days(monkeypatch):
+    """龙虎榜滞后：latest(9-17)<target(9-18) → 逐交易日补采 9-18 一次，
+    调 refresh_today(date=9-18, channels=['龙虎榜'])。"""
+    _patch_ak(monkeypatch)
+    # 龙虎榜最新日期 = 9-17
+    monkeypatch.setattr(db, "query_rows",
+                        lambda table, **kw: [{"date": "2026-09-17"}]
+                        if table == "smart_money_action" else [])
+    _mock_cal(monkeypatch, latest="2026-09-18",
+              next_map={"2026-09-17": "2026-09-18",
+                        "2026-09-18": "2026-09-21"})
+    calls = []
+    monkeypatch.setattr(sm, "refresh_today", lambda **kw:
+                        calls.append(kw) or {"counts": {"龙虎榜": 58}, "channels": {}})
+    import datetime as _dt
+    res = sm.backfill_lhb_recent(now=_dt.date(2026, 9, 18))
+    assert [c.get("date") for c in calls] == ["2026-09-18"]
+    assert all(c.get("channels") == ["龙虎榜"] for c in calls)
+    assert res["filled_dates"] == ["2026-09-18"]
+    assert res["rows"] == 58
+
+
+def test_backfill_lhb_recent_noop_when_latest(monkeypatch):
+    """已是最新：latest==target → no-op，refresh_today 不被调。"""
+    _patch_ak(monkeypatch)
+    monkeypatch.setattr(db, "query_rows",
+                        lambda table, **kw: [{"date": "2026-09-18"}]
+                        if table == "smart_money_action" else [])
+    _mock_cal(monkeypatch, latest="2026-09-18",
+              next_map={"2026-09-18": "2026-09-21"})
+    calls = []
+    monkeypatch.setattr(sm, "refresh_today", lambda **kw:
+                        calls.append(kw) or {"counts": {}})
+    import datetime as _dt
+    res = sm.backfill_lhb_recent(now=_dt.date(2026, 9, 18))
+    assert calls == []
+    assert res["filled_dates"] == []
+    assert res["skipped"]
+
+
+def test_backfill_lhb_recent_no_data_fills_target(monkeypatch):
+    """完全无龙虎榜数据(latest=None) → 补最近交易日 target 一次。"""
+    _patch_ak(monkeypatch)
+    monkeypatch.setattr(db, "query_rows", lambda table, **kw: [])
+    _mock_cal(monkeypatch, latest="2026-09-18",
+              next_map={"2026-09-18": "2026-09-21"})
+    calls = []
+    monkeypatch.setattr(sm, "refresh_today", lambda **kw:
+                        calls.append(kw) or {"counts": {"龙虎榜": 30}, "channels": {}})
+    import datetime as _dt
+    res = sm.backfill_lhb_recent(now=_dt.date(2026, 9, 19))
+    assert [c.get("date") for c in calls] == ["2026-09-18"]
+    assert res["filled_dates"] == ["2026-09-18"]
