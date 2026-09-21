@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS list_track (
 );
 
 CREATE INDEX IF NOT EXISTS idx_list_track_date ON list_track(date);
+CREATE INDEX IF NOT EXISTS idx_list_track_module_date ON list_track(module, mode, date);
 
 -- 市场温度日快照(一日一行,date 主键;供趋势 sparkline 与两融环比)
 -- 合规:只存公开市场状态事实(涨跌停/两融/估值),非择时信号。
