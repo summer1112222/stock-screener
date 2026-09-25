@@ -1357,11 +1357,11 @@ function smRender(){
       return _nullLast(a.net_intensity,b.net_intensity,true);
     });
     const shown=sr.slice(0,CAP);
-    const nbNote=(smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
-      ?"<span style='color:var(--muted);font-size:12px'>北向=盘后十大成交股口径(2024-08起实时已停披露)</span><br>":'';
+    const nbNote=(rows.some(x=>x.name==='北向总量')||smState.chip==='北向'||(smState.chip==='all'&&rows.some(x=>x.channel==='北向')))
+      ?"<span style='color:var(--muted);font-size:12px'>北向=盘后十大成交股 + 全市场当日净买(hist_em 实时)</span><br>":'';
     const cols=[['date','日期'],['code','代码'],['name','名称'],['market','市场'],['channel','通道'],['actor','席位/股东'],['action','动作'],['amount','净额'],['net_intensity','强度']];
     ths=cols.map(([k,h])=>`<th class="num" data-sk="${k}" style="cursor:pointer;user-select:none">${h}${fArrow(k)}</th>`).join('');
-    trs=shown.map(x=>{const ni=x.net_intensity;const niTxt=ni!=null?(ni*100).toFixed(2)+'%':'—';const niCol=ni==null?'var(--muted)':(ni>=0?'#16A34A':'#F59E0B');return `<tr class="clk" data-code="${x.code||''}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${x.name||''}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${_amtUnit(x.channel,x.amount)}</td><td class="num" style="color:${niCol}">${niTxt}</td></tr>`;}).join('');
+    trs=shown.map(x=>{const nb=x&&x.name==='北向总量';const ni=x.net_intensity;const niTxt=ni!=null?(ni*100).toFixed(2)+'%':'—';const niCol=ni==null?'var(--muted)':(ni>=0?'#16A34A':'#F59E0B');const rowBg=nb?'background:rgba(96,165,250,.10);border-left:3px solid #60A5FA;':'';const name=nb?(x.name||'')+' <span style="color:#60A5FA;font-size:11px;border:1px solid #60A5FA;border-radius:8px;padding:0 5px">全市场</span>':(x.name||'');return `<tr class="clk" data-code="${x.code||''}" style="${rowBg}"><td>${x.date||''}</td><td>${x.code||''}</td><td>${name}</td><td>${x.market||''}</td><td>${x.channel||''}</td><td>${x.actor||'—'}</td><td>${x.action||''}</td><td class="num">${_amtUnit(x.channel,x.amount)}</td><td class="num" style="color:${niCol}">${niTxt}</td></tr>`;}).join('');
     const sortLabel=smState.sortKey?(cols.find(c=>c[0]===smState.sortKey)?.[1]||smState.sortKey)+' '+SD:(fM==='amount'?'绝对净额 降序':'强度 降序(缺强度排最后)');
     note=nbNote+(rows.length>CAP?`<div class="skipped">前 ${CAP} 条(共 ${rows.length} 条)，排序:${sortLabel}，其余折叠防卡顿</div>`:`<div class="skipped">排序:${sortLabel}(共 ${rows.length} 条)</div>`)+'<div class="skipped">强度=主力净额/当日成交额(占当日成交比),操盘手跨市值可比维度,正绿负橙,机械归一化非买卖信号</div>';
   }
