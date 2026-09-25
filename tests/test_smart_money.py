@@ -281,18 +281,21 @@ def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
         return pd.DataFrame()
     def _net_flow(symbol="北向"):
         return pd.DataFrame({"日期": ["2026-07-25"], "当日资金流入": [5e8]})
+    def _hist(symbol="北向"):
+        return pd.DataFrame({"日期": ["2026-07-25"], "当日成交净买额": [6e8]})
     _patch_ak(monkeypatch,
               stock_hsgt_individual_em=_boom,
               stock_hsgt_hold_stock_em=_boom,
               stock_hsgt_north_acc_flow_in=_acc_flow,
-              stock_hsgt_north_net_flow_in=_net_flow)
+              stock_hsgt_north_net_flow_in=_net_flow,
+              stock_hsgt_hist_em=_hist)
     monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
     recs, ok, err = sm.collect_northbound("2026-07-25")
     assert ok, err
-    assert len(recs) == 2
+    assert len(recs) == 3  # 2 个股上榜 + 1 全市场净买(hist_em)
     assert all(r["channel"] == "北向" for r in recs)
     assert all(r["actor"] == "北向资金" for r in recs)
-    assert all(r["action"] == "上榜" for r in recs)
+    assert all(r["action"] == "上榜" for r in recs if r["code"] is not None)
     r_sh = next(r for r in recs if r["code"] == "600519")
     assert r_sh["amount"] == 3.2e8
     assert r_sh["action"] == "上榜"
@@ -301,7 +304,11 @@ def test_northbound_fallback_acc_flow(monkeypatch, tmp_path):
     assert r_sz["amount"] == 1.1e8
     assert r_sz["action"] == "上榜"
     assert r_sz["actor"] == "北向资金"
-    assert sm.CHANNEL_STATUS["北向"]["source"] == "北向十大成交股(盘后)"
+    # 新: 全市场净买行(hist_em)共存——code=None, name=北向总量, 净买额 6e8
+    r_mkt = next(r for r in recs if r["code"] is None and r["name"] == "北向总量")
+    assert r_mkt["amount"] == 6e8
+    assert r_mkt["action"] == "净买入"
+    assert sm.CHANNEL_STATUS["北向"]["source"] == "北向十大成交股(盘后)+全市场净买(hist_em)"
 
 
 def test_northbound_degrade_to_total(monkeypatch, tmp_path):
@@ -318,7 +325,8 @@ def test_northbound_degrade_to_total(monkeypatch, tmp_path):
               stock_hsgt_individual_em=_boom,
               stock_hsgt_hold_stock_em=_boom,
               stock_hsgt_north_acc_flow_in=_acc_flow,
-              stock_hsgt_north_net_flow_in=_net_flow)
+              stock_hsgt_north_net_flow_in=_net_flow,
+              stock_hsgt_hist_em=_boom)
     monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
     recs, ok, err = sm.collect_northbound("2026-07-25")
     assert ok, err
@@ -327,6 +335,35 @@ def test_northbound_degrade_to_total(monkeypatch, tmp_path):
     assert recs[0]["action"] == "净买入"
     assert recs[0]["amount"] == 5e8
     assert sm.CHANNEL_STATUS["北向"]["source"] == "北向总额(盘后)"
+
+
+def test_northbound_market_total_only(monkeypatch, tmp_path):
+    """十大成交股空 + hist_em 全市场净买成功 → 独立产出 1 条市场级行。
+    验证 hist_em 不依赖个股上榜，备援2 空时也能给出全市场当日净买。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init_db()
+    def _boom(**kw):
+        raise RuntimeError("NoneType")
+    def _acc_flow(symbol="沪股通"):
+        return pd.DataFrame()
+    def _hist(symbol="北向"):
+        return pd.DataFrame({"日期": ["2026-07-25"], "当日成交净买额": [2.5e9]})
+    _patch_ak(monkeypatch,
+              stock_hsgt_individual_em=_boom,
+              stock_hsgt_hold_stock_em=_boom,
+              stock_hsgt_north_acc_flow_in=_acc_flow,
+              stock_hsgt_north_net_flow_in=_boom,
+              stock_hsgt_hist_em=_hist)
+    monkeypatch.setattr(db, "get_meta", lambda k, default="": "")
+    recs, ok, err = sm.collect_northbound("2026-07-25")
+    assert ok, err
+    assert len(recs) == 1
+    assert recs[0]["code"] is None
+    assert recs[0]["name"] == "北向总量"
+    assert recs[0]["actor"] == "北向资金"
+    assert recs[0]["action"] == "净买入"
+    assert recs[0]["amount"] == 2.5e9
+    assert sm.CHANNEL_STATUS["北向"]["source"] == "全市场净买(hist_em)"
 
 
 def _mock_other_channels(monkeypatch, ok=True):

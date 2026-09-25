@@ -475,6 +475,31 @@ def _nb_total_flow():
     return _to_float(df.iloc[-1].get(col_amt)) if len(df) else None
 
 
+def _nb_market_total(date: str) -> dict | None:
+    """akshare stock_hsgt_hist_em 全市场北向逐日净买 → 1 条市场级行。
+
+    数据实时(实测到当日前,2760 天历史)，独立于个股十大成交股。失败/空返 None
+    诚实降级——不阻断个股行(与 collect_northbound 降级链共存)。
+    code=None / name="北向总量"，today_list 按 amount DESC 天然排顶部。"""
+    if not _AK_OK:
+        return None
+    try:
+        df = ak.stock_hsgt_hist_em(symbol="北向")
+    except Exception:
+        return None
+    if df is None or df.empty:
+        return None
+    col = _first_col(df, ["当日成交净买额", "成交净买额", "净买额", "资金净流入"])
+    if not col:
+        return None
+    amt = _to_float(df.iloc[-1].get(col))
+    if amt is None:
+        return None
+    return _rec(date, None, "北向总量", "股票", "北向", "北向资金",
+                "净买入", amt,
+                raw={"source": "akshare hist_em 全市场逐日净买"})
+
+
 def collect_northbound(date: str) -> tuple[list[dict], bool, str]:
     """北向：主源(探活,已下线)→备援2 十大成交股(默认,盘后)→降级3 总额。
     2024-08 起实时端点 NoneType 崩，默认走盘后十大成交股；全失败走 stale(§4.2)。"""
@@ -494,11 +519,19 @@ def collect_northbound(date: str) -> tuple[list[dict], bool, str]:
             _set_status("北向", True, src, "")
             return recs, True, ""
     acc = _nb_acc_flow()
+    mrow = _nb_market_total(date)
+    recs = []
     if acc:
         recs = [_rec(date, code, name, "股票", "北向", "北向资金", "上榜", amt,
-                     raw={"source": "北向十大成交股(盘后)", "净额(元)": amt})
+                     raw={"source": "北向十大成交股(盘后)",
+                          "净额(元)": amt})
                 for code, name, amt in acc]
-        _set_status("北向", True, "北向十大成交股(盘后)", "")
+    if mrow:
+        recs.append(mrow)
+    if recs:
+        src = "+".join(p for p in ["北向十大成交股(盘后)" if acc else "",
+                                   "全市场净买(hist_em)" if mrow else ""] if p)
+        _set_status("北向", True, src, "")
         return recs, True, ""
     tot = _nb_total_flow()
     if tot is not None:

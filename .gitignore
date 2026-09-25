@@ -8,11 +8,13 @@ venv/
 .superpowers/sdd/
 
 *.stackdump
+*.log
 data/cache/
 
 # 会话工作流噪声（调试导出/计划残留，反复生成勿提交）
 q.json
 q20.json
+_tail_hex.txt
 findings.md
 progress.md
 task_plan.md
