@@ -117,3 +117,18 @@ def test_signal4_empty_close():
     amount = pd.DataFrame()
     out = qd.panel_diag_signal4(close, amount, ks=(5,))
     assert out is None or out == {}
+
+
+def test_render_report_includes_signal4():
+    panel = {
+        "momentum_20": {"by_k": {5: {"ic": {"ic": 0.02, "win_rate": 0.5},
+                                    "decile": {"long_short": {5: 0.1}}}},
+                        "decile": {"long_short": {5: 0.1}},
+                        "ic": {"ic": 0.02, "win_rate": 0.5}},
+        "hit_count": {"by_k": {5: {"ic": {"ic": 0.03, "win_rate": 0.6},
+                                   "decile": {"long_short": {5: 0.2}}}},
+                      "decile": {"long_short": {5: 0.2}},
+                      "ic": {"ic": 0.03, "win_rate": 0.6}},
+    }
+    report = qd.render_report(panel, None)
+    assert "口径4" in report and "hit_count" in report

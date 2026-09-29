@@ -185,18 +185,35 @@ def render_report(panel: dict, audit: dict | None) -> str:
     lines.append("| 因子 | k | IC | IC胜率 | Q5/Q1多空 | 单调性 |")
     lines.append("|---|---|---|---|---|---|")
     for fname, fout in panel.items():
+        if fname == "hit_count":
+            continue  # 口径4 单独成节
         for k, byk in fout["by_k"].items():
             ic = byk["ic"]
             ls = byk["decile"].get("long_short") or {}
             ls_val = list(ls.values())[-1] if ls else None
-            ic_txt = f"{ic['ic']:+.3f}" if ic["ic"] is not None else "—"
-            wr_txt = f"{ic['win_rate']:.0%}" if ic["win_rate"] is not None else "—"
+            ic_txt = f"{ic['ic']:+.3f}" if ic.get("ic") is not None else "—"
+            wr_txt = f"{ic['win_rate']:.0%}" if ic.get("win_rate") is not None else "—"
             ls_txt = f"{ls_val:.3f}" if ls_val is not None else "—"
             # 单调性: 各档累计净值的简单序列相关性(5档应近似单调)
             lines.append(f"| {fname} | {k} | {ic_txt} | {wr_txt} | {ls_txt} | — |")
+    if "hit_count" in panel:
+        lines.append("")
+        lines.append("## 二、口径4(多信号) 当日触发数 · Rank IC")
+        lines.append("")
+        lines.append("| 因子 | k | IC | IC胜率 | Q5/Q1多空 | 单调性 |")
+        lines.append("|---|---|---|---|---|---|")
+        fout = panel["hit_count"]
+        for k, byk in fout["by_k"].items():
+            ic = byk["ic"]
+            ls = byk["decile"].get("long_short") or {}
+            ls_val = list(ls.values())[-1] if ls else None
+            ic_txt = f"{ic['ic']:+.3f}" if ic.get("ic") is not None else "—"
+            wr_txt = f"{ic['win_rate']:.0%}" if ic.get("win_rate") is not None else "—"
+            ls_txt = f"{ls_val:.3f}" if ls_val is not None else "—"
+            lines.append(f"| hit_count | {k} | {ic_txt} | {wr_txt} | {ls_txt} | — |")
     lines.append("")
     if audit:
-        lines.append("## 二、当前 main 清单审计（快照补看，口径2/3/5 无历史）")
+        lines.append("## 三、当前 main 清单审计（快照补看，口径2/3/5 无历史）")
         lines.append("")
         lines.append(f"- 样本数: {audit['n']}")
         lines.append(f"- confidence_level 分布: {audit['confidence']}")
