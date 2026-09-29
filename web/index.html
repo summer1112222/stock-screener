@@ -1761,9 +1761,9 @@ document.getElementById('ndFilter').onchange=ndLoad;
 document.getElementById('ndMode').onchange=ndLoad;
 document.getElementById('ndCover').onchange=()=>{ const last=window._ndLastData; if(last) ndRender(last); };
 
-// ---------------- 每日强势(已合并到次日强势,保留兼容入口) ----------------
+// ---------------- 每日强势(已合并到次日强势,功能收敛) ----------------
 // 该功能已整合到 ndLoad()/ndRender() 中，通过 ndFilter='funnel' 触发每日漏斗参数。
-// dsLoad/dsRender 已退役，旧 daily-strong 路由仍保留兼容转调。
+// dsLoad/dsRender 已退役，旧 /api/daily-strong 路由连同 screener/daily_strong.py 已于 2026-09-30 移除。
 
 // ---------------- 个股深度分析卡 ----------------
 function _badge(v,ok='#16A34A'){return `<span style="color:${ok};font-size:12px">${v}</span>`;}

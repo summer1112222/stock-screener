@@ -1087,30 +1087,6 @@ def track_summary(module: str | None = Query(None), mode: str | None = Query(Non
     return _wrap(res, {"bt_disclaimer": "历史清单机械追踪统计,非预测,不构成投资建议,盈亏自负。"})
 
 
-@app.get("/api/daily-strong")
-def daily_strong(universe: str = Query("stock"),
-                 limit: int = Query(50, ge=1, le=200),
-                 days: int = Query(30, ge=5, le=120),
-                 min_change_pct: float = Query(5.0, ge=0.0, le=20.0),
-                 min_turnover: float = Query(3.0, ge=0.0, le=50.0),
-                 max_price: float = Query(50.0, ge=1.0, le=500.0),
-                 min_mv: float = Query(10.0, ge=0.0, le=1000.0),
-                 max_mv: float = Query(200.0, ge=10.0, le=10000.0),
-                 max_pe: float = Query(150.0, ge=0.0, le=1000.0),
-                 exclude_st: bool = Query(True),
-                 codes: str = Query("")):
-    """每日强势(合并到次日强势后的兼容转调)。
-    /api/daily-strong 保留为旧 URL 兼容入口，参数与 5 步流程一致。
-    挂 cand_disclaimer。"""
-    from screener import daily_strong
-    cl = [c.strip() for c in codes.split(",") if c.strip()] if codes else None
-    res = daily_strong.daily_strong_rank(universe=universe, codes=cl, limit=limit, days=days,
-                                         min_change_pct=min_change_pct,
-                                         min_turnover=min_turnover, max_price=max_price,
-                                         min_mv=min_mv, max_mv=max_mv,
-                                         max_pe=max_pe)
-    return _wrap(res, {"cand_disclaimer":
-                       "每日强势清单——多步机械漏斗+板块助攻排序观察清单，非荐股非买卖信号，盈亏自负。"})
 
 
 @app.get("/api/buffett")
