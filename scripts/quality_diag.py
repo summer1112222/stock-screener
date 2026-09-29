@@ -165,6 +165,10 @@ def _load_daily_panels(db_path: str, universe: str, days: int = 2000):
         conn.close()
     if df is None or df.empty:
         return None, None, []
+    # 剔除 NULL symbol 行：pandas 3.0 StringDtype 列里 pd.NA 经 astype(str)
+    # 仍保留 pd.NA，sorted(unique()) 在 pd.NA vs str 比较时 TypeError（真实库有
+    # 5.8 万行 NULL symbol 曾触发）。
+    df = df[df["symbol"].notna()]
     df["date"] = pd.to_datetime(df["date"])
     codes = sorted(df["symbol"].astype(str).unique())
     if days and days > 0:

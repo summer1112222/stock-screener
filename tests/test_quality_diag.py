@@ -132,3 +132,20 @@ def test_render_report_includes_signal4():
     }
     report = qd.render_report(panel, None)
     assert "口径4" in report and "hit_count" in report
+
+
+def test_load_daily_panels_drops_null_symbol(tmp_path):
+    """stock_daily 含 NULL symbol 行时 _load_daily_panels 不崩(sorted pd.NA)。
+    真实库有 58240 行 NULL symbol，曾致 TypeError。"""
+    import sqlite3
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE stock_daily (symbol TEXT, date TEXT, close REAL, amount REAL)")
+    conn.executemany(
+        "INSERT INTO stock_daily VALUES (?,?,?,?)",
+        [("600519", "2026-01-01", 100.0, 1e8), (None, "2026-01-02", 101.0, 1e8),
+         ("000001", "2026-01-02", 50.0, 2e8)])
+    conn.commit(); conn.close()
+    close, amount, codes = qd._load_daily_panels(str(db), "stock", days=2000)
+    assert codes == ["000001", "600519"]  # NULL symbol 被剔除
+    assert list(close.columns) == ["000001", "600519"]
