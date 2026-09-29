@@ -83,6 +83,47 @@ def panel_diag(close: pd.DataFrame, amount: pd.DataFrame | None,
     return out
 
 
+def _signal_hits_panel(close: pd.DataFrame, amount: pd.DataFrame | None) -> pd.DataFrame:
+    """口径4「当日多信号触发数」滚动面板：逐 code×date 统计当日触发的 5 类
+    OHLCV 信号数(0-5)。公式镜像 backtest/signals.py 的 masks,须保持同步。
+    供 rank-IC 判定「触发信号越多 → 前视收益是否越好」的单调性。前视安全。"""
+    from backtest.signals import _rsi
+    if close is None or close.empty:
+        return pd.DataFrame()
+    ma5 = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+    rsi = _rsi(close, 14)
+    hits = pd.DataFrame(0, index=close.index, columns=close.columns)
+    hits += ((close.shift(1) <= ma20.shift(1)) & (close > ma20)).astype(int)          # ma_breakout
+    hits += ((ma5.shift(1) <= ma20.shift(1)) & (ma5 > ma20)).astype(int)              # golden_cross
+    if amount is not None and not amount.empty:
+        vol_avg5 = amount.rolling(5).mean()
+        hits += ((amount > vol_avg5 * 2) & amount.notna() & (vol_avg5 > 0)).astype(int)  # volume_surge
+    hits += (rsi < 30).astype(int)                                                    # rsi_oversold
+    hits += ((close.pct_change(20) > 0) & (close > close.shift(1))).astype(int)       # momentum_up
+    return hits
+
+
+def panel_diag_signal4(close: pd.DataFrame, amount: pd.DataFrame | None,
+                       ks=(5, 20)) -> dict | None:
+    """对口径4 触发数面板跑滚动 rank-IC + 5 档。复用 eval 工具链。
+    空/过短面板返 None(由调用方降级)。返回 {factor: {decile, ic, by_k}}，同 panel_diag。"""
+    from backtest import eval as bt_eval
+    hits = _signal_hits_panel(close, amount)
+    if hits is None or hits.empty or len(hits) < 25 + max(ks):
+        return None
+    out: dict = {"hit_count": {"by_k": {}}}
+    for k in ks:
+        fwd = bt_eval.forward_returns(close, k)
+        ic = bt_eval.ic_summary(bt_eval.ic_series(hits, fwd))
+        dbt = bt_eval.decile_backtest(hits, fwd, 5)
+        out["hit_count"]["by_k"][k] = {"ic": ic, "decile": dbt}
+    main_k = max(ks)
+    out["hit_count"]["decile"] = out["hit_count"]["by_k"][main_k]["decile"]
+    out["hit_count"]["ic"] = out["hit_count"]["by_k"][main_k]["ic"]
+    return out
+
+
 def audit_main(main: list[dict]) -> dict:
     """聚合 main 清单：confidence_level / risk_flags / 口径覆盖 计数。"""
     conf: Counter = Counter()

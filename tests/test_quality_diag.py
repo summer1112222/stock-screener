@@ -76,3 +76,44 @@ def test_audit_main_aggregates():
     assert a["confidence"] == {"high": 2, "medium": 1}
     assert a["risk_flags"] == {"杠杆": 1, "FCF": 1}
     assert a["dim_coverage"]["1"] == 3 and a["dim_coverage"]["2"] == 1
+
+
+# ---------------- 口径4 多信号触发数 rank-IC 校准段 ----------------
+
+def _tiny_signal_panel():
+    """5 只 × 60 日合成价/量，构造 mk 触发。"""
+    idx = pd.date_range("2026-01-01", periods=60, freq="B")
+    codes = [f"S{i}" for i in range(5)]
+    rng = np.random.default_rng(0)
+    close = pd.DataFrame({
+        c: 10 + np.cumsum(rng.normal(0, 0.1, 60)) for c in codes
+    }, index=idx)
+    amount = pd.DataFrame({
+        c: np.where(rng.random(60) > 0.7, 3e8, 1e8) for c in codes
+    }, index=idx)
+    return close, amount
+
+
+def test_signal_hits_panel_shape_and_range():
+    close, amount = _tiny_signal_panel()
+    hits = qd._signal_hits_panel(close, amount)
+    assert hits.shape == close.shape
+    assert (hits.values >= 0).all() and (hits.values <= 5).all()
+
+
+def test_signal4_no_triggers_all_zero():
+    idx = pd.date_range("2026-01-01", periods=60, freq="B")
+    close = pd.DataFrame({c: 10.0 for c in ["A", "B"]}, index=idx)
+    amount = pd.DataFrame({c: 1e8 for c in ["A", "B"]}, index=idx)
+    hits = qd._signal_hits_panel(close, amount)
+    assert (hits.values == 0).all()
+    out = qd.panel_diag_signal4(close, amount, ks=(5,))
+    ic = out["hit_count"]["by_k"][5]["ic"]
+    assert ic["ic"] is None or ic["ic"] == 0.0
+
+
+def test_signal4_empty_close():
+    close = pd.DataFrame()
+    amount = pd.DataFrame()
+    out = qd.panel_diag_signal4(close, amount, ks=(5,))
+    assert out is None or out == {}
