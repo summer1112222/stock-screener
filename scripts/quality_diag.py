@@ -245,7 +245,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[quality_diag] 无 stock_daily 历史（codes={len(codes)}），先 /api/backtest/fetch", file=sys.stderr)
         return 1
     panel = panel_diag(close, amount, ks=ks)
+    panel4 = panel_diag_signal4(close, amount, ks=ks)
+    if panel4:
+        panel.update(panel4)
     print(f"[quality_diag] 面板诊断完成: {len(codes)} 票 × {len(close)} 日", file=sys.stderr)
+    print(f"[quality_diag] 口径4 触发数校准: {len(codes)} 票 × {len(close)} 日", file=sys.stderr)
+    print("[quality_diag] 口径2/3/5 无长历史分位,不可历史重建,保留经验先验(见报告局限)", file=sys.stderr)
 
     audit = None
     try:
