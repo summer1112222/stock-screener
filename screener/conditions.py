@@ -22,6 +22,8 @@ BOARD_FIELDS_CAT = [
     {"key": "down_count", "label": "下跌家数", "ops": ["gt", "lt", "between"]},
     {"key": "leading_stock_change", "label": "领涨股涨跌幅(%)", "ops": ["gt", "lt", "between"]},
     {"key": "constituent_count", "label": "成分股数量", "ops": ["gt", "lt", "between", "topn"]},
+    {"key": "inflow_pct", "label": "\u4e3b\u529b\u51c0\u6d41\u5165\u5360\u6bd4(%)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
+    {"key": "activity", "label": "\u6d3b\u8dc3\u5ea6(\u6362\u624b\u00d7|\u6da8\u8dcc|)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
 ]
 
 # ETF 可筛选字段
@@ -47,6 +49,9 @@ STOCK_FIELDS_CAT = [
     {"key": "amplitude", "label": "振幅(%)", "ops": ["gt", "lt", "between"]},
     {"key": "volume_ratio", "label": "量比", "ops": ["gt", "lt", "between", "topn"]},
     {"key": "latest_price", "label": "最新价(元)", "ops": ["gt", "lt", "between"]},
+    {"key": "activity", "label": "\u6d3b\u8dc3\u5ea6(\u6362\u624b\u00d7|\u6da8\u8dcc|)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
+    {"key": "strength", "label": "\u5f3a\u5f31\u6bd4(\u6da8\u8dcc/\u632f\u5e45)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
+    {"key": "liquidity", "label": "\u8d44\u91d1\u6bd4(\u6210\u4ea4\u989d/\u6d41\u901a\u5e02\u503c%)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
 ]
 
 OPS = {

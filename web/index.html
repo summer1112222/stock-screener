@@ -127,7 +127,7 @@
       <div class="card-t">筛选条件</div>
       <div class="row">
         <div class="f"><label>类别</label>
-          <select id="category"><option value="行业">行业板块</option><option value="概念">概念板块</option><option value="ETF">ETF</option></select>
+          <select id="category"><option value="行业">行业板块</option><option value="概念">概念板块</option><option value="ETF">ETF</option><option value='个股'>个股</option></select>
         </div>
         <div class="f" id="indF"><label>资金流周期</label>
           <select id="indicator"><option>今日</option><option>5日</option><option>10日</option></select>
@@ -140,6 +140,7 @@
       <div class="row" style="margin-top:10px">
         <button class="btn ghost" id="addCond" type="button">+ 添加条件</button>
         <button class="btn" id="run" type="button">筛选</button>
+        <button class="btn ghost" id="presetStrong" type="button">强势启动</button><button class="btn ghost" id="presetVolume" type="button">温和放量</button><button class="btn ghost" id="presetLow" type="button">避高就低</button>
         <button class="btn ghost" id="refresh" type="button">刷新数据</button>
       </div>
     </div>
@@ -388,6 +389,8 @@
         <div class="f"><label>买入日</label><input id="pfDate" type="text" placeholder="2024-05-01" style="width:120px"></div>
         <div class="f"><label>买入价</label><input id="pfPrice" type="number" step="0.01" style="width:100px"></div>
         <div class="f"><label>股数</label><input id="pfShares" type="number" step="100" style="width:100px"></div>
+        <div class='f'><label>止损价</label><input id='pfSL' type='number' step='0.01' style='width:100px'></div>
+        <div class='f'><label>止盈价</label><input id='pfTP' type='number' step='0.01' style='width:100px'></div>
         <div class="f"><label>备注</label><input id="pfNote" type="text" style="width:140px"></div>
         <button class="btn" id="pfAdd" type="button">记录</button>
         <button class="btn ghost" id="pfRefresh" type="button">刷新</button>
@@ -546,7 +549,7 @@ async function loadFields(){
 }
 function catFields(){
   const cat=document.getElementById('category').value;
-  return cat==='ETF'?FIELDS.etf_fields:FIELDS.board_fields;
+  return cat==='ETF'?FIELDS.etf_fields:(cat==='个股'||cat==='stock'?FIELDS.stock_fields:FIELDS.board_fields);
 }
 function updateSortOptions(){
   const sel=document.getElementById('sort'); const cur=sel.value;
@@ -572,6 +575,25 @@ function addCond(){
   document.getElementById('conds').appendChild(div);
 }
 
+const PRESETS={
+strong:[['change_pct','between',[3,7]],['volume_ratio','gt',1.5],['turnover_rate','between',[2,15]],['strength','gt',0.4],['pe','between',[0,50]],['circulating_market_cap','between',[2e9,3e11]]],
+volume:[['change_pct','between',[1,4]],['volume_ratio','between',[1.5,3]],['amplitude','between',[3,8]]],
+low:[['change_pct','between',[-3,2]],['volume_ratio','gt',1.2],['pb','lt',3]]};
+const PRESET_SORT={strong:'strength',volume:'liquidity',low:'turnover_amount'};
+function applyPreset(name){
+const list=PRESETS[name];if(!list)return;
+const cat=document.getElementById('category');
+if(cat&&cat.value!=='个股'){cat.value='个股';updateSortOptions();}
+document.getElementById('conds').innerHTML='';
+list.forEach(()=>addCond());
+const rows=document.querySelectorAll('#conds .cond-row');
+list.forEach((c,i)=>{rows[i].querySelector('.c-field').value=c[0];rows[i].querySelector('.c-op').value=c[1];rows[i].querySelector('.c-val').value=Array.isArray(c[2])?c[2].join(','):c[2];});
+const sk=PRESET_SORT[name];const sort=document.getElementById('sort');
+if(sort&&sk&&Array.from(sort.options).some(o=>o.value===sk))sort.value=sk;
+run();}
+document.getElementById('presetStrong').onclick=()=>applyPreset('strong');
+document.getElementById('presetVolume').onclick=()=>applyPreset('volume');
+document.getElementById('presetLow').onclick=()=>applyPreset('low');
 function readConds(){
   const conds=[];
   document.querySelectorAll('#conds .cond-row').forEach(row=>{
@@ -837,18 +859,23 @@ async function pfLoad(){
   const r=await apiFetch(`${API}/api/portfolio`);
   if(r._fail){document.getElementById('pfOut').innerHTML='<div class="empty">加载失败</div>';return;}
   const d=r.data||[];
-  document.getElementById('pfOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th class="num">买价</th><th class="num">股数</th><th class="num">最新</th><th class="num">浮盈</th><th class="num">收益率</th><th>备注</th><th>提醒</th><th></th></tr></thead><tbody>${d.map(p=>{
+  document.getElementById('pfOut').innerHTML = d.length?`<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th class="num">买价</th><th class="num">股数</th><th class="num">最新</th><th class="num">浮盈</th><th class="num">收益率</th><th class="num">止损</th><th class="num">离止损</th><th>状态</th><th>备注</th><th>提醒</th><th></th></tr></thead><tbody>${d.map(p=>{
     const loss = p.pnl_pct!=null && p.pnl_pct<=-0.05;
     const tg = p.alert_triggered;
+    const rs=p.risk_state||'ok';
+    const rb=rs==='breach_stop'?'触及止损价':(rs==='hit_target'?'触及止盈价':(rs==='near_stop'?'接近止损价':'正常'));
+    const rbCls=rs==='breach_stop'?'down':(rs==='hit_target'?'up':'');
     const alertCell = tg ? `<span class="down" style="font-weight:600">🔔${tg==='hi'?'触上':'触下'}</span> <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditAlert(${p.id})">改</button>`
       : (p.alert_hi||p.alert_lo ? `上${p.alert_hi??'—'}/下${p.alert_lo??'—'} <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditAlert(${p.id})">改</button>`
       : `<button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditAlert(${p.id})">设</button>`);
-    return `<tr><td>${p.code}</td><td>${p.name||''}</td><td>${p.buy_date}</td><td class="num">${p.buy_price}</td><td class="num">${p.shares}</td><td class="num">${p.latest_price??'—'}</td><td class="num ${p.pnl>=0?'up':'down'}">${p.pnl??'—'}</td><td class="num ${p.pnl_pct>=0?'up':'down'}" ${loss?'style="font-weight:700"':''}>${p.pnl_pct!=null?(p.pnl_pct*100).toFixed(2)+'%':'—'}</td><td>${p.note||''}</td><td id="pfAlert-${p.id}">${alertCell}</td><td><button class="del" onclick="pfClose(${p.id})" aria-label="删除持仓">✕</button></td></tr>`;
+    return `<tr><td>${p.code}</td><td>${p.name||''}</td><td>${p.buy_date}</td><td class="num">${p.buy_price}</td><td class="num">${p.shares}</td><td class="num">${p.latest_price??'—'}</td><td class="num ${p.pnl>=0?'up':'down'}">${p.pnl??'—'}</td><td class="num ${p.pnl_pct>=0?'up':'down'}" ${loss?'style="font-weight:700"':''}>${p.pnl_pct!=null?(p.pnl_pct*100).toFixed(2)+'%':'—'}</td><td class="num">${p.stop_loss??'—'}</td><td class="num">${p.to_stop!=null?(p.to_stop*100).toFixed(2)+'%':'—'}</td><td id="pfRisk-${p.id}"><span class="${rbCls}">${rb}</span> <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfEditRisk(${p.id})">改</button></td><td>${p.note||''}</td><td id="pfAlert-${p.id}">${alertCell}</td><td><button class="del" onclick="pfClose(${p.id})" aria-label="删除持仓">✕</button></td></tr>`;
   }).join('')}</tbody></table>`:'<div class="empty">暂无持仓</div>';
+  const breached=d.filter(function(p){return (p.risk_state||'ok')==='breach_stop';});
+  if(breached.length){const bd=document.createElement('div');bd.style.cssText='color:#fff;background:#b91c1c;padding:6px 10px;border-radius:8px;margin-bottom:8px;font-weight:700';bd.textContent=breached.map(function(p){return p.code+'已触及自设止损价';}).join('、')+'（机械标记，非买卖建议）';document.getElementById('pfOut').prepend(bd);}
 }
 async function pfAdd(){
   const btn=document.getElementById('pfAdd');
-  const body={code:document.getElementById('pfCode').value,name:document.getElementById('pfName').value,buy_date:document.getElementById('pfDate').value,buy_price:+document.getElementById('pfPrice').value,shares:+document.getElementById('pfShares').value,note:document.getElementById('pfNote').value};
+  const slv=document.getElementById('pfSL').value;const tpv=document.getElementById('pfTP').value;const body={code:document.getElementById('pfCode').value,name:document.getElementById('pfName').value,buy_date:document.getElementById('pfDate').value,buy_price:+document.getElementById('pfPrice').value,shares:+document.getElementById('pfShares').value,note:document.getElementById('pfNote').value,stop_loss:slv===''?null:+slv,take_profit:tpv===''?null:+tpv};
   const r=await apiFetch(`${API}/api/portfolio`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},{btn,busy:'记录中…'});
   if(r._fail)return;
   toast('已记录持仓 '+body.code,'ok');
@@ -867,6 +894,16 @@ window.pfSaveAlert=async function(id){
   if(r._fail)return;
   toast('提醒已保存','ok');
   pfLoad();
+};
+window.pfEditRisk=function(id){
+  const cell=document.getElementById('pfRisk-'+id);if(!cell)return;
+  cell.innerHTML=`<input type="number" step="0.01" id="pfSL-${id}" placeholder="止损价" style="width:64px;font-size:11px"> <input type="number" step="0.01" id="pfTP-${id}" placeholder="止盈价" style="width:64px;font-size:11px"> <button class="btn" style="font-size:11px;padding:1px 6px" onclick="pfSaveRisk(${id})">存</button> <button class="btn ghost" style="font-size:11px;padding:1px 6px" onclick="pfLoad()">取消</button>`;
+};
+window.pfSaveRisk=async function(id){
+  const sl=document.getElementById('pfSL-'+id).value;const tp=document.getElementById('pfTP-'+id).value;
+  const r=await apiFetch(`${API}/api/portfolio/${id}/risk`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({stop_loss:sl===''?null:+sl,take_profit:tp===''?null:+tp})});
+if(r._fail)return;
+pfLoad();
 };
 document.getElementById('pfAdd').onclick=pfAdd;
 document.getElementById('pfRefresh').onclick=pfLoad;

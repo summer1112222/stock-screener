@@ -13,27 +13,39 @@ from .conditions import VALID_OPS
 
 
 # 派生因子(纯筛选维度，不打分不荐股)：查询时实时计算，不落库。
-#   activity = 换手率 × |涨跌幅|   活跃度
-#   momentum = 涨跌幅 × 换手率      动量(带符号)
+#   activity   = 换手率 × |涨跌幅|            活跃度
+#   momentum   = 涨跌幅 × 换手率               动量(带符号)
+#   strength   = 涨跌幅 ÷ 振幅                 强弱比(振幅为0时缺失)
+#   liquidity  = 成交额 ÷ 流通市值 × 100        资金比(%)
+#   inflow_pct = 主力净流入 ÷ 成交额 × 100      主力净流入占比(%)
 DERIVED_FIELDS = {
-    "activity": ("turnover_rate", "change_pct", lambda tr, cp: tr * cp.abs()),
-    "momentum": ("turnover_rate", "change_pct", lambda tr, cp: tr * cp),
+    "activity": ("turnover_rate", "change_pct"),
+    "momentum": ("turnover_rate", "change_pct"),
+    "strength": ("change_pct", "amplitude"),
+    "liquidity": ("turnover_amount", "circulating_market_cap"),
+    "inflow_pct": ("main_net_inflow", "turnover_amount"),
 }
 
 
 def _add_derived(df: pd.DataFrame) -> pd.DataFrame:
-    """补算派生因子列，使派生字段可被过滤/排序。缺依赖列则置 NaN。"""
+    """补算派生因子列，使派生字段可被过滤/排序。缺依赖列则该因子缺失。"""
     if df is None or df.empty:
         return df
-    tr = pd.to_numeric(df.get("turnover_rate"), errors="coerce") \
-        if "turnover_rate" in df.columns else None
-    cp = pd.to_numeric(df.get("change_pct"), errors="coerce") \
-        if "change_pct" in df.columns else None
-    if tr is None or cp is None:
-        return df
     df = df.copy()
-    for name, (_, _, fn) in DERIVED_FIELDS.items():
-        df[name] = fn(tr, cp)
+    num = lambda c: pd.to_numeric(df[c], errors="coerce") if c in df.columns else None
+    tr, cp = num("turnover_rate"), num("change_pct")
+    if tr is not None and cp is not None:
+        df["activity"] = tr * cp.abs()
+        df["momentum"] = tr * cp
+    am = num("amplitude")
+    if cp is not None and am is not None:
+        df["strength"] = cp / am.where(am > 0)
+    amt, mc = num("turnover_amount"), num("circulating_market_cap")
+    if amt is not None and mc is not None:
+        df["liquidity"] = amt / mc.where(mc > 0) * 100
+    fl = num("main_net_inflow")
+    if fl is not None and amt is not None:
+        df["inflow_pct"] = fl / amt.where(amt > 0) * 100
     return df
 
 

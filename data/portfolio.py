@@ -12,16 +12,21 @@ from . import pytdx_client
 
 
 def add_position(code: str, name: str, buy_date: str, buy_price: float,
-                 shares: float, note: str = "") -> dict:
+                 shares: float, note: str = "",
+                 stop_loss: float | None = None, take_profit: float | None = None) -> dict:
+    bp = float(buy_price)
+    sl = float(stop_loss) if stop_loss is not None else round(bp * 0.92, 2)
+    tp = float(take_profit) if take_profit is not None else round(bp * 1.20, 2)
     pos = {"code": code, "name": name, "buy_date": buy_date,
-           "buy_price": float(buy_price), "shares": float(shares),
-           "note": note, "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+           "buy_price": bp, "shares": float(shares),
+           "note": note, "stop_loss": sl, "take_profit": tp,
+           "ts": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     with db.get_conn() as conn:
         conn.execute(
-            "INSERT INTO portfolio(code,name,buy_date,buy_price,shares,note,ts) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO portfolio(code,name,buy_date,buy_price,shares,note,stop_loss,take_profit,ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (pos["code"], pos["name"], pos["buy_date"], pos["buy_price"],
-             pos["shares"], pos["note"], pos["ts"]),
+             pos["shares"], pos["note"], pos["stop_loss"], pos["take_profit"], pos["ts"]),
         )
         conn.commit()
     return pos
@@ -34,7 +39,7 @@ def list_positions() -> list[dict]:
     最新价 >= alert_hi → 'hi'，<= alert_lo → 'lo'，否则 None。非 AI 买卖点。"""
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT id,code,name,buy_date,buy_price,shares,note,alert_hi,alert_lo,ts "
+            "SELECT id,code,name,buy_date,buy_price,shares,note,alert_hi,alert_lo,stop_loss,take_profit,ts "
             "FROM portfolio ORDER BY buy_date DESC"
         ).fetchall()
     if not rows:
@@ -75,6 +80,11 @@ def list_positions() -> list[dict]:
         lo = r["alert_lo"]
         triggered = "hi" if (hi is not None and lp is not None and lp >= hi) \
             else ("lo" if (lo is not None and lp is not None and lp <= lo) else None)
+        sl = r["stop_loss"] if "stop_loss" in r.keys() else None
+        tp = r["take_profit"] if "take_profit" in r.keys() else None
+        to_stop = (lp / sl - 1) if (lp and sl) else None
+        to_target = (lp / tp - 1) if (lp and tp) else None
+        risk_state = "breach_stop" if (sl and lp and lp <= sl) else ("hit_target" if (tp and lp and lp >= tp) else ("near_stop" if (to_stop is not None and to_stop > -0.03) else "ok"))
         out.append({
             "id": r["id"], "code": r["code"], "name": r["name"],
             "buy_date": r["buy_date"], "buy_price": cost, "shares": shares,
@@ -82,6 +92,10 @@ def list_positions() -> list[dict]:
             "latest_price": lp, "pnl": round(pnl, 2) if pnl is not None else None,
             "pnl_pct": round(pct, 4) if pct is not None else None,
             "alert_hi": hi, "alert_lo": lo, "alert_triggered": triggered,
+            "stop_loss": sl, "take_profit": tp,
+            "to_stop": round(to_stop, 4) if to_stop is not None else None,
+            "to_target": round(to_target, 4) if to_target is not None else None,
+            "risk_state": risk_state,
         })
     return out
 
@@ -99,5 +113,14 @@ def set_alert(pid: int, alert_hi: float | None, alert_lo: float | None) -> bool:
 def close_position(pid: int) -> bool:
     with db.get_conn() as conn:
         cur = conn.execute("DELETE FROM portfolio WHERE id=?", (pid,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_risk(pid: int, stop_loss: float | None, take_profit: float | None) -> bool:
+    with db.get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE portfolio SET stop_loss=?, take_profit=? WHERE id=?",
+            (stop_loss, take_profit, pid))
         conn.commit()
         return cur.rowcount > 0

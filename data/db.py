@@ -37,6 +37,8 @@ _BOARD_MIGRATIONS = [
     # 持仓到价提醒：用户自设价位规则触发通知，读时比较 latest_price，非买卖点。
     ("portfolio", "alert_hi", "REAL"),
     ("portfolio", "alert_lo", "REAL"),
+    ("portfolio", "stop_loss", "REAL"),
+    ("portfolio", "take_profit", "REAL"),
     # 自选到价提醒：未买入观察清单，用户自设价位机械标记，非买卖点。
     ("watchlist", "alert_hi", "REAL"),
     ("watchlist", "alert_lo", "REAL"),

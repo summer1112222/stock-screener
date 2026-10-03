@@ -604,6 +604,8 @@ class BTPortfolioReq(BaseModel):
     buy_price: float
     shares: float
     note: str = ""
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 class BTSignalReq(BaseModel):
@@ -665,7 +667,8 @@ def portfolio_list():
 @app.post("/api/portfolio")
 def portfolio_add(req: BTPortfolioReq):
     pos = portfolio.add_position(req.code, req.name, req.buy_date,
-                                req.buy_price, req.shares, req.note)
+                                req.buy_price, req.shares, req.note,
+                                req.stop_loss, req.take_profit)
     return _wrap(pos)
 
 
@@ -686,6 +689,18 @@ def portfolio_alert(pid: int, req: PortfolioAlertReq):
     ok = portfolio.set_alert(pid, req.alert_hi, req.alert_lo)
     return _wrap({"updated": ok, "id": pid,
                   "alert_hi": req.alert_hi, "alert_lo": req.alert_lo})
+
+
+
+class PortfolioRiskReq(BaseModel):
+    stop_loss: float | None = None
+    take_profit: float | None = None
+
+
+@app.patch("/api/portfolio/{pid}/risk")
+def portfolio_risk(pid: int, req: PortfolioRiskReq):
+    ok = portfolio.set_risk(pid, req.stop_loss, req.take_profit)
+    return _wrap({"updated": ok, "id": pid})
 
 
 class WatchlistReq(BaseModel):

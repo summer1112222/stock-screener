@@ -223,6 +223,8 @@ CREATE TABLE IF NOT EXISTS portfolio (
     note TEXT,
     alert_hi REAL,   -- 用户自设到价提醒(上界)，读时比较 latest_price 触发，非买卖点
     alert_lo REAL,    -- 用户自设到价提醒(下界)
+    stop_loss REAL,
+    take_profit REAL,
     ts TEXT
 );
 
