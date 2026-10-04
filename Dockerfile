@@ -7,12 +7,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 先装依赖(利用层缓存)；用清华镜像加速国内下载
+# 先装依赖(利用层缓存)；国内镜像加速，失败自动回退官方源
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
     --trusted-host pypi.tuna.tsinghua.edu.cn \
-    -r requirements.txt
+    -r requirements.txt \
+ || pip install --no-cache-dir \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    -r requirements.txt \
+ || pip install --no-cache-dir -r requirements.txt
 
 # 复制代码
 COPY . .
