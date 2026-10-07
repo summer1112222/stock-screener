@@ -80,7 +80,8 @@ def test_sm_today_records_head_when_default(monkeypatch):
     assert len(rec[0][3]) == 20          # 只记头部前20
     assert rec[0][3][0]["score"] == rows[0]["amount"]
 
-    # 改 limit 不记录
+    # 改 limit 照记 custom 组(mode 带 :custom 后缀)
     rec.clear()
     cli.get("/api/smart-money/today?limit=500")
-    assert not rec
+    assert rec and rec[0][1] == "today:custom"
+    assert len(rec[0][3]) == 20

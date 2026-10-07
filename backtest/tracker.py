@@ -41,8 +41,16 @@ DEFAULT_PARAMS: dict[str, dict] = {
 }
 
 
+#: 非默认参数落库 mode 后缀。默认组做主结论，custom 组做参考，诊断时分组隔离不混算。
+CUSTOM_MODE_SUFFIX = ":custom"
+
+
 def is_default_params(module: str, params: dict) -> bool:
-    """仅默认参数组合才记录追踪样本，避免任意参数污染统计。未知模块=不追踪。"""
+    """判定是否为默认参数组合（2026-10-07 起改语义：不再做落库门禁，仅做标注。
+
+    调用方每次调用都 record_list，is_default=False 的行 mode 带 `:custom` 后缀；
+    诊断时默认组做主结论、custom 组做参考。未知模块=非默认（照样可记 custom）。
+    """
     base = DEFAULT_PARAMS.get(module)
     if not base:
         return False
@@ -101,6 +109,28 @@ def _insert_ignore(row: dict) -> int:
             return cur.rowcount
     except Exception:
         return 0
+
+
+def suffixed_mode(mode: str, is_default: bool) -> str:
+    """按是否默认参数给 mode 打后缀；默认组保持原 mode，custom 组隔离。"""
+    if is_default or not mode:
+        return mode
+    if mode.endswith(CUSTOM_MODE_SUFFIX):
+        return mode
+    return mode + CUSTOM_MODE_SUFFIX
+
+
+def is_custom_mode(mode: str | None) -> bool:
+    """mode 是否为非默认参数组。"""
+    return bool(mode) and str(mode).endswith(CUSTOM_MODE_SUFFIX)
+
+
+def split_by_default(rows: list[dict]) -> dict[str, list[dict]]:
+    """把 list_track 行按默认/custom 组拆分（诊断分组隔离用）。"""
+    out = {"default": [], "custom": []}
+    for r in rows:
+        out["custom" if is_custom_mode(r.get("mode")) else "default"].append(r)
+    return out
 
 
 def record_list(module: str, mode: str, date: str, items: list[dict]) -> int:

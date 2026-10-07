@@ -112,13 +112,21 @@ def quality_structure(rows: list[dict]) -> dict:
 
 
 def main(module: str | None = None):
-    for m in (module or ("nextday", "quality", "smart_money")):
+    from backtest.tracker import split_by_default
+    mods = (module,) if isinstance(module, str) else (module or ("nextday", "quality", "smart_money"))
+    for m in mods:
         rows = _load(m)
         if not rows:
             print(f"\n== {m}: 无追踪样本 ==")
             continue
         print(f"\n== {m} ({len(rows)} 行) ==")
-        print("头部 vs 整体:", json.dumps(head_vs_all(rows), ensure_ascii=False))
+        groups = split_by_default(rows)
+        for gname in ("default", "custom"):
+            grows = groups[gname]
+            if not grows:
+                continue
+            print(f"-- {gname}组 ({len(grows)} 行) --")
+            print("头部 vs 整体:", json.dumps(head_vs_all(grows), ensure_ascii=False))
         if m == "nextday":
             print("五因子分档:", json.dumps(factor_deciles(rows), ensure_ascii=False))
             print("穿透分层:", json.dumps(penetration_layers(rows), ensure_ascii=False))

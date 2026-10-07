@@ -857,11 +857,14 @@ def sm_today(date: str | None = Query(None),
     try:
         _sm_params = {"date": date, "channel": channel, "market": market,
                       "days": days, "limit": limit}
-        if bt_tracker.is_default_params("smart_money", _sm_params) and res.get("rows"):
+        if res.get("rows"):
             _heads = [{"code": r.get("code"), "name": r.get("name"),
                        "score": r.get("amount"), "quality_pct": r.get("quality_pct")}
                       for r in res["rows"][:20]]
-            bt_tracker.record_list("smart_money", "today", _track_date(), _heads)
+            _sm_default = bt_tracker.is_default_params("smart_money", _sm_params)
+            bt_tracker.record_list("smart_money",
+                                   bt_tracker.suffixed_mode("today", _sm_default),
+                                   _track_date(), _heads)
     except Exception:
         pass
     return _wrap(res["rows"], {
@@ -1020,9 +1023,10 @@ def quality_screen(universe: str = Query("stock"), days: int = Query(20),
                    "dim_thresh": dim_thresh, "refine": refine, "refine_pool": refine_pool,
                    "strict_quality": strict_quality, "min_confidence": min_confidence,
                    "risk_penalty": risk_penalty}
-        if bt_tracker.is_default_params("quality", qparams) and res.get("main"):
+        if res.get("main"):
+            _q_default = bt_tracker.is_default_params("quality", qparams)
             bt_tracker.record_list("quality",
-                                   res.get("selection_mode") or "strict",
+                                   bt_tracker.suffixed_mode(res.get("selection_mode") or "strict", _q_default),
                                    _track_date(),
                                    res["main"])
     except Exception:
@@ -1077,10 +1081,12 @@ def nextday_strong(universe: str = Query("stock"),
                     "min_turnover": min_turnover, "max_price": max_price,
                     "min_mv": min_mv, "max_mv": max_mv, "max_pe": max_pe,
                     "exclude_st": exclude_st}
-        if bt_tracker.is_default_params("nextday", ndparams):
-            today = _track_date()
-            bt_tracker.record_list("nextday", "strict", today, res.get("passed_items") or [])
-            bt_tracker.record_list("nextday", "score", today, res.get("all_items") or [])
+        _nd_default = bt_tracker.is_default_params("nextday", ndparams)
+        today = _track_date()
+        if res.get("passed_items"):
+            bt_tracker.record_list("nextday", bt_tracker.suffixed_mode("strict", _nd_default), today, res.get("passed_items") or [])
+        if res.get("all_items"):
+            bt_tracker.record_list("nextday", bt_tracker.suffixed_mode("score", _nd_default), today, res.get("all_items") or [])
     except Exception:
         pass
     return _wrap(res, {"cand_disclaimer":
