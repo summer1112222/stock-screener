@@ -140,6 +140,7 @@
       <div class="row" style="margin-top:10px">
         <button class="btn ghost" id="addCond" type="button">+ 添加条件</button>
         <button class="btn" id="run" type="button">筛选</button>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px" title="仅个股有效：对截断后头部批量取通达信实时盘口，新增实时价/实时涨跌/五档失衡列；失败自动降级快照"><input type="checkbox" id="liveQuote"> 盘口实时(个股)</label>
         <button class="btn ghost" id="presetStrong" type="button">强势启动</button><button class="btn ghost" id="presetVolume" type="button">温和放量</button><button class="btn ghost" id="presetLow" type="button">避高就低</button>
         <button class="btn ghost" id="refresh" type="button">刷新数据</button>
       </div>
@@ -628,11 +629,13 @@ async function run(){
   if(cat!=='ETF') params.set('indicator',document.getElementById('indicator').value);
   const conds=readConds();
   if(conds.length) params.set('conditions',JSON.stringify(conds));
+  if(cat==='个股'&&document.getElementById('liveQuote')?.checked) params.set('live','true');
   const btn=document.getElementById('run');
   const r=await apiFetch(`${API}/api/screen?${params}`,{},{btn,msg:'ut',busy:'筛选中…'});
   if(r._fail){document.getElementById('total').textContent='';renderTable([],cat);return;}
   document.getElementById('ut').textContent='更新于 '+(r.update_time||'—');
-  document.getElementById('total').textContent='共 '+(r.total??0)+' 条';
+  const _live=r.live_source==='live'?' · 盘口实时':' · 快照';
+  document.getElementById('total').textContent='共 '+(r.total??0)+' 条'+(cat==='个股'?_live:'');
   document.getElementById('skipped').textContent=(r.skipped&&r.skipped.length)?('跳过: '+r.skipped.join(' | ')):'';
   renderTable(r.data,cat);
 }

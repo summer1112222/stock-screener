@@ -5,6 +5,9 @@ from data import db
 
 def _seed():
     db.init_db()
+    with db.get_conn() as c:
+        c.execute('DELETE FROM stock_spot')
+        c.commit()
     rows = [
         {"code":"000001","name":"平安银行","latest_price":10.0,"change_pct":2.0,
          "turnover_amount":2e8,"turnover_rate":1.5,"pe":8,"pb":0.9,"total_market_cap":2e10},
@@ -38,3 +41,35 @@ def test_filter_stocks_between():
     codes = [r["code"] for r in res["rows"]]
     assert "000001" in codes
     assert "000002" not in codes
+
+
+def test_filter_stocks_live_enrich_mock(monkeypatch):
+    """live=True 时批量 get_quote 填充实时字段；失败降级 snapshot。"""
+    _seed()
+    codes = ["000001", "000002"]
+    fake_q = [{"code": c, "price": 10.0, "last_close": 9.5,
+               "bid_vol1": 100, "bid_vol2": 100, "bid_vol3": 100,
+               "bid_vol4": 100, "bid_vol5": 100,
+               "ask_vol1": 50, "ask_vol2": 50, "ask_vol3": 50,
+               "ask_vol4": 50, "ask_vol5": 50} for c in codes]
+    qmap = {q["code"]: q for q in fake_q}
+    monkeypatch.setattr("data.pytdx_client.get_quote", lambda cs: [qmap[c] for c in cs if c in qmap])
+    res = engine.filter_stocks(conditions=[], limit=50, live=True)
+    assert res["live_source"] == "live"
+    hit = [r for r in res["rows"] if r.get("code") in qmap]
+    assert hit, "seeded rows missing from results (DB shared across tests)"
+    assert all(r.get("live_price") == 10.0 for r in hit)
+    assert all(r.get("live_imbalance") is not None for r in hit)
+    # tdx 失败 → snapshot 降级
+    def _boom(cs):
+        raise Exception("down")
+    monkeypatch.setattr("data.pytdx_client.get_quote", _boom)
+    res2 = engine.filter_stocks(conditions=[], limit=50, live=True)
+    assert res2["live_source"] == "snapshot"
+
+
+def test_bid_ask_imbalance_math():
+    q = {f"bid_vol{i}": 100 for i in range(1, 6)}
+    q.update({f"ask_vol{i}": 50 for i in range(1, 6)})
+    assert engine._bid_ask_imbalance(q) == round((500 - 250) / 750, 4)
+    assert engine._bid_ask_imbalance({}) is None

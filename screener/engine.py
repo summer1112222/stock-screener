@@ -187,19 +187,94 @@ def _tradable_stocks(df: pd.DataFrame, min_turnover: float,
     return df[mask]
 
 
+#: live 增强只覆盖截断后头部（get_quote 批量 80/批，全市场 5000+ 逐个取太慢）。
+LIVE_ENRICH_K = 100
+
+
+def _live_quote_map(codes: list[str]) -> dict:
+    """批量取 tdx 实时盘口，返 {纯6位code: quote}；失败返 {} 诚实降级。"""
+    pure = list(dict.fromkeys(str(c or "")[-6:] for c in codes if c))
+    pure = [c for c in pure if len(c) == 6 and c.isdigit()]
+    if not pure:
+        return {}
+    try:
+        from data import pytdx_client
+        out = {}
+        for q in pytdx_client.get_quote(pure) or []:
+            code = str(q.get("code") or "")[-6:]
+            if code:
+                out[code] = q
+        return out
+    except Exception:
+        return {}
+
+
+def _bid_ask_imbalance(q: dict) -> float | None:
+    """五档失衡 = (买1-5总量-卖1-5总量)/(买+卖总量)，∈[-1,1]；缺值返 None。"""
+    try:
+        bv = sum(float(q.get(f"bid_vol{i}") or 0) for i in range(1, 6))
+        av = sum(float(q.get(f"ask_vol{i}") or 0) for i in range(1, 6))
+        tot = bv + av
+        if tot <= 0:
+            return None
+        return round((bv - av) / tot, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enrich_live(rows: list[dict]) -> tuple[list[dict], str]:
+    """对截断后行批量盘口增强：新增 live_price/live_change_pct/live_imbalance/live_source。
+
+    盘后/tdx 失败 → 行保持快照值 + live_source=snapshot 诚实标注。返回 (rows, live_source)。
+    """
+    if not rows:
+        return rows, "snapshot"
+    qmap = _live_quote_map([r.get("code") for r in rows])
+    if not qmap:
+        for r in rows:
+            r["live_source"] = "snapshot"
+        return rows, "snapshot"
+    n_hit = 0
+    for r in rows:
+        code = str(r.get("code") or "")[-6:]
+        q = qmap.get(code)
+        if not q:
+            r["live_source"] = "snapshot"
+            continue
+        n_hit += 1
+        r["live_source"] = "live"
+        try:
+            price = q.get("price")
+            if price is not None:
+                r["live_price"] = float(price)
+            lc = q.get("last_close")
+            if price is not None and lc:
+                r["live_change_pct"] = round((float(price) / float(lc) - 1.0) * 100.0, 2)
+        except (TypeError, ValueError):
+            pass
+        imb = _bid_ask_imbalance(q)
+        if imb is not None:
+            r["live_imbalance"] = imb
+    return rows, ("live" if n_hit else "snapshot")
+
+
 def filter_stocks(conditions: list | None = None,
                   sort: str | None = "turnover_amount",
                   asc: bool = False,
                   limit: int = 50,
                   min_turnover: float = 5e7,
-                  limit_pct: float = 9.9) -> dict:
-    """筛选个股：stock_spot → 可交易预筛 → 条件 AND → 排序 → 截断。
-    返回结构与 filter_etfs 一致：{rows, total, skipped, category}。"""
+                  limit_pct: float = 9.9,
+                  live: bool = False) -> dict:
+    """筛选个股：stock_spot → 可交易预筛 → 条件 AND → 排序 → 截断 → 可选盘口实时增强。
+
+    live=True 时对截断后头部批量 get_quote，新增 live_price/live_change_pct/
+    live_imbalance + live_source 行字段（缺值 None 不伪造）；失败自动降级快照。
+    返回结构与 filter_etfs 一致：{rows, total, skipped, category, live_source}。"""
     conditions = conditions or []
     rows = db.query_rows("stock_spot")
     if not rows:
         return {"rows": [], "total": 0, "skipped": ["个股数据为空，先 /api/refresh"],
-                "category": "个股"}
+                "category": "个股", "live_source": "snapshot"}
     df = pd.DataFrame(rows)
     df = _tradable_stocks(df, min_turnover, limit_pct)
     df = _add_derived(df)
@@ -208,7 +283,14 @@ def filter_stocks(conditions: list | None = None,
     if limit:
         df = df.head(int(limit))
     out = df.astype(object).where(pd.notna(df), None).to_dict("records")
-    return {"rows": out, "total": len(out), "skipped": skipped, "category": "个股"}
+    live_source = "snapshot"
+    if live and out:
+        head = out[:LIVE_ENRICH_K]
+        _, live_source = _enrich_live(head)
+        for r in out[len(head):]:
+            r["live_source"] = "snapshot"
+    return {"rows": out, "total": len(out), "skipped": skipped,
+            "category": "个股", "live_source": live_source}
 
 
 def list_boards(category: str = "行业",

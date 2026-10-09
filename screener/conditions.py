@@ -52,6 +52,10 @@ STOCK_FIELDS_CAT = [
     {"key": "activity", "label": "\u6d3b\u8dc3\u5ea6(\u6362\u624b\u00d7|\u6da8\u8dcc|)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
     {"key": "strength", "label": "\u5f3a\u5f31\u6bd4(\u6da8\u8dcc/\u632f\u5e45)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
     {"key": "liquidity", "label": "\u8d44\u91d1\u6bd4(\u6210\u4ea4\u989d/\u6d41\u901a\u5e02\u503c%)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
+    # \u76d8\u53e3\u5b9e\u65f6\u5b57\u6bb5(live=True \u65f6 engine \u6279\u91cf get_quote \u586b\u5145\uff1b\u7f3a\u503c None \u4e0d\u4f2a\u9020)
+    {"key": "live_price", "label": "\u5b9e\u65f6\u4ef7(\u5143\u00b7\u76d8\u53e3)", "ops": ["gt", "lt", "between"], "derived": True},
+    {"key": "live_change_pct", "label": "\u5b9e\u65f6\u6da8\u8dcc(%\u00b7\u76d8\u53e3)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
+    {"key": "live_imbalance", "label": "\u4e94\u6863\u5931\u8861(-1~1\u00b7\u76d8\u53e3)", "ops": ["gt", "lt", "between", "topn"], "derived": True},
 ]
 
 OPS = {

@@ -321,7 +321,8 @@ def screen(category: str = Query("行业"),
            limit: int = Query(50, ge=1, le=500),
            indicator: str = Query("今日"),
            min_turnover: float = Query(5e7, ge=0),
-           limit_pct: float = Query(9.9, ge=0, le=30)):
+           limit_pct: float = Query(9.9, ge=0, le=30),
+           live: bool = Query(False)):
     try:
         conds = json.loads(conditions) if conditions else []
     except (json.JSONDecodeError, TypeError):
@@ -335,9 +336,11 @@ def screen(category: str = Query("行业"),
                                     "skipped": res["skipped"]})
     if category in ("stock", "个股"):
         res = engine.filter_stocks(conditions=conds, sort=sort, asc=asc, limit=limit,
-                                   min_turnover=min_turnover, limit_pct=limit_pct)
+                                   min_turnover=min_turnover, limit_pct=limit_pct,
+                                   live=live)
         return _wrap(res["rows"], {"category": "个股", "total": res["total"],
-                                    "skipped": res["skipped"]})
+                                    "skipped": res["skipped"],
+                                    "live_source": res.get("live_source", "snapshot")})
     res = engine.filter_boards(category=category, conditions=conds, sort=sort,
                                asc=asc, limit=limit, indicator=indicator)
     return _wrap(res["rows"], {"category": category, "indicator": indicator,
