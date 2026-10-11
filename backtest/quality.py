@@ -23,6 +23,39 @@ _CAND_DISCLAIMER = ("多口径共振机械排序观察清单，非荐股非买�
 # 结果级缓存(5min TTL)：quality_rank 计算重(历史+buffett+signals)，避免短时重复重算
 _RESULT_CACHE: dict = {}
 _RESULT_TTL = 300.0  # 秒
+_RADAR_MEMO: dict = {}
+_RADAR_TTL = 60.0
+_SHORTLIST_MEMO: dict = {}
+_SHORTLIST_TTL = 60.0
+
+
+def _radar_for(codes, days):
+    import time as _time
+    key = (tuple(sorted(set(str(c) for c in codes))), int(days))
+    hit = _RADAR_MEMO.get(key)
+    if hit and _time.time() - hit[0] < _RADAR_TTL:
+        return hit[1]
+    from screener import smart_money as _sm
+    res = _sm.radar_resonance_for(list(key[0]), days=days)
+    _RADAR_MEMO[key] = (_time.time(), res)
+    return res
+
+
+def _shortlist_codes(codes, min_turnover=5e8, k=80):
+    import time as _time
+    key = (float(min_turnover), int(k))
+    hit = _SHORTLIST_MEMO.get(key)
+    now = _time.time()
+    if hit and now - hit[0] < _SHORTLIST_TTL:
+        sl = hit[1]
+    else:
+        try:
+            import backtest.buffett as _bb
+            sl = set(_bb.shortlist_by_turnover(min_turnover=min_turnover, k=k))
+        except Exception:
+            sl = set(codes)
+        _SHORTLIST_MEMO[key] = (now, sl)
+    return [c for c in codes if c in sl] or list(codes)
 # B3 事件催化权重并入精排排序的关键系数(2026-09-20)：
 #   event_weight 经风格×时效调制可能 >1(放大分支×1.5)，需缩放到与 policy_hit/style_hit
 #   (0.05/0.03 量级)可比才进 _final；无事件 → 0，现有排序完全不变(零破坏)。
@@ -88,7 +121,8 @@ _CONF_WEIGHTS = {"spot": .15, "history": .25, "fundamental": .30,
 
 def _data_confidence(code, spot_row, close, dim_scores,
                      behavior_days=0, fundamental_ok=None,
-                     research_count=None, universe="stock") -> dict:
+                     research_count=None, universe="stock",
+                     n_hist: int | None = None) -> dict:
     """逐标的数据可信度：spot/history/fundamental/flow/research 五组件加权。
     返回 {score, level, components, warnings}。不适用组件记 None 并从分母排除。
     high>=.75 / medium>=.50 / low<.50。fundamental/research 对 ETF 为 None。
@@ -103,9 +137,10 @@ def _data_confidence(code, spot_row, close, dim_scores,
     comps["spot"] = 1.0 if (code and price is not None and tr is not None) else 0.0
 
     # history：有效交易日 <20→0 / 20-59→0.5 / >=60→1
-    n_hist = 0
-    if close is not None and code in getattr(close, "columns", []):
-        n_hist = int(close[code].notna().sum())
+    if n_hist is None:
+        n_hist = 0
+        if close is not None and code in getattr(close, "columns", []):
+            n_hist = int(close[code].notna().sum())
     if n_hist >= 60:
         comps["history"] = 1.0
     elif n_hist >= 20:
@@ -537,6 +572,10 @@ def _run_policy_bonus(main: list, in_session: bool, style: dict | None = None,
         mm = {}
         if scored:
             mm = {b: set(c) for b, c in _nd._board_members_batch(scored).items()}
+        # B2+B3 宏观风格调制：market_daily 最新行 → macro_style 状态机 →
+        #   动态调制板块政策/风格加成(B2)与事件催化权重(B3,以 market.date 作事件时效锚)。
+        #   market.latest() 空(市场温度表无数据)→ style/as_of=None 退化为静态加成,兼容旧行为。
+        #   coverage<阈值(可用因子权重占比不足,如只剩 pe_pct 单因子)→ 弱证据风格不塑造排序,退化为静态加成。
         return _apply_policy_bonus(main, ff, br, mm, in_session=in_session,
                                    style=style, as_of=as_of)
 
@@ -658,11 +697,10 @@ def _flow_factor_series(codes: list, days: int, quote_codes=None) -> dict:
     quote_codes: 限小名单取盘口(shortlist)，默认全 codes；触网失败→缺省不崩。"""
     codes_l = [str(c) for c in codes]
     qc = [str(c) for c in (quote_codes if quote_codes is not None else codes_l)]
-    # radar 共振 in_count（主子因子）
+    # radar 共振 in_count（主子因子，走 _radar_for memo）
     in_count = {c: None for c in codes_l}
     try:
-        from screener import smart_money as sm_q
-        rad = sm_q.radar_resonance_for(codes_l, days=days)
+        rad = _radar_for(codes_l, days=days)
         for c in codes_l:
             r = rad.get(c) or {}
             if r.get("has_data") and not r.get("low_liq"):
@@ -794,11 +832,7 @@ def _dim_scores(df, universe, days, min_signals, close=None):
             else:
                 # 性能：不全市场逐股拉 buffett，先 shortlist 缩到 ≤80 只
                 # （spec §7.5）。非 shortlist 标的口径2 分位=None。
-                try:
-                    sl = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
-                    sl_codes = [c for c in codes if c in sl]
-                except Exception:
-                    sl_codes = codes
+                sl_codes = _shortlist_codes(codes, min_turnover=5e8, k=80)
                 results = bt_buf.analyze_many(sl_codes, deadline_s=40.0)  # 总体40s:akshare慢时返部分分位而非150s挂起;首次<75s前端超时,5min内重算走财报7天缓存秒回
 
                 def _bad(r):
@@ -852,12 +886,15 @@ def _dim_scores(df, universe, days, min_signals, close=None):
             else:
                 ret = close.pct_change()
                 te, av = {}, {}
+                _bm_cache: dict = {}
                 for c in codes:
                     bm = ETF_BENCHMARK_MAP.get(c)
                     te_c = None
                     if bm:
                         try:
-                            bdf, ok, _ = fetch_benchmark_hist(bm, "19900101", "20991231")
+                            if bm not in _bm_cache:
+                                _bm_cache[bm] = fetch_benchmark_hist(bm, "19900101", "20991231")
+                            bdf, ok, _ = _bm_cache[bm]
                             if ok and not bdf.empty and "close" in bdf.columns:
                                 bs = bdf.set_index("date")["close"].astype(float).sort_index()
                                 bs.index = pd.to_datetime(bs.index)
@@ -901,15 +938,10 @@ def _dim_scores(df, universe, days, min_signals, close=None):
         import screener.smart_money as sm_q
         used_new = False
         if universe == "stock":
+            sl_codes = _shortlist_codes(codes, min_turnover=5e8, k=80)
+            # 任一 shortlist 标的 has_data=True → 新口径(走 memo)
             try:
-                import backtest.buffett as bt_buf
-                sl = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
-                sl_codes = [c for c in codes if c in sl]
-            except Exception:
-                sl_codes = codes
-            # 任一 shortlist 标的 has_data=True → 新口径
-            try:
-                _rad = sm_q.radar_resonance_for(sl_codes, days=days)
+                _rad = _radar_for(sl_codes, days=days)
                 rad_avail = any((r or {}).get("has_data") for r in _rad.values())
             except Exception:
                 rad_avail = False
@@ -948,12 +980,7 @@ def _dim_scores(df, universe, days, min_signals, close=None):
     try:
         import backtest.signals as bt_sig
         if universe == "stock":
-            try:
-                import backtest.buffett as bt_buf
-                sl = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
-                scan_codes = [c for c in codes if c in sl]
-            except Exception:
-                scan_codes = codes  # shortlist 失败降级全市场(罕见)
+            scan_codes = _shortlist_codes(codes, min_turnover=5e8, k=80)
         else:
             scan_codes = codes  # ETF 数量少(~500),全市场 scan 不慢
         scan = bt_sig.scan_signals(universe, scan_codes)
@@ -980,20 +1007,22 @@ def _dim_scores(df, universe, days, min_signals, close=None):
     if universe == "stock":
         try:
             from data.research import query_reports
-            try:
-                import backtest.buffett as bt_buf
-                sl5 = set(bt_buf.shortlist_by_turnover(min_turnover=5e8, k=80))
-                sl5_codes = [c for c in codes if c in sl5]
-            except Exception:
-                sl5_codes = codes
+            sl5_codes = _shortlist_codes(codes, min_turnover=5e8, k=80)
             spot_price = {}
             if "latest_price" in df.columns:
                 lp = pd.to_numeric(df["latest_price"], errors="coerce")
                 spot_price = dict(zip(df["code"].astype(str), lp))
             cov, bull, upside = {}, {}, {}
             any_rows = False
+            try:
+                _all_rpt = query_reports(None, days=days, limit=0)["rows"]
+            except Exception:
+                _all_rpt = []
+            _rpt_by_code: dict[str, list] = {}
+            for _r in _all_rpt or []:
+                _rpt_by_code.setdefault(str(_r.get("code")), []).append(_r)
             for c in sl5_codes:
-                rpt = query_reports(c, days=days)["rows"]
+                rpt = _rpt_by_code.get(str(c), [])
                 if not rpt:
                     continue
                 any_rows = True
@@ -1229,8 +1258,19 @@ def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[di
         batch = sm_query._behavior_batch(codes, days=days)
     except Exception:
         batch = {}
+    import concurrent.futures as _cf
+
+    def _safe_phase(c):
+        try:
+            return sm_query.main_force_phase(c, days=days)
+        except Exception:
+            return None
+
     deadline = _time.monotonic() + 20.0  # 标签富集总预算 20s,超时停止
-    for it in main:
+    _ex = _cf.ThreadPoolExecutor(max_workers=4)
+    _futs = [(it, _ex.submit(_safe_phase, str(it.get("code")))) for it in main]
+    try:
+      for it, _fu in _futs:
         code = str(it.get("code"))
         b = batch.get(code, {})
         for key in ("streak_inflow", "streak_outflow", "cum_inflow", "margin_accel", "north_cum"):
@@ -1246,10 +1286,16 @@ def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[di
             it["behavior_group"] = "质量待观察(富集超时)"
             it.setdefault("warnings", []).append("主力阶段标签因富集超时未取")
             continue
+        if _time.monotonic() >= deadline:
+            _fu.cancel()
         try:
-            phase = sm_query.main_force_phase(code, days=days)
-            it["mf_phase"] = phase.get("phase")
-            it["mf_confidence"] = _to_float(phase.get("confidence"))
+            phase = _fu.result(timeout=max(0.0, deadline - _time.monotonic()))
+            if phase:
+                it["mf_phase"] = phase.get("phase")
+                it["mf_confidence"] = _to_float(phase.get("confidence"))
+            else:
+                it["mf_phase"] = None
+                it["mf_confidence"] = None
         except Exception:
             it["mf_phase"] = None
             it["mf_confidence"] = None
@@ -1268,6 +1314,10 @@ def _enrich_main_behavior(main: list[dict], universe: str, days: int) -> list[di
             it["behavior_group"] = "高质量×主力洗盘"
         else:
             it["behavior_group"] = "质量待观察"
+    except Exception:
+        pass
+    finally:
+        _ex.shutdown(wait=False, cancel_futures=True)
     return main
 
 
@@ -1362,27 +1412,32 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     conf_summary = {"high": 0, "medium": 0, "low": 0, "low_excluded": 0}
     # radar 多通道净流出 risk_flag（spec 2026-09-16）：out_count>=2 → risk_flag
     try:
-        from screener import smart_money as _sm_rf
-        _rad_out = _sm_rf.radar_resonance_for(codes, days=days)
+        _rad_out = _radar_for(codes, days=days)
     except Exception:
         _rad_out = {}
+    _code_s = df["code"].astype(str) if "code" in df.columns else pd.Series([], dtype=str)
+    _spot_by_code = {str(c): r for c, r in zip(_code_s.tolist(), df.to_dict("records"))}
+    _name_by_code = dict(zip(_code_s.tolist(), df["name"].astype(str).tolist())) \
+        if "name" in df.columns else {}
+    try:
+        _hist_counts = close.notna().sum().to_dict() \
+            if close is not None and not close.empty else {}
+    except Exception:
+        _hist_counts = {}
     for c in codes:
         ds = scores.get(c, {})
         res, hits = _resonance(ds, dim_thresh, weights, resonance_mode)
-        name = df.loc[df["code"].astype(str) == c, "name"].iloc[0] \
-            if "name" in df.columns else c
+        name = _name_by_code.get(c, c)
         # 数据可信度 + 硬门槛 + 风险调整（spec 2026-09-05）
-        spot_row = None
-        _msk = df["code"].astype(str) == c
-        if _msk.any():
-            spot_row = df[_msk].iloc[0].to_dict()
+        spot_row = _spot_by_code.get(c)
         behavior_days, fundamental_ok, research_count = _conf_inputs(
             universe, dim_status, ds, days)
         conf = _data_confidence(c, spot_row, close, ds,
                                 behavior_days=behavior_days,
                                 fundamental_ok=fundamental_ok,
                                 research_count=research_count,
-                                universe=universe)
+                                universe=universe,
+                                n_hist=_hist_counts.get(c))
         # 财务红旗已在 _dim_scores 口径2 的 _bad 预筛剔除，此处传 fundamental=None 不重复判定
         gate = _quality_gate({"code": c}, conf, fundamental=None,
                              behavior_days=behavior_days)

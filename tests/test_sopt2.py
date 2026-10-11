@@ -53,3 +53,32 @@ def test_strength_floor_and_inflow_clip():
     out = e._add_derived(df)
     assert out["strength"].iloc[0] == 10.0 / 0.5
     assert abs(out["inflow_pct"].iloc[0]) <= 500
+
+
+def test_radar_memo_reuses_cache(monkeypatch):
+    import backtest.quality as q
+    q._RADAR_MEMO.clear()
+    calls = []
+
+    def fake(codes, days=5):
+        calls.append(1)
+        return {c: {"has_data": True, "in_count": 1} for c in codes}
+
+    monkeypatch.setattr("screener.smart_money.radar_resonance_for", fake)
+    q._radar_for(["b", "a"], days=5)
+    q._radar_for(["a", "b"], days=5)
+    assert len(calls) == 1
+
+
+def test_shortlist_memo(monkeypatch):
+    import backtest.quality as q
+    q._SHORTLIST_MEMO.clear()
+    monkeypatch.setattr("backtest.buffett.shortlist_by_turnover",
+                        lambda min_turnover=5e8, k=80: ["a"])
+    assert q._shortlist_codes(["a", "b"]) == ["a"]
+
+    def boom(min_turnover=5e8, k=80):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr("backtest.buffett.shortlist_by_turnover", boom)
+    assert q._shortlist_codes(["a", "b"]) == ["a"]
