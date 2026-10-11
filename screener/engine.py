@@ -13,8 +13,8 @@ from .conditions import VALID_OPS
 
 
 # 派生因子(纯筛选维度，不打分不荐股)：查询时实时计算，不落库。
-#   activity   = 换手率 × |涨跌幅|            活跃度
-#   momentum   = 涨跌幅 × 换手率               动量(带符号)
+#   activity   = 换手率 × |涨跌幅|            活跃度(只看强度不带方向)
+#   momentum   = 涨跌幅 × 换手率               动量(带符号，下跌为负)
 #   strength   = 涨跌幅 ÷ 振幅                 强弱比(振幅为0时缺失)
 #   liquidity  = 成交额 ÷ 流通市值 × 100        资金比(%)
 #   inflow_pct = 主力净流入 ÷ 成交额 × 100      主力净流入占比(%)
@@ -39,14 +39,28 @@ def _add_derived(df: pd.DataFrame) -> pd.DataFrame:
         df["momentum"] = tr * cp
     am = num("amplitude")
     if cp is not None and am is not None:
-        df["strength"] = cp / am.where(am > 0)
+        df["strength"] = cp / am.clip(lower=0.5)
     amt, mc = num("turnover_amount"), num("circulating_market_cap")
     if amt is not None and mc is not None:
-        df["liquidity"] = amt / mc.where(mc > 0) * 100
+        df["liquidity"] = (amt / mc.where(mc > 0) * 100).clip(-1000, 1000)
     fl = num("main_net_inflow")
     if fl is not None and amt is not None:
-        df["inflow_pct"] = fl / amt.where(amt > 0) * 100
+        df["inflow_pct"] = (fl / amt.where(amt > 1e6) * 100).clip(-500, 500)
     return df
+
+
+def _coerce_scalar(v):
+    """coerce numeric condition values; bool/None rejected."""
+    if isinstance(v, bool) or v is None:
+        return None, False
+    if isinstance(v, (int, float)):
+        return v, True
+    if isinstance(v, str):
+        try:
+            return float(v.strip().rstrip("%")), True
+        except ValueError:
+            return None, False
+    return None, False
 
 
 def _apply_conditions(df: pd.DataFrame,
@@ -71,34 +85,79 @@ def _apply_conditions(df: pd.DataFrame,
             topn_conds.append(c)
             continue
         col = pd.to_numeric(df[field], errors="coerce")
-        if op == "gt":
-            df = df[col > value]
-        elif op == "gte":
-            df = df[col >= value]
-        elif op == "lt":
-            df = df[col < value]
-        elif op == "lte":
-            df = df[col <= value]
-        elif op == "eq":
-            df = df[col == value]
-        elif op == "ne":
-            df = df[col != value]
-        elif op == "between":
+        if op == "between":
             if not (isinstance(value, (list, tuple)) and len(value) == 2):
                 skipped.append(f"between 需 [lo,hi] 二元组，收到: {value!r}")
                 continue
-            lo, hi = value
+            lo, ok1 = _coerce_scalar(value[0])
+            hi, ok2 = _coerce_scalar(value[1])
+            if not (ok1 and ok2):
+                skipped.append(f"between 边界非数值，收到: {value!r}")
+                continue
+            if lo > hi:
+                lo, hi = hi, lo
+                skipped.append(f"between 上下界已自动纠正为 [{lo},{hi}]")
             df = df[(col >= lo) & (col <= hi)]
+            continue
+        if op in ("eq", "ne"):
+            try:
+                df = df[col == value] if op == "eq" else df[col != value]
+            except TypeError:
+                skipped.append(f"条件比较失败已跳过: {field} {op} {value!r}")
+            continue
+        v, ok = _coerce_scalar(value)
+        if not ok:
+            skipped.append(f"条件值非数值已跳过: {field} {op} {value!r}")
+            continue
+        try:
+            if op == "gt":
+                df = df[col > v]
+            elif op == "gte":
+                df = df[col >= v]
+            elif op == "lt":
+                df = df[col < v]
+            elif op == "lte":
+                df = df[col <= v]
+        except TypeError:
+            skipped.append(f"条件比较失败已跳过: {field} {op} {value!r}")
 
-    # topn/topn_asc 在其它过滤之后应用：按该字段降序/升序取前 N
-    for c in topn_conds:
-        field = c["field"]
-        n = int(c["value"])
-        ascending = (c.get("op") == "topn_asc")
-        df = df.sort_values(field, ascending=ascending,
-                            na_position="last").head(n)
+    # topn 多条件取交集(各字段分别排名后求交)，避免串行 head 依赖条件顺序；
+    # 单个 topn 保持原语义。结果按首个 topn 字段排序。
+    if topn_conds:
+        try:
+            sets = []
+            for c in topn_conds:
+                n = max(1, int(float(c["value"])))
+                ascending = (c.get("op") == "topn_asc")
+                top_idx = set(df.sort_values(c["field"], ascending=ascending,
+                                             na_position="last").head(n).index)
+                sets.append(top_idx)
+            inter = set.intersection(*sets) if sets else set()
+            df = df.loc[df.index.isin(inter)]
+            first = topn_conds[0]
+            df = df.sort_values(first["field"],
+                                ascending=(first.get("op") == "topn_asc"),
+                                na_position="last")
+        except (KeyError, TypeError, ValueError):
+            skipped.append(f"topn 条件非法已跳过: {topn_conds!r}")
 
     return df, skipped
+
+
+_BOARD_LIMIT_PCT = (("北交", 29.9), ("创业", 19.9), ("科创", 19.9))
+
+
+def _limit_pct_for(board, default):
+    b = str(board or "")
+    for key, pct in _BOARD_LIMIT_PCT:
+        if key in b:
+            return pct
+    return default
+
+
+def _is_st_name(name):
+    s = str(name or "").strip().upper().lstrip("*").strip()
+    return s.startswith("ST")
 
 
 def _sort_df(df: pd.DataFrame, sort: str | None,
@@ -141,6 +200,9 @@ def filter_boards(category: str = "行业",
 
     df = _add_derived(df)
     df, skipped = _apply_conditions(df, conditions)
+    if sort is not None and sort not in df.columns:
+        skipped.append("badsort:" + str(sort))
+        sort = None
     df = _sort_df(df, sort, asc)
     if limit:
         df = df.head(int(limit))
@@ -162,6 +224,9 @@ def filter_etfs(conditions: list | None = None,
     df = pd.DataFrame(etfs)
     df = _add_derived(df)
     df, skipped = _apply_conditions(df, conditions)
+    if sort is not None and sort not in df.columns:
+        skipped.append("badsort:" + str(sort))
+        sort = None
     df = _sort_df(df, sort, asc)
     if limit:
         df = df.head(int(limit))
@@ -171,24 +236,36 @@ def filter_etfs(conditions: list | None = None,
 
 def _tradable_stocks(df: pd.DataFrame, min_turnover: float,
                      limit_pct: float) -> pd.DataFrame:
-    """个股可交易预筛：排除 ST/停牌/涨停/低成交额。limit_pct=9.9 对科创/创业/北交误杀，已知。"""
+    """个股可交易预筛：排除 ST/停牌/涨停/低成交额。涨停线按板块区分(有 board 列时)。"""
     if df is None or df.empty:
         return df
     mask = pd.Series(True, index=df.index)
     if "name" in df.columns:
-        mask &= ~df["name"].astype(str).str.contains("ST", case=False, na=False)
+        mask &= ~df["name"].astype(str).map(_is_st_name)
     if "latest_price" in df.columns:
         lp = pd.to_numeric(df["latest_price"], errors="coerce")
         mask &= lp.notna() & (lp > 0)
     if "turnover_amount" in df.columns:
         mask &= pd.to_numeric(df["turnover_amount"], errors="coerce").fillna(0) >= min_turnover
     if "change_pct" in df.columns:
-        mask &= pd.to_numeric(df["change_pct"], errors="coerce").fillna(-99) < limit_pct
+        cp = pd.to_numeric(df["change_pct"], errors="coerce").fillna(-99)
+        board_col = next((c for c in ("board", "market", "plate") if c in df.columns), None)
+        if board_col is not None:
+            thr = df[board_col].astype(str).map(lambda b: _limit_pct_for(b, limit_pct))
+            mask &= cp < pd.to_numeric(thr, errors="coerce").fillna(limit_pct)
+        else:
+            mask &= cp < limit_pct
     return df[mask]
 
 
 #: live 增强只覆盖截断后头部（get_quote 批量 80/批，全市场 5000+ 逐个取太慢）。
 LIVE_ENRICH_K = 100
+
+#: live 实时字段：仅 live=True 增强后可筛；live=False 时相关条件诚实跳过。
+LIVE_FIELDS = {"live_price", "live_change_pct", "live_imbalance"}
+
+#: stock_spot 快照进程缓存 30s（高频点筛选免全表重读；写后最多 30s 可见）。
+_STOCK_SPOT_CACHE: list = [0.0, None]
 
 
 def _live_quote_map(codes: list[str]) -> dict:
@@ -199,14 +276,18 @@ def _live_quote_map(codes: list[str]) -> dict:
         return {}
     try:
         from data import pytdx_client
-        out = {}
-        for q in pytdx_client.get_quote(pure) or []:
-            code = str(q.get("code") or "")[-6:]
-            if code:
-                out[code] = q
-        return out
     except Exception:
         return {}
+    out = {}
+    for i in range(0, len(pure), 80):
+        try:
+            for q in pytdx_client.get_quote(pure[i:i + 80]) or []:
+                code = str((q or {}).get("code") or "")[-6:]
+                if code:
+                    out[code] = q
+        except Exception:
+            continue
+    return out
 
 
 def _bid_ask_imbalance(q: dict) -> float | None:
@@ -271,14 +352,30 @@ def filter_stocks(conditions: list | None = None,
     live_imbalance + live_source 行字段（缺值 None 不伪造）；失败自动降级快照。
     返回结构与 filter_etfs 一致：{rows, total, skipped, category, live_source}。"""
     conditions = conditions or []
-    rows = db.query_rows("stock_spot")
+    import time as _time
+    _now = _time.time()
+    if _now - _STOCK_SPOT_CACHE[0] < 30 and _STOCK_SPOT_CACHE[1] is not None:
+        rows = _STOCK_SPOT_CACHE[1]
+    else:
+        rows = db.query_rows("stock_spot")
+        _STOCK_SPOT_CACHE[0] = _now
+        _STOCK_SPOT_CACHE[1] = rows
     if not rows:
         return {"rows": [], "total": 0, "skipped": ["个股数据为空，先 /api/refresh"],
                 "category": "个股", "live_source": "snapshot"}
     df = pd.DataFrame(rows)
     df = _tradable_stocks(df, min_turnover, limit_pct)
     df = _add_derived(df)
-    df, skipped = _apply_conditions(df, conditions)
+    live_conds = [c for c in conditions if c.get("field") in LIVE_FIELDS]
+    base_conds = [c for c in conditions if c.get("field") not in LIVE_FIELDS]
+    skipped = []
+    if live_conds and not live:
+        skipped += ["live:" + str(c.get("field")) for c in live_conds]
+    df, _sk = _apply_conditions(df, base_conds)
+    skipped += _sk
+    if sort is not None and sort not in df.columns:
+        skipped.append("badsort:" + str(sort))
+        sort = None
     df = _sort_df(df, sort, asc)
     if limit:
         df = df.head(int(limit))
@@ -289,6 +386,13 @@ def filter_stocks(conditions: list | None = None,
         _, live_source = _enrich_live(head)
         for r in out[len(head):]:
             r["live_source"] = "snapshot"
+        if live_conds:
+            if len(out) >= LIVE_ENRICH_K:
+                skipped.append("livehead:%d" % LIVE_ENRICH_K)
+            ldf = pd.DataFrame(head)
+            ldf, _lsk = _apply_conditions(ldf, live_conds)
+            skipped += _lsk
+            out = ldf.astype(object).where(pd.notna(ldf), None).to_dict("records")
     return {"rows": out, "total": len(out), "skipped": skipped,
             "category": "个股", "live_source": live_source}
 
