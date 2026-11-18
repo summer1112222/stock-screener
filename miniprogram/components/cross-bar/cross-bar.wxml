@@ -1,0 +1,10 @@
+<view class="cross-bar" wx:if="{{chips.length}}">
+  <view class="cross-title">跨清单位置（头部前 {{chips.length}} · 只读已有穿透字段，不触网）</view>
+  <scroll-view scroll-x class="cross-scroll" enable-flex>
+    <view class="cross-chip" wx:for="{{chips}}" wx:key="code"
+          data-code="{{item.code}}" bindtap="onChipTap">
+      <text>{{item.text}}</text>
+      <text wx:if="{{item.extra.length}}" class="cross-extra"> · {{item.extraText}}</text>
+    </view>
+  </scroll-view>
+</view>

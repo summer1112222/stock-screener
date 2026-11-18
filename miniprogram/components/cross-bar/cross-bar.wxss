@@ -1,0 +1,26 @@
+.cross-bar {
+  border: 1rpx solid var(--border);
+  border-radius: 8rpx;
+  padding: 12rpx 16rpx;
+  margin-bottom: 12rpx;
+  background: rgba(59, 130, 246, .05);
+}
+.cross-title {
+  font-size: 22rpx;
+  color: var(--muted);
+  margin-bottom: 8rpx;
+}
+.cross-scroll {
+  white-space: nowrap;
+}
+.cross-chip {
+  display: inline-block;
+  border: 1rpx solid var(--border);
+  border-radius: 8rpx;
+  padding: 4rpx 14rpx;
+  margin: 0 8rpx 8rpx 0;
+  font-size: 22rpx;
+}
+.cross-extra {
+  color: var(--muted);
+}
