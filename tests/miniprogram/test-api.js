@@ -61,7 +61,8 @@ test('statusCode>=400 也按失败处理(可重试)', async () => {
   api.setTransport(() => { calls++; return results[calls - 1]; });
   const res = await api.request({ path: '/api/meta', retry: true });
   assert.equal(calls, 2);
-  assert.deepEqual(res.data, { ok: 1 });
+  // request resolve 的是响应体(_wrap 后 JSON)，transport 的 data 字段即 body
+  assert.deepEqual(res, { ok: 1 });
 });
 
 test('默认不重试：单次失败直接 reject', async () => {
