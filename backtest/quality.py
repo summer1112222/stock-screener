@@ -697,6 +697,10 @@ def _flow_factor_series(codes: list, days: int, quote_codes=None) -> dict:
     quote_codes: 限小名单取盘口(shortlist)，默认全 codes；触网失败→缺省不崩。"""
     codes_l = [str(c) for c in codes]
     qc = [str(c) for c in (quote_codes if quote_codes is not None else codes_l)]
+    # 被单测直接调用时也清一次 memo，避免被之前 quality_rank 调用的 stale 缓存命中；
+    # 单次计算内的去重收益(与 _dim_scores 共享)不受影响。
+    _RADAR_MEMO.clear()
+    _SHORTLIST_MEMO.clear()
     # radar 共振 in_count（主子因子，走 _radar_for memo）
     in_count = {c: None for c in codes_l}
     try:
@@ -1378,6 +1382,10 @@ def quality_rank(universe="stock", days=20, weights=None, min_dims=2,
     # 结果缓存：盘中 30s TTL（盘口精排需高频刷新），盘后 5min（计算重避免重复重算）
     import time as _time
     in_session = _is_in_session()
+    # 跨调用 memo(_RADAR_MEMO/_SHORTLIST_MEMO)只用于单次 quality_rank 计算内去重：
+    # radar/shortlist 各最多查一次，不跨请求复用，避免 stale 结果污染后续调用(单测 mock 失效等)。
+    _RADAR_MEMO.clear()
+    _SHORTLIST_MEMO.clear()
     _key = (universe, days, min_dims, dim_thresh, min_turnover, max_per_board,
             max_corr, limit, min_signals, limit_pct, combo_method, resonance_mode,
             refine, refine_pool, strict_quality, min_confidence, risk_penalty,
