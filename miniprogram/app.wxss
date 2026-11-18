@@ -1,0 +1,83 @@
+/* 蓬蒿者全局样式 —— 色板移植自 web/index.html :root 变量
+   深色默认；浅色经 prefers-color-scheme 适配（小程序跟随系统外观）。
+   注意中国习惯：--up 红涨 --down 绿跌。 */
+page {
+  --bg: #0B0F1A;
+  --surface: #141A2A;
+  --surface-2: #1B2336;
+  --border: #243049;
+  --text: #E8EDF7;
+  --muted: #8A97B0;
+  --dim: #5C6884;
+  --primary: #3B82F6;
+  --accent: #F59E0B;
+  --up: #E53935;
+  --down: #16A34A;
+  --warn: #F59E0B;
+  --radius: 14rpx;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 28rpx;
+  line-height: 1.5;
+  font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  page {
+    --bg: #F4F6FB;
+    --surface: #FFFFFF;
+    --surface-2: #EDF0F7;
+    --border: #D9DFEC;
+    --text: #1A2333;
+    --muted: #5C6884;
+    --dim: #8A97B0;
+    --up: #D32F2F;
+    --down: #16A34A;
+  }
+}
+
+.num { font-family: Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.dim { color: var(--dim); }
+.up { color: var(--up); }
+.down { color: var(--down); }
+
+.card {
+  background: var(--surface);
+  border: 1rpx solid var(--border);
+  border-radius: var(--radius);
+  padding: 20rpx 24rpx;
+  margin-bottom: 16rpx;
+}
+.card-t {
+  font-size: 24rpx;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 1rpx;
+}
+.disclaimer {
+  font-size: 22rpx;
+  color: var(--dim);
+  padding: 16rpx 8rpx 40rpx;
+  border-top: 1rpx dashed var(--border);
+  word-break: break-all;
+}
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 60rpx 0;
+  font-size: 26rpx;
+}
+.loading {
+  color: var(--muted);
+  font-size: 24rpx;
+  padding: 12rpx 0;
+}
+.badge {
+  display: inline-block;
+  font-size: 20rpx;
+  border: 1rpx solid var(--border);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+  margin-left: 8rpx;
+  color: var(--muted);
+}

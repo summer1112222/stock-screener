@@ -1,0 +1,30 @@
+{
+  "pages": [
+    "pages/smart/smart",
+    "pages/quality/quality",
+    "pages/nextday/nextday"
+  ],
+  "window": {
+    "navigationBarTitleText": "蓬蒿者",
+    "navigationBarBackgroundColor": "#0B0F1A",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#0B0F1A",
+    "backgroundTextStyle": "light"
+  },
+  "tabBar": {
+    "color": "#8A97B0",
+    "selectedColor": "#E8EDF7",
+    "backgroundColor": "#141A2A",
+    "borderStyle": "black",
+    "list": [
+      { "pagePath": "pages/smart/smart", "text": "主力动向" },
+      { "pagePath": "pages/quality/quality", "text": "优质筛选" },
+      { "pagePath": "pages/nextday/nextday", "text": "次日强势" }
+    ]
+  },
+  "networkTimeout": {
+    "request": 180000
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

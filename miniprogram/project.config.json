@@ -1,0 +1,13 @@
+{
+  "description": "蓬蒿者——stock-screener 随身客户端（个人自用）",
+  "appid": "touristappid",
+  "compileType": "miniprogram",
+  "projectname": "penghaozhe",
+  "libVersion": "latest",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "postcss": true,
+    "minified": true
+  }
+}
