@@ -6,7 +6,7 @@
 const api = require('../../utils/api.js');
 const { fmtNum, fmtFixed } = require('../../utils/fmt.js');
 const {
-  buildQualityPath, REASON_ZH, dimChips, phaseBadge, DIM_NAMES
+  buildQualityPath, REASON_ZH, dimChips, phaseBadge, DIM_NAMES, pickDisclaimer
 } = require('../../utils/quality_view.js');
 
 const FIVE_MIN = 5 * 60 * 1000;
@@ -103,7 +103,7 @@ Page({
         degradeText: degrade,
         summaryText: summary,
         noteText: note,
-        disclaimer: d.disclaimer || FALLBACK_DISCLAIMER,
+        disclaimer: pickDisclaimer(r, FALLBACK_DISCLAIMER),
         byDimOpen: false
       });
       this._renderMain(d.main || []);

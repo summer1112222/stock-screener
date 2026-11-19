@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-  QUALITY_DEFAULT_PATH, buildQualityPath, REASON_ZH, dimChips, phaseBadge
+  QUALITY_DEFAULT_PATH, buildQualityPath, REASON_ZH, dimChips, phaseBadge, pickDisclaimer
 } = require('../../miniprogram/utils/quality_view.js');
 
 // 把 query 串解析成参数 map(测试工具)
@@ -71,4 +71,15 @@ test('phaseBadge 出货红/吸筹绿/缺失灰', () => {
   assert.equal(phaseBadge('洗盘').cls, 'warn');
   assert.equal(phaseBadge(null).cls, 'muted');
   assert.equal(phaseBadge(null).text, '—');
+});
+
+test('pickDisclaimer:读顶层 cand_disclaimer 不落 fallback(评审 I1)', () => {
+  // 后端真实结构:_wrap 把 cand_disclaimer 放在顶层,data(quality_rank dict)里没有
+  const r = { data: { main: [] }, cand_disclaimer: '后端真实合规文案', update_time: 't' };
+  assert.equal(pickDisclaimer(r, 'FALLBACK'), '后端真实合规文案');
+  // data 内带(兼容其他域)优先
+  assert.equal(pickDisclaimer({ data: { cand_disclaimer: '内层' }, cand_disclaimer: '顶层' }, 'FALLBACK'), '内层');
+  // 全缺失才落 fallback
+  assert.equal(pickDisclaimer({}, 'FALLBACK'), 'FALLBACK');
+  assert.equal(pickDisclaimer(null, 'FALLBACK'), 'FALLBACK');
 });

@@ -63,6 +63,7 @@
       <view class="row-head"><text class="strong">{{item.actor}}</text></view>
       <view class="row-metrics">
         <text class="{{item.amountCls}} num">累计 {{item.amount}}</text>
+        <text wx:if="{{item.shares}}" class="muted small">{{item.shares}}</text>
         <text class="muted small">{{item.n}} 次</text>
       </view>
     </view>

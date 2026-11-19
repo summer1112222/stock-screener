@@ -63,10 +63,20 @@ test('buildNextdayPath:mode/filter 三档参数照抄网页 ndLoad 映射', () =
   const wide = buildNextdayPath('strict', 'wide');
   assert.ok(wide.includes('min_change_pct=1&min_turnover=1.5&max_price=80'));
   assert.ok(wide.includes('min_mv=5&max_mv=300&max_pe=200&exclude_st=0'));
-  // 全部=不过滤
-  const all = buildNextdayPath('strict', 'all');
-  assert.ok(all.includes('min_change_pct=0&min_turnover=0&max_price=9999'));
-  assert.ok(all.includes('min_mv=0&max_mv=999999&max_pe=9999&exclude_st=0'));
   // mode=score
   assert.ok(buildNextdayPath('score', 'strict').includes('selection_mode=score'));
+});
+
+test('all 档钳到 server Query 合法上限(9999/999999 会 422)', () => {
+  const all = buildNextdayPath('strict', 'all');
+  // server: max_price le=5000.0, max_mv le=100000.0 —— 越界值 FastAPI 直接 422
+  assert.ok(all.includes('min_change_pct=0&min_turnover=0&max_price=5000'));
+  assert.ok(all.includes('min_mv=0&max_mv=100000&max_pe=9999&exclude_st=0'));
+  assert.ok(!all.includes('max_price=9999'), 'max_price 不得越界 5000');
+  assert.ok(!all.includes('max_mv=999999'), 'max_mv 不得越界 100000');
+});
+
+test('默认 days=30/limit=50 对齐网页下拉默认与 tracker DEFAULT_PARAMS', () => {
+  const p = buildNextdayPath('strict', 'strict');
+  assert.ok(p.includes('days=30&limit=50'), '默认窗口/数量须与三处对齐口径一致(网页 selected 30/50,tracker DEFAULT_PARAMS["nextday"] 30/50)');
 });

@@ -87,12 +87,18 @@ function sortCodeRows(arr, metric, desc) {
   );
 }
 
+// 按席位聚合:金额通道累计 amount(元),股数通道单独累计 shares(股)绝不混比
+// (单位隔离同 codeMetrics;网页版此处混比是已知缺陷,本端不照抄——见评审 I3)
 function aggByActor(rows) {
   const m = {};
   (rows || []).forEach(x => {
     const a = x.actor || '—';
-    if (!m[a]) m[a] = { actor: a, amount: 0, n: 0 };
-    m[a].amount += (_num(x.amount) || 0);
+    if (!m[a]) m[a] = { actor: a, amount: 0, hasAmt: false, shares: 0, hasShares: false, n: 0 };
+    const amt = _num(x.amount);
+    if (amt !== null) {
+      if (_isShares(x.channel || '')) { m[a].shares += amt; m[a].hasShares = true; }
+      else { m[a].amount += amt; m[a].hasAmt = true; }
+    }
     m[a].n += 1;
   });
   // 默认按 |累计净额| 降序(照网页默认 SK=amount/SD=desc 的 _cmp 语义)

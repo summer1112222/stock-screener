@@ -49,7 +49,15 @@ function phaseBadge(phase, confidence) {
 // 口径名(照 web dimNames)
 const DIM_NAMES = { 1: '风险调整', 2: '价值质量', 3: '资金流向', 4: '多信号', 5: '景气' };
 
+// 免责文案取值:后端 _wrap 把 cand_disclaimer 放在响应顶层,data(quality_rank
+// dict)里没有——先顶层后内层,全缺失才落 fallback,保证页脚照后端口径不新造(评审 I1)
+function pickDisclaimer(r, fallback) {
+  const d = (r && r.data) || {};
+  return d.cand_disclaimer || (r && r.cand_disclaimer) ||
+    d.disclaimer || (r && r.disclaimer) || fallback;
+}
+
 module.exports = {
   QUALITY_DEFAULT_PATH, buildQualityPath, REASON_ZH,
-  dimChips, phaseBadge, DIM_NAMES
+  dimChips, phaseBadge, DIM_NAMES, pickDisclaimer
 };

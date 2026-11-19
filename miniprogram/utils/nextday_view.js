@@ -53,19 +53,24 @@ function factorCell(x, key) {
   return String(Math.round(Number(v) * 100));
 }
 
-// filter 三档参数映射(照抄网页 ndLoad:strict=5步漏斗默认/wide=放宽/all=不过滤)
+// filter 三档参数映射(照抄网页 ndLoad:strict=5步漏斗默认/wide=放宽/all=不过滤;
+// 'all' 档把网页的 9999/999999 钳到 server Query 合法上限 max_price≤5000/
+// max_mv≤100000——越界值 FastAPI 直接 422,网页原值在本端会必失败,见评审 C1)
 const _FILTER_PARAMS = {
   strict: { mcp: 5, mt: 3, mp: 50, mvLo: 10, mvHi: 200, pe: 150, est: 1 },
   wide: { mcp: 1, mt: 1.5, mp: 80, mvLo: 5, mvHi: 300, pe: 200, est: 0 },
-  all: { mcp: 0, mt: 0, mp: 9999, mvLo: 0, mvHi: 999999, pe: 9999, est: 0 }
+  all: { mcp: 0, mt: 0, mp: 5000, mvLo: 0, mvHi: 100000, pe: 9999, est: 0 }
 };
 
 // mode: strict|score(URL selection_mode);flt: strict|wide|all
+// 默认 days=30/limit=50:对齐网页 ndDays/ndLimit selected 默认与
+// tracker.DEFAULT_PARAMS["nextday"]——手机请求落 list_track 默认组
+// 且与网页共享 30s 进程缓存键(见评审 I2)
 function buildNextdayPath(mode, flt, days, limit) {
   const p = _FILTER_PARAMS[flt] || _FILTER_PARAMS.strict;
   const m = mode === 'score' ? 'score' : 'strict';
-  const d = days === undefined ? 90 : days;
-  const l = limit === undefined ? 100 : limit;
+  const d = days === undefined ? 30 : days;
+  const l = limit === undefined ? 50 : limit;
   return '/api/nextday-strong?universe=stock&days=' + d + '&limit=' + l +
     '&selection_mode=' + m +
     '&min_change_pct=' + p.mcp + '&min_turnover=' + p.mt + '&max_price=' + p.mp +

@@ -81,6 +81,26 @@ test('aggByActor 累计净额与次数', () => {
   assert.equal(arr[0].actor, 'A营业部');
 });
 
+test('aggByActor 单位隔离:股数通道不入金额累计,单独记 shares(评审 I3)', () => {
+  const rows = [
+    { actor: '某基金', channel: '龙虎榜', amount: -100 },     // 金额通道
+    { actor: '某基金', channel: '十大股东', amount: 5000 },   // 股数通道(股)
+    { actor: '纯股东', channel: '限售解禁', amount: 3000 }    // 仅股数
+  ];
+  const arr = aggByActor(rows);
+  const a = arr.find(x => x.actor === '某基金');
+  assert.equal(a.amount, -100, '金额累计只含金额通道,股数 5000 不得混入');
+  assert.equal(a.hasAmt, true);
+  assert.equal(a.shares, 5000, '股数单独累计');
+  assert.equal(a.hasShares, true);
+  assert.equal(a.n, 2);
+  const b = arr.find(x => x.actor === '纯股东');
+  assert.equal(b.amount, 0);
+  assert.equal(b.hasAmt, false, '无金额通道行 hasAmt=false(页面显—不伪造 0 元)');
+  assert.equal(b.shares, 3000);
+  assert.equal(b.hasShares, true);
+});
+
 test('filterRows chip 通道过滤 + q code/name/actor 命中', () => {
   const chipOnly = filterRows(MIXED, { chip: '龙虎榜' });
   assert.equal(chipOnly.length, 2);

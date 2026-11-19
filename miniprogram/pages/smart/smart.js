@@ -135,10 +135,12 @@ Page({
         };
       });
     } else if (viewMode === 'actor') {
+      // 单位隔离:金额通道累计显元,股数通道单独显'股'(评审 I3 修复的消费端)
       rows = aggByActor(filtered).map(x => ({
         actor: x.actor,
-        amount: fmtNum(x.amount),
-        amountCls: x.amount >= 0 ? 'pos' : 'neg',
+        amount: x.hasAmt ? fmtNum(x.amount) : '—',
+        amountCls: x.hasAmt ? (x.amount >= 0 ? 'pos' : 'neg') : 'muted',
+        shares: x.hasShares ? (fmtNum(x.shares) + '股') : '',
         n: x.n
       }));
     } else {
