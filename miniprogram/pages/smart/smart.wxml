@@ -1,1 +1,99 @@
-<view class="empty">建设中 —— Task 5 实现三视图聚合</view>
+<view class="page">
+  <!-- 通道灯 -->
+  <scroll-view wx:if="{{channels.length}}" scroll-x class="ch-bar">
+    <view class="ch-lamp {{item.cls}}" wx:for="{{channels}}" wx:key="name"
+          data-idx="{{index}}" bindtap="onChannelTap">
+      <text>{{item.icon}}{{item.name}}{{item.rows}}</text>
+      <text wx:if="{{item.short}}" class="ch-err">{{item.short}}</text>
+    </view>
+  </scroll-view>
+
+  <!-- 错误条(后端不可达等) -->
+  <view wx:if="{{error}}" class="err-bar">{{error}}</view>
+
+  <view wx:if="{{loading}}" class="loading">加载中…(首次约几秒)</view>
+
+  <!-- 跨清单摘要条 -->
+  <cross-bar items="{{crossItems}}" bind:chiptap="onCrossChipTap" />
+
+  <view wx:if="{{updateText}}" class="update muted">{{updateText}}</view>
+
+  <!-- 搜索 + chips + 视图切换 -->
+  <view class="ctrl">
+    <input class="search" placeholder="代码/名称/席位" value="{{q}}" bindinput="onSearch" />
+    <view class="seg">
+      <view class="seg-item {{viewMode==='code'?'on':''}}" data-mode="code" bindtap="onViewMode">按个股</view>
+      <view class="seg-item {{viewMode==='actor'?'on':''}}" data-mode="actor" bindtap="onViewMode">按席位</view>
+      <view class="seg-item {{viewMode==='flow'?'on':''}}" data-mode="flow" bindtap="onViewMode">明细流</view>
+    </view>
+    <scroll-view scroll-x class="chips">
+      <view class="chip {{item.active?'on':''}} {{item.n===0?'dim':''}}"
+            wx:for="{{chips}}" wx:key="key"
+            data-chip="{{item.key}}" bindtap="onChipTap">
+        {{item.label}} {{item.n}}
+      </view>
+    </scroll-view>
+  </view>
+
+  <!-- code 视图 -->
+  <block wx:if="{{viewMode==='code'}}">
+    <view class="card" wx:for="{{rows}}" wx:key="code">
+      <view class="row-head">
+        <text class="strong">{{item.code}} {{item.name}}</text>
+        <text class="muted small">{{item.market}}</text>
+        <text wx:if="{{item.qualityPct}}" class="badge">{{item.qualityPct}}</text>
+      </view>
+      <view class="row-metrics">
+        <text class="{{item.intensityCls}} num">强度 {{item.intensity}}</text>
+        <text class="muted small">通道 {{item.nch}}</text>
+        <text class="muted small">正向 {{item.ratio}}</text>
+      </view>
+      <view class="ch-grid">
+        <view class="ch-cell" wx:for="{{item.chList}}" wx:for-item="c" wx:key="ch">
+          <text class="muted small">{{c.ch}}{{c.isShares?'(股)':''}}</text>
+          <text class="num {{c.cls}}">{{c.amt}}</text>
+        </view>
+      </view>
+    </view>
+  </block>
+
+  <!-- actor 视图 -->
+  <block wx:if="{{viewMode==='actor'}}">
+    <view class="card" wx:for="{{rows}}" wx:key="actor">
+      <view class="row-head"><text class="strong">{{item.actor}}</text></view>
+      <view class="row-metrics">
+        <text class="{{item.amountCls}} num">累计 {{item.amount}}</text>
+        <text class="muted small">{{item.n}} 次</text>
+      </view>
+    </view>
+  </block>
+
+  <!-- flow 视图 -->
+  <block wx:if="{{viewMode==='flow'}}">
+    <view class="card" wx:for="{{rows}}" wx:key="key">
+      <view class="row-head">
+        <text class="strong">{{item.code}} {{item.name}}</text>
+        <text class="muted small">{{item.date}}</text>
+      </view>
+      <view class="row-metrics">
+        <text class="muted small">{{item.channel}} · {{item.actor}} · {{item.action}}</text>
+      </view>
+      <view class="row-metrics">
+        <text class="{{item.amountCls}} num">{{item.amount}}</text>
+        <text class="{{item.intensityCls}} num small">强度 {{item.intensity}}</text>
+      </view>
+    </view>
+  </block>
+
+  <view wx:if="{{!loading && !rows.length && !error}}" class="empty">
+    无当日主力动向(先在电脑端采集；东财被封通道显示未采集)
+  </view>
+
+  <!-- 展开/收起(首屏50防上千行卡死) -->
+  <view wx:if="{{total>50}}" class="toggle" bindtap="onToggleFull">
+    {{full?'收起前50':'展开全部 '+total}}
+  </view>
+  <view wx:if="{{total>50}}" class="muted small center">首屏前50（共{{total}}行）</view>
+
+  <view class="disclaimer">{{disclaimer}}</view>
+</view>

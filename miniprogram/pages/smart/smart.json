@@ -1,3 +1,7 @@
 {
-  "navigationBarTitleText": "主力动向"
+  "navigationBarTitleText": "主力动向",
+  "enablePullDownRefresh": true,
+  "usingComponents": {
+    "cross-bar": "/components/cross-bar/cross-bar"
+  }
 }

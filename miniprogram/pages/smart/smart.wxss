@@ -1,1 +1,55 @@
-/* 主力动向页样式（占位） */
+/* 主力动向页 */
+.page { padding: 16rpx; }
+
+.ch-bar { white-space: nowrap; margin-bottom: 12rpx; }
+.ch-lamp {
+  display: inline-block; border: 1rpx solid var(--border); border-radius: 8rpx;
+  padding: 4rpx 14rpx; margin-right: 10rpx; font-size: 22rpx;
+}
+.ch-lamp.ok { color: var(--down); }      /* ●绿=正常采集(注意红涨绿跌惯例,通道灯绿=ok) */
+.ch-lamp.warn { color: var(--warn); }
+.ch-lamp.fail { color: var(--dim); }
+.ch-err { opacity: .7; font-size: 20rpx; margin-left: 6rpx; }
+
+/* 正净流入=绿(对齐网页 #16A34A)/负=橙(#F59E0B);--down 即绿色(红涨绿跌惯例) */
+.pos { color: var(--down); }
+.neg { color: var(--warn); }
+
+.err-bar {
+  background: rgba(229, 57, 53, .12); border: 1rpx solid var(--up);
+  color: var(--up); border-radius: 8rpx; padding: 12rpx 16rpx;
+  font-size: 24rpx; margin-bottom: 12rpx;
+}
+
+.update { font-size: 22rpx; margin: 4rpx 0 8rpx; }
+
+.ctrl { margin-bottom: 12rpx; }
+.search {
+  background: var(--bg); border: 1rpx solid var(--border); border-radius: 10rpx;
+  padding: 10rpx 16rpx; font-size: 26rpx; margin-bottom: 10rpx;
+}
+.seg { display: flex; border: 1rpx solid var(--border); border-radius: 10rpx; overflow: hidden; }
+.seg-item { flex: 1; text-align: center; padding: 8rpx 0; font-size: 24rpx; color: var(--muted); }
+.seg-item.on { background: var(--surface-2); color: var(--text); }
+
+.chips { white-space: nowrap; margin-top: 10rpx; }
+.chip {
+  display: inline-block; border: 1rpx solid var(--border); border-radius: 8rpx;
+  padding: 4rpx 14rpx; margin-right: 10rpx; font-size: 22rpx; color: var(--muted);
+}
+.chip.on { color: var(--text); border-color: var(--primary); }
+.chip.dim { opacity: .4; }
+
+.row-head { display: flex; align-items: center; gap: 12rpx; margin-bottom: 6rpx; }
+.strong { font-weight: 600; font-size: 28rpx; }
+.row-metrics { display: flex; gap: 24rpx; margin: 4rpx 0; flex-wrap: wrap; }
+.small { font-size: 22rpx; }
+
+.ch-grid { display: flex; flex-wrap: wrap; gap: 8rpx 24rpx; margin-top: 8rpx; }
+.ch-cell { display: flex; flex-direction: column; min-width: 130rpx; }
+
+.toggle {
+  text-align: center; border: 1rpx solid var(--border); border-radius: 10rpx;
+  padding: 12rpx 0; margin: 16rpx 0 8rpx; color: var(--muted); font-size: 24rpx;
+}
+.center { text-align: center; }
