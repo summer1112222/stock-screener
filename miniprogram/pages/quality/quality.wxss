@@ -1,1 +1,62 @@
-/* 优质筛选页样式（占位） */
+/* 优质筛选页 */
+.page { padding: 16rpx; }
+
+.err-bar {
+  background: rgba(229, 57, 53, .12); border: 1rpx solid var(--up);
+  color: var(--up); border-radius: 8rpx; padding: 12rpx 16rpx;
+  font-size: 24rpx; margin-bottom: 12rpx;
+}
+.warn-bar {
+  border: 1rpx solid var(--warn); border-radius: 8rpx; padding: 8rpx 12rpx;
+  color: var(--warn); background: rgba(245, 158, 11, .08);
+  font-size: 22rpx; margin: 8rpx 0;
+}
+
+.update { font-size: 22rpx; margin: 4rpx 0 8rpx; }
+.status { font-size: 22rpx; margin: 6rpx 0; }
+.summary { font-size: 22rpx; margin: 6rpx 0; }
+
+.ctrl { display: flex; align-items: center; gap: 12rpx; margin-bottom: 12rpx; }
+.seg { flex: 1; display: flex; border: 1rpx solid var(--border); border-radius: 10rpx; overflow: hidden; }
+.seg-item { flex: 1; text-align: center; padding: 8rpx 0; font-size: 24rpx; color: var(--muted); }
+.seg-item.on { background: var(--surface-2); color: var(--text); }
+.reload { padding: 8rpx 12rpx; }
+
+/* 口径灯(同主力页通道灯范式) */
+.ch-bar { white-space: nowrap; margin-bottom: 12rpx; }
+.ch-lamp {
+  display: inline-block; border: 1rpx solid var(--border); border-radius: 8rpx;
+  padding: 4rpx 14rpx; margin-right: 10rpx; font-size: 22rpx;
+}
+.ch-lamp.ok { color: var(--down); }
+.ch-lamp.warn { color: var(--warn); }
+
+.row-head { display: flex; align-items: center; gap: 12rpx; margin-bottom: 6rpx; flex-wrap: wrap; }
+.strong { font-weight: 600; font-size: 28rpx; }
+.row-metrics { display: flex; gap: 24rpx; margin: 4rpx 0; flex-wrap: wrap; }
+.small { font-size: 22rpx; }
+
+/* 主力阶段徽章配色 */
+.badge.neg { color: var(--up); border-color: var(--up); }
+.badge.pos { color: var(--down); border-color: var(--down); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+
+/* 五口径分位小色块:hi绿/mid黄/lo灰/missing 橙—缺失诚实 */
+.dim-row { display: flex; gap: 8rpx; margin: 8rpx 0; flex-wrap: wrap; }
+.dim-chip {
+  font-size: 20rpx; color: #fff; border-radius: 4rpx; padding: 2rpx 8rpx;
+}
+.dim-chip.hi { background: var(--down); }
+.dim-chip.mid { background: var(--warn); }
+.dim-chip.lo { background: #9CA3AF; }
+.dim-chip.missing { background: rgba(245, 158, 11, .3); color: var(--warn); }
+
+.pos { color: var(--down); }
+.neg { color: var(--warn); }
+.risk { color: var(--up); margin-top: 4rpx; }
+
+.fold-toggle { color: var(--muted); font-size: 24rpx; padding: 8rpx 4rpx; }
+.fold-toggle.big { text-align: center; border: 1rpx solid var(--border); border-radius: 10rpx; margin: 16rpx 0 8rpx; }
+.reasons { padding: 4rpx 8rpx; word-break: break-all; }
+
+.dim-line { display: flex; gap: 16rpx; padding: 4rpx 0; align-items: center; flex-wrap: wrap; }

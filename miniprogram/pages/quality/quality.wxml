@@ -1,1 +1,91 @@
-<view class="empty">建设中 —— Task 6 实现严格/宽松预设</view>
+<view class="page">
+  <!-- 错误条(后端不可达/超时) -->
+  <view wx:if="{{error}}" class="err-bar">{{error}}</view>
+
+  <view wx:if="{{loading}}" class="loading">{{loadingText}}</view>
+
+  <!-- 跨清单摘要条 -->
+  <cross-bar items="{{crossItems}}" bind:chiptap="onCrossChipTap" />
+
+  <view wx:if="{{updateText}}" class="update muted">{{updateText}}</view>
+
+  <!-- 预设切换:严格(默认,命中预热缓存)/宽松(偏离缓存键,切档前预告) -->
+  <view class="ctrl">
+    <view class="seg">
+      <view class="seg-item {{preset==='strict'?'on':''}}" data-preset="strict" bindtap="onPresetTap">严格(默认)</view>
+      <view class="seg-item {{preset==='loose'?'on':''}}" data-preset="loose" bindtap="onPresetTap">宽松</view>
+    </view>
+    <view class="reload small muted" bindtap="onReload">⟳ 重拉</view>
+  </view>
+
+  <!-- 状态条:主清单N/耗时/<2s缓存命中 -->
+  <view wx:if="{{statusText}}" class="status muted small">{{statusText}}</view>
+
+  <!-- 口径状态灯 -->
+  <scroll-view wx:if="{{dimLights.length}}" scroll-x class="ch-bar">
+    <view class="ch-lamp {{item.cls}}" wx:for="{{dimLights}}" wx:key="k"
+          data-idx="{{index}}" bindtap="onDimLightTap">
+      <text>●口径{{item.k}} {{item.short}}</text>
+    </view>
+  </scroll-view>
+
+  <!-- 精排降级提示(同网页 _renderQsDegrade) -->
+  <view wx:if="{{degradeText}}" class="warn-bar">{{degradeText}}</view>
+
+  <!-- 摘要:请求/严格合格/排除四项 -->
+  <view wx:if="{{summaryText}}" class="summary muted small">{{summaryText}}</view>
+
+  <!-- 严格口径宁缺毋滥提示 -->
+  <view wx:if="{{noteText}}" class="warn-bar">{{noteText}}</view>
+
+  <!-- 主清单卡片 -->
+  <view class="card" wx:for="{{main}}" wx:key="code">
+    <view class="row-head">
+      <text class="strong">{{item.code}} {{item.name}}</text>
+      <text wx:if="{{item.phase.text}}" class="badge {{item.phase.cls}}">{{item.phase.text}}</text>
+    </view>
+    <view class="row-metrics">
+      <text class="num">共振 {{item.resonance}}</text>
+      <text class="muted small">命中 {{item.hits}}</text>
+      <text wx:if="{{item.conf}}" class="muted small">可信度 {{item.conf}}</text>
+    </view>
+    <!-- 五口径分位横排:缺失橙—不伪造 -->
+    <view class="dim-row">
+      <view class="dim-chip {{d.cls}}" wx:for="{{item.dims}}" wx:for-item="d" wx:key="k">
+        {{d.k}}:{{d.pct==null ? '—' : d.pct}}
+      </view>
+    </view>
+    <!-- 主力行为行:阶段徽章+连续天数+累计净额 -->
+    <view class="row-metrics small">
+      <text class="{{item.phase.cls}}">{{item.beh}}</text>
+      <text class="muted small">累计 {{item.cumNet}}</text>
+    </view>
+    <view wx:if="{{item.riskFlags}}" class="risk small">⚠ {{item.riskFlags}}</view>
+    <view wx:if="{{item.reasons}}" class="fold-toggle" data-idx="{{index}}" bindtap="onToggleReasons">
+      {{item.reasonsOpen ? '▾ 理由' : '▸ 理由'}}
+    </view>
+    <view wx:if="{{item.reasonsOpen}}" class="reasons muted small">{{item.reasons}}</view>
+  </view>
+
+  <view wx:if="{{!loading && !main.length && !error}}" class="empty">
+    无严格合格标的(宁缺毋滥,可切宽松档或稍后再拉)
+  </view>
+
+  <!-- by_dim 各口径诊断折叠区 -->
+  <view wx:if="{{byDimSections.length}}" class="fold-toggle big" bindtap="onToggleByDim">
+    {{byDimOpen ? '▾ 各口径诊断' : '▸ 各口径诊断(' + byDimSections.length + ')'}}
+  </view>
+  <block wx:if="{{byDimOpen}}">
+    <view class="card" wx:for="{{byDimSections}}" wx:for-item="sec" wx:key="k">
+      <view class="card-t">口径{{sec.k}} {{sec.name}}（{{sec.rows.length}}）</view>
+      <view class="dim-line" wx:for="{{sec.rows}}" wx:for-item="r" wx:key="code">
+        <text class="strong small">{{r.code}} {{r.name}}</text>
+        <text class="num small">{{r.score}}</text>
+        <text class="num small">{{r.resonance}}</text>
+        <text class="small {{r.ok ? 'pos' : 'neg'}}">{{r.st}}</text>
+      </view>
+    </view>
+  </block>
+
+  <view class="disclaimer">{{disclaimer}}</view>
+</view>
