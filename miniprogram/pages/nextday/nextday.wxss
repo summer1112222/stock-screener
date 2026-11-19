@@ -1,1 +1,48 @@
-/* 次日强势页样式（占位） */
+/* 次日强势页 */
+.page { padding: 16rpx; }
+
+.err-bar {
+  background: rgba(229, 57, 53, .12); border: 1rpx solid var(--up);
+  color: var(--up); border-radius: 8rpx; padding: 12rpx 16rpx;
+  font-size: 24rpx; margin-bottom: 12rpx;
+}
+
+.update { font-size: 22rpx; margin: 4rpx 0 8rpx; }
+.status { font-size: 22rpx; margin: 6rpx 0; word-break: break-all; }
+.summary { font-size: 22rpx; margin: 6rpx 0 10rpx; }
+
+.ctrl { display: flex; align-items: center; gap: 12rpx; margin-bottom: 10rpx; }
+.ctrl .seg { flex: 1; }
+.reload { padding: 8rpx 12rpx; }
+.seg { display: flex; border: 1rpx solid var(--border); border-radius: 10rpx; overflow: hidden; margin-bottom: 10rpx; }
+.seg-item { flex: 1; text-align: center; padding: 8rpx 0; font-size: 24rpx; color: var(--muted); }
+.seg-item.on { background: var(--surface-2); color: var(--text); }
+.cover-seg .seg-item { font-size: 22rpx; }
+
+.row-head { display: flex; align-items: center; gap: 12rpx; margin-bottom: 6rpx; }
+.strong { font-weight: 600; font-size: 28rpx; }
+.score { margin-left: auto; font-size: 32rpx; font-weight: 700; }
+.row-metrics { display: flex; gap: 24rpx; margin: 4rpx 0; flex-wrap: wrap; }
+.small { font-size: 22rpx; }
+.tiny { font-size: 20rpx; }
+
+.pos { color: var(--down); }
+.miss { color: var(--warn); }        /* 缺数据橙,诚实标注非伪造 */
+.risk { color: var(--up); font-weight: 600; }
+
+/* 五步徽章 */
+.steps { display: flex; align-items: center; gap: 8rpx; margin: 6rpx 0; }
+.step { font-weight: 700; font-size: 26rpx; }
+.step.pass { color: var(--down); }
+.step.fail { color: var(--up); }
+.step.missing { color: var(--warn); }
+.fail-hint { font-size: 20rpx; color: var(--warn); margin-left: 8rpx; }
+
+/* 五因子横排 */
+.factor-row { display: flex; gap: 16rpx; margin: 8rpx 0; flex-wrap: wrap; }
+.factor { display: flex; flex-direction: column; align-items: center; min-width: 70rpx; }
+
+.fold-toggle { color: var(--muted); font-size: 24rpx; padding: 8rpx 4rpx; }
+.reasons { padding: 2rpx 8rpx; word-break: break-all; }
+
+.legend { font-size: 20rpx; padding: 12rpx 0; word-break: break-all; }

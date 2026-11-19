@@ -1,1 +1,90 @@
-<view class="empty">建设中 —— Task 7 实现五步徽章视图</view>
+<view class="page">
+  <!-- 错误条 -->
+  <view wx:if="{{error}}" class="err-bar">{{error}}</view>
+
+  <view wx:if="{{loading}}" class="loading">{{loadingText}}</view>
+
+  <!-- 跨清单摘要条 -->
+  <cross-bar items="{{crossItems}}" bind:chiptap="onCrossChipTap" />
+
+  <view wx:if="{{updateText}}" class="update muted">{{updateText}}</view>
+
+  <!-- mode + filter + 覆盖率三组控件 -->
+  <view class="ctrl">
+    <view class="seg">
+      <view class="seg-item {{mode==='strict'?'on':''}}" data-mode="strict" bindtap="onModeTap">严格</view>
+      <view class="seg-item {{mode==='score'?'on':''}}" data-mode="score" bindtap="onModeTap">因子分</view>
+    </view>
+    <view class="reload small muted" bindtap="onReload">⟳ 重拉</view>
+  </view>
+  <view class="seg">
+    <view class="seg-item {{flt==='strict'?'on':''}}" data-flt="strict" bindtap="onFltTap">漏斗·严格</view>
+    <view class="seg-item {{flt==='wide'?'on':''}}" data-flt="wide" bindtap="onFltTap">漏斗·宽敞</view>
+    <view class="seg-item {{flt==='all'?'on':''}}" data-flt="all" bindtap="onFltTap">全部</view>
+  </view>
+  <view class="seg cover-seg">
+    <view class="seg-item {{coverMin===50?'on':''}}" data-v="50" bindtap="onCoverTap">覆盖≥50%</view>
+    <view class="seg-item {{coverMin===30?'on':''}}" data-v="30" bindtap="onCoverTap">覆盖≥30%</view>
+    <view class="seg-item {{coverMin===0?'on':''}}" data-v="0" bindtap="onCoverTap">全部</view>
+  </view>
+
+  <!-- 状态/摘要行 -->
+  <view wx:if="{{summaryText}}" class="status muted small">{{summaryText}}</view>
+  <view wx:if="{{total}}" class="summary muted small">
+    候选 {{total}} · 五步全过 {{passCount}} · 含缺数据 {{missingCount}} · 平均覆盖率 {{coverPct}}%
+  </view>
+
+  <!-- 卡片列表 -->
+  <view class="card" wx:for="{{items}}" wx:key="key">
+    <view class="row-head">
+      <text class="muted small">{{item.rank}}</text>
+      <text class="strong">{{item.code}} {{item.name}}</text>
+      <text class="score num">{{item.score}}</text>
+    </view>
+    <view class="row-metrics small">
+      <text wx:if="{{item.baseScore}}" class="muted small">基础 {{item.baseScore}}</text>
+      <text class="muted small">{{item.board}}</text>
+      <text class="muted small">{{item.hard}} 硬</text>
+    </view>
+    <!-- 雷达三列:共振0-3/boost>1才显绿/风险红 -->
+    <view class="row-metrics small">
+      <text class="num {{item.radarInMiss?'miss':'muted'}}">共振 {{item.radarIn}}</text>
+      <text class="num {{item.boostOn?'pos':'muted'}}">{{item.boost}}</text>
+      <text wx:if="{{item.riskFlag}}" class="num risk">{{item.riskFlag}}</text>
+    </view>
+    <!-- 五步徽章:✓绿 ×红 ?橙 + 首失败步骤 -->
+    <view class="steps">
+      <text wx:for="{{item.steps}}" wx:for-item="st" wx:key="index"
+            class="step {{st.cls}}">{{st.icon}}</text>
+      <text wx:if="{{item.failHint}}" class="fail-hint">{{item.failHint}}</text>
+    </view>
+    <!-- 五因子分横排:缺失橙— -->
+    <view class="factor-row">
+      <view class="factor {{f.miss?'miss':''}}" wx:for="{{item.factors}}" wx:for-item="f" wx:key="k">
+        <text class="muted tiny">{{f.k}}</text>
+        <text class="num small {{f.miss?'miss':''}}">{{f.v}}</text>
+      </view>
+    </view>
+    <view class="row-metrics small">
+      <text class="muted small">覆盖 {{item.cover}}</text>
+      <text class="muted small">{{item.source}}</text>
+    </view>
+    <view class="fold-toggle" data-idx="{{index}}" bindtap="onToggleReasons">
+      {{item.reasonsOpen ? '▾ 步骤原因' : '▸ 步骤原因'}}
+    </view>
+    <block wx:if="{{item.reasonsOpen}}">
+      <view class="reasons muted small" wx:for="{{item.reasonLines}}" wx:for-item="l" wx:key="*this">{{l}}</view>
+      <view class="muted small">缺失：{{item.missingText}}</view>
+    </block>
+  </view>
+
+  <view wx:if="{{!loading && !items.length && !error}}" class="empty">
+    无清单(粗筛全空或 stock_spot 空,先在电脑端 /api/refresh;或放开覆盖率/漏斗档)
+  </view>
+
+  <view class="legend muted small">
+    状态:绿✓通过 红×未过 橙?数据不足;综合分为横截面分位,仅机械排序。共振=主力金额通道净流入计数(0-3),boost=共振加权系数,风险=多通道净流出标记;均为机械统计非买卖信号。
+  </view>
+
+  <view class="disclaimer">{{disclaimer}}</view>
+</view>
