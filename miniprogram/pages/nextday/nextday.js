@@ -38,6 +38,7 @@ Page({
   onLoad() {
     this._raw = [];
     this._loaded = false;
+    this._seq = 0;
   },
 
   onShow() {
@@ -75,12 +76,14 @@ Page({
     this._loaded = true;
     const t0 = Date.now();
     const { mode, flt } = this.data;
+    const seq = ++this._seq;   // 在途守卫:旧档响应后到直接丢弃(评审 M2)
     try {
       const r = await api.request({
         path: buildNextdayPath(mode, flt),
         timeout: 90000,     // 30s 缓存+首次约 45s
         retry: true         // 对齐网页 _qsFetch 重试一次
       });
+      if (seq !== this._seq) return;
       const d = r.data || {};
       const dt = ((Date.now() - t0) / 1000).toFixed(1);
       this._raw = d.items || [];
@@ -115,7 +118,9 @@ Page({
     const items = this._raw.filter(x => Number(x.score_coverage || 0) >= th).map(x => {
       const ff = firstFail(x);
       const states = [0, 1, 2, 3, 4].map(i => stepState(x, i));
+      // k=步序号(1-5)供 wx:key="k" 唯一键(评审 M3)
       const steps = states.map((st, i) => ({
+        k: i + 1,
         icon: st === 'pass' ? '✓' : (st === 'missing' ? '?' : '×'),
         cls: st
       }));

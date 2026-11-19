@@ -8,9 +8,11 @@ const {
   aggByCode, codeMetrics, sortCodeRows, aggByActor,
   filterRows, capRows, channelCounts
 } = require('../../utils/smart_agg.js');
+const { allSettled } = require('../../utils/promise.js');
 
 const FIVE_MIN = 5 * 60 * 1000;
 const PAGE_SIZE = 50;
+const FULL_CAP = 300;   // 展开全量上限(网页 flow 视图 CAP 同款,防 1000 行 setData 卡真机)
 const FALLBACK_DISCLAIMER = '主力动向观察清单，机械归类，非荐股非买卖信号，盈亏自负';
 
 let _lastLoad = 0;
@@ -36,6 +38,7 @@ Page({
     this._raw = [];
     this._qpMap = {};
     this._loaded = false;
+    this._seq = 0;
   },
 
   onShow() {
@@ -50,11 +53,13 @@ Page({
     this.setData({ loading: true, error: '' });
     _lastLoad = Date.now();
     this._loaded = true;
+    const seq = ++this._seq;   // 在途守卫:旧响应后到直接丢弃(评审 M2)
     try {
-      const [chRes, tdRes] = await Promise.allSettled([
+      const [chRes, tdRes] = await allSettled([
         api.request({ path: '/api/smart-money/channels', timeout: 30000 }),
         api.request({ path: '/api/smart-money/today?days=7' })
       ]);
+      if (seq !== this._seq) return;
       // 通道灯(失败不阻塞清单,只不显示灯)
       let channels = [];
       if (chRes.status === 'fulfilled') {
@@ -128,9 +133,9 @@ Page({
           qualityPct: this._qpMap[e.code] != null ? 'Q' + (this._qpMap[e.code] * 100).toFixed(0) : '',
           chList: e.chList.map(c => ({
             ch: c.ch,
-            amt: c.amt ? (fmtNum(c.amt) + (c.isShares ? '股' : '')) : '—',
+            amt: c.hasAmt ? (fmtNum(c.amt) + (c.isShares ? '股' : '')) : '—',
             isShares: c.isShares,
-            cls: c.amt > 0 ? 'pos' : (c.amt < 0 ? 'neg' : 'muted')
+            cls: c.hasAmt ? (c.amt > 0 ? 'pos' : (c.amt < 0 ? 'neg' : 'muted')) : 'muted'
           }))
         };
       });
@@ -161,7 +166,7 @@ Page({
     }
     const total = rows.length;
     this.setData({
-      rows: full ? rows : capRows(rows, PAGE_SIZE),
+      rows: full ? capRows(rows, FULL_CAP) : capRows(rows, PAGE_SIZE),
       total,
       chips: this._buildChips()
     });

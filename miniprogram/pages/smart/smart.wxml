@@ -90,11 +90,13 @@
     无当日主力动向(先在电脑端采集；东财被封通道显示未采集)
   </view>
 
-  <!-- 展开/收起(首屏50防上千行卡死) -->
+  <!-- 展开/收起(首屏50防上千行卡死;全量上限300防低端真机卡顿) -->
   <view wx:if="{{total>50}}" class="toggle" bindtap="onToggleFull">
-    {{full?'收起前50':'展开全部 '+total}}
+    {{full?'收起前50':'展开 '+(total>300?300:total)+' 行'}}
   </view>
-  <view wx:if="{{total>50}}" class="muted small center">首屏前50（共{{total}}行）</view>
+  <view wx:if="{{total>50}}" class="muted small center">
+    首屏前50（共{{total}}行{{total>300?'，全量上限300':''}}）
+  </view>
 
   <view class="disclaimer">{{disclaimer}}</view>
 </view>

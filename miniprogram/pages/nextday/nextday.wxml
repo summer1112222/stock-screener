@@ -54,7 +54,7 @@
     </view>
     <!-- 五步徽章:✓绿 ×红 ?橙 + 首失败步骤 -->
     <view class="steps">
-      <text wx:for="{{item.steps}}" wx:for-item="st" wx:key="index"
+      <text wx:for="{{item.steps}}" wx:for-item="st" wx:key="k"
             class="step {{st.cls}}">{{st.icon}}</text>
       <text wx:if="{{item.failHint}}" class="fail-hint">{{item.failHint}}</text>
     </view>

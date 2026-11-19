@@ -36,6 +36,7 @@ Page({
 
   onLoad() {
     this._loaded = false;
+    this._seq = 0;
   },
 
   onShow() {
@@ -65,12 +66,14 @@ Page({
     _lastLoad = Date.now();
     this._loaded = true;
     const t0 = Date.now();
+    const seq = ++this._seq;   // 在途守卫:旧预设响应后到直接丢弃(评审 M2)
     try {
       const r = await api.request({
         path: buildQualityPath(preset),
         timeout: 170000,   // 冷缓存 ~67s,留余量;app.json networkTimeout=180000
         retry: true        // 对齐网页 _qsFetch:失败自动重试一次
       });
+      if (seq !== this._seq) return;
       const d = r.data || {};
       const dt = ((Date.now() - t0) / 1000).toFixed(1);
       const dimLights = Object.entries(d.dim_status || {}).map(([k, v]) => {

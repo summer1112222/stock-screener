@@ -101,6 +101,21 @@ test('aggByActor 单位隔离:股数通道不入金额累计,单独记 shares(�
   assert.equal(b.hasShares, true);
 });
 
+test('chList 带 hasAmt:全缺失行与真实对冲 0 可区分(评审 M1)', () => {
+  const rows = [
+    { code: 'A', channel: '龙虎榜', amount: null },   // 无金额行
+    { code: 'B', channel: '龙虎榜', amount: 100 },
+    { code: 'B', channel: '龙虎榜', amount: -100 }    // 对冲后恰 0,但确实有金额
+  ];
+  const entries = aggByCode(rows);
+  const a = entries.find(e => e.code === 'A');
+  const b = entries.find(e => e.code === 'B');
+  assert.equal(a.chList[0].hasAmt, false, 'A 全缺失行 hasAmt=false → 页面显 —');
+  assert.equal(a.chList[0].amt, 0);
+  assert.equal(b.chList[0].hasAmt, true, 'B 有金额通道行 hasAmt=true → 0 也如实显示');
+  assert.equal(b.chList[0].amt, 0);
+});
+
 test('filterRows chip 通道过滤 + q code/name/actor 命中', () => {
   const chipOnly = filterRows(MIXED, { chip: '龙虎榜' });
   assert.equal(chipOnly.length, 2);

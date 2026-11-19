@@ -46,6 +46,7 @@ function aggByCode(rows) {
     o.chList = ordered.map(ch => ({
       ch,
       amt: o.byCh[ch].amt,
+      hasAmt: o.byCh[ch].hasAmt,
       n: o.byCh[ch].n,
       isShares: _isShares(ch)
     }));
